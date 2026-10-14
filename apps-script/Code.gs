@@ -1,0 +1,278 @@
+/**
+ * Bhimlekha (workout tracker) — Google Apps Script backend.
+ *
+ * Paste this whole file into the Apps Script editor bound to your Google Sheet (Extensions → Apps Script),
+ * run setup() once, set the TOKEN script property, then deploy as a Web app (Execute as Me, access: Anyone).
+ *
+ * The web app accepts:
+ *   POST {scriptUrl}                       body: { token, action: "submit", session: {...} }
+ *   GET  {scriptUrl}?action=ping&token=…
+ *   GET  {scriptUrl}?action=history&token=…&days=120
+ *
+ * One row is written per set. Writing is idempotent by Session ID: submitting the same session twice adds
+ * nothing and returns { ok: true, duplicate: true, rows: 0 }.
+ */
+
+var SHEET_NAME = 'Log';
+var HEADERS = [
+  'Timestamp',
+  'Date',
+  'Session ID',
+  'Day',
+  'Exercise',
+  'Set #',
+  'Reps',
+  'To failure',
+  'Weight (kg)',
+  'Volume (kg)',
+  'Session notes',
+  'Avg HR (bpm)',
+  'Active kcal',
+  'Score /10',
+  'Satisfaction',
+];
+// Column numbers (1-based) used below. The last five are per-session and filled on a session's first row only.
+var COL = {
+  timestamp: 1, date: 2, sessionId: 3, day: 4, exercise: 5, setNo: 6, reps: 7, toFailure: 8, weight: 9, volume: 10,
+  notes: 11, avgHr: 12, kcal: 13, score: 14, satisfaction: 15,
+};
+
+/**
+ * Run this once from the editor. Creates the Log sheet with its header row and prints the next steps.
+ */
+function setup() {
+  var sheet = getLogSheet_();
+  Logger.log('Sheet "%s" is ready with %s columns.', sheet.getName(), HEADERS.length);
+  var token = PropertiesService.getScriptProperties().getProperty('TOKEN');
+  if (token) {
+    Logger.log('TOKEN is set. Deploy → New deployment → Web app (Execute as Me, Anyone) and copy the /exec URL.');
+  } else {
+    Logger.log('Next: Project Settings (gear icon) → Script Properties → Add property: TOKEN = a long random string.');
+    Logger.log('Then Deploy → New deployment → Web app → Execute as Me → Who has access: Anyone → copy the /exec URL.');
+  }
+}
+
+/** The Log sheet, created with a bold frozen header row if it does not exist yet. */
+function getLogSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(SHEET_NAME);
+  if (sheet.getLastRow() === 0) {
+    if (sheet.getMaxColumns() < HEADERS.length) sheet.insertColumnsAfter(sheet.getMaxColumns(), HEADERS.length - sheet.getMaxColumns());
+    sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    sheet.getRange(2, COL.date, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat('@'); // keep dates as text
+  } else {
+    ensureHeaders_(sheet);
+  }
+  return sheet;
+}
+
+/**
+ * When a newer Code.gs adds columns, an existing Log sheet gets the missing header cells filled in automatically
+ * (only blank cells are written; headers you renamed yourself are left alone). Old rows simply stay blank there.
+ */
+function ensureHeaders_(sheet) {
+  if (sheet.getMaxColumns() < HEADERS.length) sheet.insertColumnsAfter(sheet.getMaxColumns(), HEADERS.length - sheet.getMaxColumns());
+  var range = sheet.getRange(1, 1, 1, HEADERS.length);
+  var current = range.getValues()[0];
+  var changed = false;
+  for (var i = 0; i < HEADERS.length; i++) {
+    if (current[i] === '' || current[i] === null || current[i] === undefined) {
+      current[i] = HEADERS[i];
+      changed = true;
+    }
+  }
+  if (changed) range.setValues([current]).setFontWeight('bold');
+}
+
+function json_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function authorized_(token) {
+  var expected = PropertiesService.getScriptProperties().getProperty('TOKEN');
+  return Boolean(expected) && typeof token === 'string' && token === expected;
+}
+
+/** GET: ping and history. */
+function doGet(e) {
+  var p = (e && e.parameter) || {};
+  if (!authorized_(p.token)) return json_({ ok: false, error: 'unauthorized' });
+  try {
+    if (p.action === 'ping') return json_({ ok: true, sheet: SHEET_NAME });
+    if (p.action === 'history') return json_({ ok: true, sessions: history_(Number(p.days) || 120) });
+    return json_({ ok: false, error: 'unknown action' });
+  } catch (err) {
+    return json_({ ok: false, error: String((err && err.message) || err) });
+  }
+}
+
+/** POST: submit a finished session. The body is a JSON string sent as text/plain (no CORS preflight). */
+function doPost(e) {
+  var body;
+  try {
+    body = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return json_({ ok: false, error: 'bad json' });
+  }
+  if (!authorized_(body.token)) return json_({ ok: false, error: 'unauthorized' });
+  if (body.action !== 'submit') return json_({ ok: false, error: 'unknown action' });
+
+  var session = body.session;
+  if (!session || typeof session.id !== 'string' || !session.id || !Array.isArray(session.sets)) {
+    return json_({ ok: false, error: 'bad session' });
+  }
+  if (!session.sets.length) return json_({ ok: false, error: 'no sets' });
+
+  // One writer at a time, so two retries of the same session cannot both pass the duplicate check.
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var sheet = getLogSheet_();
+    if (hasSession_(sheet, session.id)) return json_({ ok: true, duplicate: true, rows: 0 });
+    var rows = buildRows_(session);
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, HEADERS.length).setValues(rows);
+    return json_({ ok: true, duplicate: false, rows: rows.length });
+  } catch (err) {
+    return json_({ ok: false, error: String((err && err.message) || err) });
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (ignore) {}
+  }
+}
+
+/** True when a row with this Session ID is already in column C. */
+function hasSession_(sheet, sessionId) {
+  var last = sheet.getLastRow();
+  if (last < 2) return false;
+  var ids = sheet.getRange(2, COL.sessionId, last - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]) === sessionId) return true;
+  }
+  return false;
+}
+
+/** "Energy 4 · Strength 3" from { Energy: 4, Strength: 3 }: one cell, readable, and the questions can change. */
+function satisfactionText_(sat) {
+  if (!sat || typeof sat !== 'object') return '';
+  return Object.keys(sat)
+    .filter(function (k) { return sat[k] !== null && sat[k] !== '' && sat[k] !== undefined; })
+    .map(function (k) { return k + ' ' + sat[k]; })
+    .join(' · ');
+}
+
+function parseSatisfaction_(text) {
+  var out = {};
+  String(text || '')
+    .split(' · ')
+    .forEach(function (part) {
+      var i = part.lastIndexOf(' ');
+      if (i > 0) {
+        var v = Number(part.slice(i + 1));
+        if (!isNaN(v)) out[part.slice(0, i)] = v;
+      }
+    });
+  return out;
+}
+
+function numberOrBlank_(v) {
+  var n = Number(v);
+  return v === null || v === undefined || v === '' || isNaN(n) ? '' : n;
+}
+
+/** One row per set, in the column order of HEADERS. Notes, heart rate, calories, score and satisfaction go on
+    the first row of the session only. */
+function buildRows_(session) {
+  var notes = String(session.notes || '');
+  var rows = [];
+  for (var i = 0; i < session.sets.length; i++) {
+    var s = session.sets[i];
+    var reps = s.reps === null || s.reps === undefined || s.reps === '' ? null : Number(s.reps);
+    var weight = Number(s.weightKg) || 0;
+    var volume = reps === null ? 0 : reps * weight;
+    var logged = s.loggedAt ? new Date(s.loggedAt) : new Date();
+    if (isNaN(logged.getTime())) logged = new Date();
+    rows.push([
+      logged, // Timestamp
+      String(session.date || ''), // Date (YYYY-MM-DD, kept as text by the column format)
+      String(session.id), // Session ID
+      String(session.dayType || ''), // Day
+      String(s.exercise || ''), // Exercise
+      Number(s.setNo) || i + 1, // Set #
+      reps === null ? '' : reps, // Reps (blank when "to failure" with no count)
+      Boolean(s.toFailure), // To failure
+      weight, // Weight (kg)
+      volume, // Volume (kg)
+      i === 0 ? notes : '', // Session notes, first row only
+      i === 0 ? numberOrBlank_(session.avgHeartRate) : '', // Avg HR (bpm)
+      i === 0 ? numberOrBlank_(session.activeCalories) : '', // Active kcal
+      i === 0 ? numberOrBlank_(session.score) : '', // Score /10
+      i === 0 ? satisfactionText_(session.satisfaction) : '', // Satisfaction
+    ]);
+  }
+  return rows;
+}
+
+/** Sessions from the last `days` days, rebuilt by grouping rows by Session ID. Newest first. */
+function history_(days) {
+  var sheet = getLogSheet_();
+  var last = sheet.getLastRow();
+  if (last < 2) return [];
+  var values = sheet.getRange(2, 1, last - 1, HEADERS.length).getValues();
+  var cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  var cutoffText = isoDate_(cutoff);
+  var tz = Session.getScriptTimeZone();
+
+  var byId = {};
+  var order = [];
+  for (var i = 0; i < values.length; i++) {
+    var r = values[i];
+    var date = r[COL.date - 1];
+    var dateText = date instanceof Date ? Utilities.formatDate(date, tz, 'yyyy-MM-dd') : String(date || '').slice(0, 10);
+    if (dateText < cutoffText) continue;
+    var id = String(r[COL.sessionId - 1] || '');
+    if (!id) continue;
+    var ts = r[COL.timestamp - 1];
+    var loggedAt = ts instanceof Date ? ts.toISOString() : String(ts || '');
+    if (!byId[id]) {
+      byId[id] = {
+        id: id, date: dateText, dayType: String(r[COL.day - 1] || ''), startedAt: loggedAt, finishedAt: loggedAt,
+        notes: '', avgHeartRate: null, activeCalories: null, score: null, satisfaction: {}, synced: true, sets: [],
+      };
+      order.push(id);
+    }
+    var session = byId[id];
+    var notes = r[COL.notes - 1];
+    if (notes && !session.notes) session.notes = String(notes);
+    if (r[COL.avgHr - 1] !== '' && session.avgHeartRate === null) session.avgHeartRate = Number(r[COL.avgHr - 1]) || null;
+    if (r[COL.kcal - 1] !== '' && session.activeCalories === null) session.activeCalories = Number(r[COL.kcal - 1]) || null;
+    if (r[COL.score - 1] !== '' && session.score === null) session.score = Number(r[COL.score - 1]) || null;
+    if (r[COL.satisfaction - 1] && !Object.keys(session.satisfaction).length) session.satisfaction = parseSatisfaction_(r[COL.satisfaction - 1]);
+    if (loggedAt && (!session.startedAt || loggedAt < session.startedAt)) session.startedAt = loggedAt;
+    if (loggedAt && (!session.finishedAt || loggedAt > session.finishedAt)) session.finishedAt = loggedAt;
+    var reps = r[COL.reps - 1];
+    session.sets.push({
+      id: id + '-' + (i + 2),
+      exercise: String(r[COL.exercise - 1] || ''),
+      setNo: Number(r[COL.setNo - 1]) || session.sets.length + 1,
+      reps: reps === '' || reps === null || reps === undefined ? null : Number(reps),
+      toFailure: r[COL.toFailure - 1] === true || String(r[COL.toFailure - 1]).toLowerCase() === 'true',
+      weightKg: Number(r[COL.weight - 1]) || 0,
+      loggedAt: loggedAt,
+    });
+  }
+  var sessions = order.map(function (id) {
+    return byId[id];
+  });
+  sessions.sort(function (a, b) {
+    return b.date < a.date ? -1 : b.date > a.date ? 1 : b.finishedAt < a.finishedAt ? -1 : 1;
+  });
+  return sessions;
+}
+
+function isoDate_(d) {
+  return Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+}
