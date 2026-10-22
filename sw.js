@@ -1,6 +1,6 @@
 /* Service worker: cache-first for the app shell so the app opens with no signal.
    Bump CACHE_VERSION on every deploy; old caches are deleted on activate. */
-const CACHE_VERSION = 'wt-v8';
+const CACHE_VERSION = 'wt-v9';
 const SHELL = [
   './',
   './index.html',
@@ -25,7 +25,9 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(CACHE_VERSION)
-      .then((cache) => cache.addAll(SHELL))
+      // cache: 'reload' skips the browser's HTTP cache. GitHub Pages lets browsers keep files for 10 minutes,
+      // so without it a release pushed soon after another could be installed with the older files.
+      .then((cache) => cache.addAll(SHELL.map((url) => new Request(url, { cache: 'reload' }))))
       .then(() => self.skipWaiting()),
   );
 });
