@@ -20,6 +20,10 @@
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
     <div id="modal" class="modal" hidden></div>
     <div id="camera" class="camera" hidden></div>
+    <div id="pickers">
+      <input id="photo-file" type="file" accept="image/*" capture="user" class="sr-only" data-change="photoFile" aria-label="Photo" tabindex="-1" />
+      <input id="vault-restore" type="file" class="sr-only" data-change="vaultRestoreFile" aria-label="Backup file" tabindex="-1" />
+    </div>
     <script src="./progress.js"></script>
     <script src="./charts.js"></script>
     <script src="./vault.js"></script>

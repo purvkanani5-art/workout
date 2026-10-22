@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -179,6 +179,7 @@ const state = {
     measureFields: DEFAULT_MEASURE_FIELDS,
     checkinDay: 0, // Sunday
     photoPoses: DEFAULT_POSES,
+    programStart: '', // YYYY-MM-DD in Week 1 of the photo folders; blank = the first logged workout
     cameraTimer: 10, // seconds of countdown on the in-app camera
     autoLockMinutes: 3,
     lastDeload: null, // YYYY-MM-DD of the last lighter week (v1.1; kept as a fallback for `deloads`)
@@ -204,7 +205,7 @@ const state = {
   ui: {
     progress: { metric: 'e1rm', range: '12w' },
     body: { field: null, range: '12w', weighIn: '', draft: null },
-    vault: { status: 'unknown', items: [], busy: '', backup: null, compare: null, viewing: null, pose: null },
+    vault: { status: 'unknown', items: [], busy: '', backup: null, compare: null, viewing: null, pose: null, faceId: null, faceStep: '', weekFiles: {}, openWeek: null },
     newRep: '',
     newField: '',
     newPose: '',
@@ -242,6 +243,46 @@ function weightField() {
 
 function poses() {
   return Array.isArray(state.settings.photoPoses) && state.settings.photoPoses.length ? state.settings.photoPoses : DEFAULT_POSES;
+}
+
+/* ----------------------------------------------------- photo week folders */
+
+/** The day Week 1 contains: the setting, else the first logged workout, else null. */
+function programStart() {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(state.settings.programStart || '')) return state.settings.programStart;
+  let first = null;
+  for (const s of state.history) if (s.date && (!first || s.date < first)) first = s.date;
+  return first;
+}
+
+/** Weeks end on the check-in day (Sunday → Monday to Sunday), so check-in photos close the week they finish. */
+function weekBounds(iso) {
+  const endDow = Number(state.settings.checkinDay) || 0;
+  const dow = new Date(Date.parse(iso)).getUTCDay();
+  const end = Progress.addDays(iso, (endDow - dow + 7) % 7);
+  return { start: Progress.addDays(end, -6), end };
+}
+
+/** { n, start, end, folder } for a photo date, e.g. folder "Week 3 - 13 Oct to 19 Oct 2026". */
+function photoWeek(iso) {
+  const { start, end } = weekBounds(iso);
+  const base = programStart();
+  const n = base ? Math.floor(Progress.daysBetween(weekBounds(base).start, start) / 7) + 1 : 1;
+  const from = formatDate(start, start.slice(0, 4) !== end.slice(0, 4));
+  return { n, start, end, folder: `Week ${n} - ${from} to ${formatDate(end)}` };
+}
+
+/** File name (no extension) for a photo, e.g. "Week-3 Biceps L"; characters Files cannot use become "-". */
+function photoFileName(week, pose) {
+  return `Week-${week.n} ${pose}`.replace(/[\\/:*?"<>|]/g, '-').trim();
+}
+
+/** Week folders whose photos changed after they were last saved to Files. */
+function unsavedWeeks() {
+  const { weeksChanged = {}, weeksSaved = {} } = state.vaultInfo;
+  return Object.keys(weeksChanged)
+    .filter((f) => !weeksSaved[f] || weeksSaved[f] < weeksChanged[f])
+    .sort((a, b) => Number(a.split(' ')[1]) - Number(b.split(' ')[1]));
 }
 
 /* ------------------------------------------------- progress engine glue */
@@ -817,11 +858,15 @@ function homeBanners() {
     </div>`);
   }
   const v = state.vaultInfo;
-  if (v.lastPhotoAt && (!v.lastBackupAt || v.lastBackupAt < v.lastPhotoAt)) {
+  const weeks = unsavedWeeks();
+  // Before the vault is first unlocked in v1.4 the week list is unknown, so fall back to the old photo/backup dates.
+  if (weeks.length || (!v.weeksChanged && v.lastPhotoAt && (!v.lastBackupAt || v.lastBackupAt < v.lastPhotoAt))) {
     out.push(`<div class="banner warn">
-      <p class="title">Photos not backed up yet</p>
-      <p class="small muted" style="margin:0">Save the encrypted backup to the Files app (iCloud Drive) so a lost phone does not lose them.</p>
-      <div class="actions"><a class="btn" href="#photos">Back up now</a></div>
+      <p class="title">Photos not saved to Files yet</p>
+      <p class="small muted" style="margin:0">${
+        weeks.length ? `${esc(weeks.map((f) => f.split(' - ')[0]).join(', '))}: save the week folder to Files → iCloud Drive → Bhimlekha.` : 'Save your week folders to Files → iCloud Drive → Bhimlekha.'
+      }</p>
+      <div class="actions"><a class="btn" href="#photos">Open Photos</a></div>
     </div>`);
   }
   return out.join('');
@@ -1544,6 +1589,14 @@ function renderBodySettings() {
         <select id="checkin-day" class="select" data-change="checkinDay">
           ${WEEKDAYS.map((d, i) => `<option value="${i}" ${Number(s.checkinDay) === i ? 'selected' : ''}>${d}</option>`).join('')}
         </select>
+        <p class="hint">Photo folders run to this day: a Sunday check-in makes each week Monday to Sunday.</p>
+      </div>
+      <div>
+        <label for="program-start">Week 1 starts in the week of</label>
+        <input id="program-start" class="input" type="date" value="${esc(s.programStart || '')}" data-change="programStart" />
+        <p class="hint">${
+          s.programStart ? 'Clear it to count from your first logged workout.' : `Blank: your first logged workout${programStart() ? ` (${esc(formatDate(programStart()))})` : ''}.`
+        } Names the Files folders, e.g. "${esc(photoWeek(todayISO()).folder)}".</p>
       </div>
       <fieldset>
         <legend>Measurements</legend>
@@ -2263,6 +2316,12 @@ const changes = {
   checkinDay(el) {
     state.settings.checkinDay = Number(el.value);
     save(KEYS.settings, state.settings);
+    render();
+  },
+  programStart(el) {
+    state.settings.programStart = /^\d{4}-\d{2}-\d{2}$/.test(el.value) ? el.value : '';
+    save(KEYS.settings, state.settings);
+    render();
   },
   cameraTimer(el) {
     const v = Math.min(30, Math.max(0, Math.round(Number(el.value) || 0)));
@@ -2759,11 +2818,17 @@ function bindEvents() {
     const fn = el && inputs[el.dataset.input];
     if (fn) fn(el, e);
   });
+  // The file pickers live outside #app (index.html) so a re-render while the iPhone camera or Files is open
+  // cannot replace the input and drop the chosen file.
+  for (const el of document.querySelectorAll('#pickers [data-change]')) {
+    el.addEventListener('change', (e) => changes[el.dataset.change]?.(el, e));
+  }
   window.addEventListener('hashchange', render);
   window.addEventListener('online', () => syncOutbox());
   document.addEventListener('visibilitychange', () => {
     // Leaving the app (home screen, app switcher, lock) locks the vault and clears decrypted photos at once.
-    if (document.visibilityState === 'hidden' && (Vault.isUnlocked() || state.ui.vault.items.length)) {
+    // Not while the Face ID sheet is up: iOS may report the page hidden behind it, and setup needs the open vault.
+    if (document.visibilityState === 'hidden' && !faceIdBusy && (Vault.isUnlocked() || state.ui.vault.items.length)) {
       lockVault();
       if (route().name === 'photos') render();
     }

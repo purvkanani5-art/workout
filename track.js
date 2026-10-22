@@ -316,6 +316,8 @@ async function queueMeasurement(entry) {
 
 let idleLock = null;
 let preparingBackup = false;
+let preparingWeeks = false;
+let faceIdBusy = false; // the Face ID sheet is up: app.js skips the lock-on-hide meanwhile
 
 function lockVault() {
   const v = state.ui.vault;
@@ -325,6 +327,8 @@ function lockVault() {
   v.items = [];
   v.compare = null;
   v.viewing = null;
+  v.weekFiles = {};
+  v.faceStep = '';
   v.pass1 = v.pass2 = v.pass3 = '';
   if (v.status === 'unlocked') v.status = 'locked';
   clearTimeout(idleLock);
@@ -347,10 +351,32 @@ async function afterPhotosRender() {
   if (v.status === 'unknown') {
     try {
       v.status = (await Vault.isSetUp()) ? (Vault.isUnlocked() ? 'unlocked' : 'locked') : 'none';
+      v.faceId = { on: await Vault.faceIdEnabled(), possible: await Vault.faceIdPossible() };
     } catch {
       v.status = 'error';
     }
     return render();
+  }
+  if (v.status === 'unlocked' && !preparingWeeks) {
+    // Share sheets must open straight from a tap, so each week's .zip is built before it is needed: the open
+    // folder and every folder not yet saved.
+    const want = weekFolders(v.items)
+      .filter((w) => !(w.folder in v.weekFiles) && (w.folder === openWeek() || unsavedWeeks().includes(w.folder)))
+      .slice(0, 4);
+    if (want.length) {
+      preparingWeeks = true;
+      for (const w of want) {
+        if (!Vault.isUnlocked()) break;
+        try {
+          v.weekFiles[w.folder] = await Vault.exportWeek(w.folder, w.items.map((it) => ({ id: it.id, fileName: it.fileName, date: it.date })));
+        } catch {
+          if (Vault.isUnlocked()) v.weekFiles[w.folder] = false; // shown as "could not prepare", not retried in a loop
+        }
+      }
+      preparingWeeks = false;
+      if (route().name === 'photos' && Vault.isUnlocked()) render();
+      return;
+    }
   }
   if ((v.status === 'locked' || v.status === 'unlocked') && !v.backup && !preparingBackup) {
     preparingBackup = true;
@@ -365,12 +391,48 @@ async function afterPhotosRender() {
   }
 }
 
-async function refreshPhotos() {
+async function refreshPhotos(changedFolder = null) {
   const v = state.ui.vault;
   Vault.revokeAll();
   v.items = await Vault.list();
   v.compare = null;
-  v.backup = null; // the file must be rebuilt to include changes
+  v.backup = null; // the files must be rebuilt to include changes
+  v.weekFiles = {};
+  noteWeeks(v.items, changedFolder);
+}
+
+/** Record each week folder's newest photo time, so Home knows which folders still need saving to Files. */
+function noteWeeks(items, changedFolder = null) {
+  const info = state.vaultInfo;
+  const changed = {};
+  for (const w of weekFolders(items)) {
+    const newest = w.items.reduce((m, it) => (it.addedAt > m ? it.addedAt : m), '');
+    const before = info.weeksChanged?.[w.folder] || '';
+    changed[w.folder] = before > newest ? before : newest;
+  }
+  if (changedFolder && changed[changedFolder]) changed[changedFolder] = nowISO(); // a photo was deleted
+  state.vaultInfo = { ...info, weeksChanged: changed, weeksSaved: info.weeksSaved || {} };
+  save(KEYS.vaultInfo, state.vaultInfo);
+}
+
+/** Photos grouped into week folders, newest week first; each item gains `week` and `fileName`. */
+function weekFolders(items) {
+  const map = new Map();
+  for (const it of items) {
+    const week = photoWeek(it.date);
+    if (!map.has(week.folder)) map.set(week.folder, { ...week, items: [] });
+    map.get(week.folder).items.push({ ...it, week, fileName: photoFileName(week, it.pose) });
+  }
+  const order = (p) => (poses().indexOf(p) === -1 ? 999 : poses().indexOf(p));
+  for (const w of map.values()) w.items.sort((a, b) => a.date.localeCompare(b.date) || order(a.pose) - order(b.pose));
+  return [...map.values()].sort((a, b) => b.start.localeCompare(a.start));
+}
+
+function openWeek() {
+  const v = state.ui.vault;
+  if (v.openWeek === '') return null; // the owner closed them all
+  const folders = weekFolders(v.items).map((w) => w.folder);
+  return folders.includes(v.openWeek) ? v.openWeek : folders[0] || null; // default: the newest week
 }
 
 function renderPhotos() {
@@ -407,33 +469,29 @@ function renderVaultSetup() {
       <h2 class="section-title" style="margin:0">Have a backup?</h2>
       <p class="hint" style="margin:0">Restore a .bhimvault file from the Files app. You will need the passcode it was made with.</p>
       <button type="button" class="btn secondary" data-action="vaultRestorePick">Restore from backup file…</button>
-      <input id="vault-restore" type="file" class="sr-only" data-change="vaultRestoreFile" />
     </section>`;
 }
 
 function renderVaultLocked() {
   const v = state.ui.vault;
+  const face = v.faceId?.on;
   return `
     <section class="card stack">
       <h2 class="section-title" style="margin:0">🔒 Vault locked</h2>
+      ${
+        face
+          ? `<button type="button" class="btn primary" data-action="vaultFaceUnlock" ${v.busy ? 'disabled' : ''}>${v.busy ? esc(v.busy) : 'Unlock with Face ID'}</button>
+             <p class="hint" style="margin:0">Or use the passcode:</p>`
+          : ''
+      }
       <div>
         <label for="vault-pass">Passcode</label>
         <input id="vault-pass" class="input" type="password" autocomplete="current-password" value="${esc(v.pass1 || '')}" data-input="vaultPass1" />
       </div>
-      <button type="button" class="btn primary" data-action="vaultUnlock" ${v.busy ? 'disabled' : ''}>${v.busy ? esc(v.busy) : 'Unlock'}</button>
+      <button type="button" class="btn ${face ? 'secondary' : 'primary'}" data-action="vaultUnlock" ${v.busy ? 'disabled' : ''}>${v.busy && !face ? esc(v.busy) : 'Unlock with passcode'}</button>
       <p class="hint" style="margin:0">Locks again when you leave this screen, close the app, or after ${esc(state.settings.autoLockMinutes)} minutes without a tap.</p>
       <button type="button" class="btn ghost secondary danger" data-action="vaultErase">Forgot passcode? Erase the vault…</button>
     </section>`;
-}
-
-function photosByDate(items) {
-  const map = new Map();
-  for (const it of items) {
-    if (!map.has(it.date)) map.set(it.date, []);
-    map.get(it.date).push(it);
-  }
-  for (const list of map.values()) list.sort((a, b) => poses().indexOf(a.pose) - poses().indexOf(b.pose));
-  return map;
 }
 
 function weeksLater(a, b) {
@@ -453,7 +511,7 @@ function renderVaultOpen() {
     `<select class="select" data-change="compareDate" data-k="${k}" aria-label="${k === 'a' ? 'Before' : 'After'} date">${dates
       .map((d) => `<option value="${esc(d)}" ${d === val ? 'selected' : ''}>${esc(formatDate(d, d.slice(0, 4) !== todayISO().slice(0, 4)))}</option>`)
       .join('')}</select>`;
-  const groups = photosByDate(v.items);
+  const target = photoWeek(v.date || todayISO());
   return `
     <section class="card stack">
       <div class="row between">
@@ -463,14 +521,16 @@ function renderVaultOpen() {
       <div>
         <label for="photo-date">Date</label>
         <input id="photo-date" type="date" class="input" value="${esc(v.date || todayISO())}" data-change="photoDate" />
+        <p class="hint" id="photo-target">📁 Goes in <strong>${esc(target.folder)}</strong> as “${esc(photoFileName(target, pose))}”</p>
       </div>
       <button type="button" class="btn primary" data-action="openCamera">📷 ${Number(state.settings.cameraTimer) ? `Camera with ${esc(state.settings.cameraTimer)} s timer` : 'Open camera'}</button>
       <p class="hint" style="margin:0">Takes ${esc(poses().join(', '))} in order, with last week's photo faintly overlaid so you can match the pose and distance.</p>
       <button type="button" class="btn secondary" data-action="pickPhoto">Use the iPhone camera instead…</button>
-      <input id="photo-file" type="file" accept="image/*" capture="user" class="sr-only" data-change="photoFile" />
       ${segmented('pose', poses().map((p) => ({ key: p, label: p })), pose, 'photoPose')}
       ${v.busy ? `<p class="status" role="status">${esc(v.busy)}</p>` : ''}
     </section>
+
+    ${renderWeekFolders()}
 
     <section class="card stack">
       <h2 class="section-title" style="margin:0">Compare · ${esc(pose)}</h2>
@@ -485,23 +545,7 @@ function renderVaultOpen() {
       }
     </section>
 
-    <section class="card">
-      <h2 class="section-title">All photos (${v.items.length})</h2>
-      ${
-        groups.size
-          ? [...groups.entries()]
-              .map(
-                ([date, list]) => `<div class="group"><h3>${esc(formatDate(date))}</h3><div class="thumbs">${list
-                  .map(
-                    (it) => `<button type="button" class="thumb" data-action="viewPhoto" data-id="${esc(it.id)}" aria-label="${esc(it.pose)}, ${esc(formatDate(date))}">
-                      <img src="${it.thumbUrl}" alt="" /><span>${esc(it.pose)}</span></button>`,
-                  )
-                  .join('')}</div></div>`,
-              )
-              .join('')
-          : '<p class="empty">No photos yet.</p>'
-      }
-    </section>
+    ${renderFaceIdCard()}
 
     <section class="card stack">
       <h2 class="section-title" style="margin:0">Passcode</h2>
@@ -509,30 +553,92 @@ function renderVaultOpen() {
       <input class="input" type="password" placeholder="New passcode" autocomplete="new-password" aria-label="New passcode" value="${esc(v.pass2 || '')}" data-input="vaultPass2" />
       <input class="input" type="password" placeholder="Repeat new passcode" autocomplete="new-password" aria-label="Repeat new passcode" value="${esc(v.pass3 || '')}" data-input="vaultPass3" />
       <button type="button" class="btn secondary" data-action="vaultChangePass">Change passcode</button>
-      <p class="hint" style="margin:0">Old backup files keep the old passcode. Make a new backup after changing it.</p>
+      <p class="hint" style="margin:0">Old backup files keep the old passcode. Make a new backup after changing it.${v.faceId?.on ? ' Face ID turns off and needs turning on again.' : ''}</p>
     </section>
     ${v.viewing ? '<div class="viewer" id="viewer"><img id="viewer-img" alt="" /><div class="viewer-bar"><button type="button" class="btn" data-action="closePhoto">Close</button><button type="button" class="btn danger" data-action="deletePhoto">Delete</button></div></div>' : ''}`;
+}
+
+const fileSize = (bytes) => (bytes < 1048576 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1048576).toFixed(1)} MB`);
+
+/** One folder per week, newest first, named as they will be in Files; the open one shows its photos. */
+function renderWeekFolders() {
+  const v = state.ui.vault;
+  const weeks = weekFolders(v.items);
+  if (!weeks.length) return `<section class="card"><h2 class="section-title">Week folders</h2><p class="empty">No photos yet.</p></section>`;
+  const open = openWeek();
+  const unsaved = unsavedWeeks();
+  const saved = state.vaultInfo.weeksSaved || {};
+  return `
+    <section class="card stack">
+      <h2 class="section-title" style="margin:0">Week folders (${v.items.length} photo${v.items.length === 1 ? '' : 's'})</h2>
+      <p class="hint" style="margin:0">Save a week, then in the share sheet tap <strong>Save to Files</strong> → iCloud Drive → <strong>Bhimlekha</strong>. In Files, tap the saved .zip once and it becomes the week's folder (then delete the .zip).</p>
+      ${weeks
+        .map((w) => {
+          const isOpen = w.folder === open;
+          const pending = unsaved.includes(w.folder);
+          const file = v.weekFiles[w.folder];
+          const state_ = pending ? '<span class="badge pending">Not saved</span>' : saved[w.folder] ? `<span class="badge ok">✓ Saved ${esc(formatDate(saved[w.folder].slice(0, 10), false))}</span>` : '';
+          return `<div class="folder ${isOpen ? 'open' : ''}">
+            <button type="button" class="folder-head" data-action="toggleWeek" data-folder="${esc(w.folder)}" aria-expanded="${isOpen}">
+              <span class="folder-name">📁 ${esc(w.folder)}</span>
+              <span class="small muted">${w.items.length} photo${w.items.length === 1 ? '' : 's'} ${state_}</span>
+            </button>
+            ${
+              isOpen
+                ? `<div class="thumbs">${w.items
+                    .map(
+                      (it) => `<button type="button" class="thumb" data-action="viewPhoto" data-id="${esc(it.id)}" aria-label="${esc(it.fileName)}, ${esc(formatDate(it.date))}">
+                        <img src="${it.thumbUrl}" alt="" /><span>${esc(it.fileName)}</span></button>`,
+                    )
+                    .join('')}</div>
+                   <button type="button" class="btn ${pending ? 'primary' : 'secondary'}" data-action="saveWeek" data-folder="${esc(w.folder)}" ${file ? '' : 'disabled'}>${
+                     file ? `📁 Save Week ${w.n} to Files (${fileSize(file.size)})` : file === false ? 'Could not prepare this week' : 'Preparing…'
+                   }</button>`
+                : ''
+            }
+          </div>`;
+        })
+        .join('')}
+    </section>`;
+}
+
+function renderFaceIdCard() {
+  const v = state.ui.vault;
+  const f = v.faceId || {};
+  let body;
+  if (f.on) {
+    body = `<p class="small" style="margin:0">✅ Face ID is on. The passcode still works too.</p>
+      <button type="button" class="btn secondary" data-action="vaultFaceOff">Turn off Face ID</button>`;
+  } else if (v.faceStep === 'confirm') {
+    body = `<p class="small" style="margin:0">The passkey is made. One more Face ID scan finishes it.</p>
+      <button type="button" class="btn primary" data-action="vaultFaceConfirm">Confirm with Face ID</button>`;
+  } else if (f.possible === false || v.faceStep === 'unsupported') {
+    body = `<p class="small" style="margin:0">This phone's browser cannot hold the vault key with Face ID (it needs iOS 18 or later). Keep using the passcode.</p>`;
+  } else {
+    body = `<p class="small" style="margin:0">Unlock with your face instead of typing the passcode. iOS saves a passkey named “Bhimlekha photo vault” in the Passwords app; Face ID releases the vault key from it, so it is as safe as the passcode.</p>
+      <button type="button" class="btn secondary" data-action="vaultFaceOn">Turn on Face ID</button>`;
+  }
+  return `<section class="card stack"><h2 class="section-title" style="margin:0">Face ID</h2>${body}</section>`;
 }
 
 function renderBackupCard() {
   const v = state.ui.vault;
   const info = state.vaultInfo;
   const behind = info.lastPhotoAt && (!info.lastBackupAt || info.lastBackupAt < info.lastPhotoAt);
-  const size = !v.backup ? '' : v.backup.file.size < 1048576 ? `${Math.max(1, Math.round(v.backup.file.size / 1024))} KB` : `${(v.backup.file.size / 1048576).toFixed(1)} MB`;
+  const size = v.backup ? fileSize(v.backup.file.size) : '';
   return `
     <section class="card stack">
-      <h2 class="section-title" style="margin:0">Backup to iCloud Drive</h2>
+      <h2 class="section-title" style="margin:0">Full encrypted backup</h2>
       <p class="small" style="margin:0">${
-        info.lastBackupAt ? `Last backup ${esc(formatDate(info.lastBackupAt.slice(0, 10)))}.` : 'No backup yet.'
-      } ${behind ? '<strong>New photos since then.</strong>' : ''}</p>
-      <p class="hint" style="margin:0">Tap below, then <strong>Save to Files</strong> → iCloud Drive → a "Bhimlekha" folder (iOS remembers the folder next time). The file is encrypted with your passcode.</p>
-      <button type="button" class="btn ${behind ? 'primary' : 'secondary'}" data-action="saveBackup" ${v.backup && v.backup.photos ? '' : 'disabled'}>${
-        v.backup ? (v.backup.photos ? `Save backup to Files (${v.backup.photos} photo${v.backup.photos === 1 ? '' : 's'}, ${size})` : 'Nothing to back up yet') : 'Preparing backup…'
+        info.lastBackupAt ? `Last one ${esc(formatDate(info.lastBackupAt.slice(0, 10)))}.` : 'None yet.'
+      } ${behind && info.lastBackupAt ? 'New photos since then.' : ''}</p>
+      <p class="hint" style="margin:0">For moving the vault to a new phone: one file with every photo, encrypted with your passcode, that Bhimlekha can restore. The week folders are for looking at in Files.</p>
+      <button type="button" class="btn secondary" data-action="saveBackup" ${v.backup && v.backup.photos ? '' : 'disabled'}>${
+        v.backup ? (v.backup.photos ? `Save encrypted backup (${v.backup.photos} photo${v.backup.photos === 1 ? '' : 's'}, ${size})` : 'Nothing to back up yet') : 'Preparing backup…'
       }</button>
       ${
         v.status === 'unlocked'
-          ? `<button type="button" class="btn secondary" data-action="vaultRestorePick">Restore photos from a backup…</button>
-             <input id="vault-restore" type="file" class="sr-only" data-change="vaultRestoreFile" />`
+          ? `<button type="button" class="btn secondary" data-action="vaultRestorePick">Restore photos from a backup…</button>`
           : ''
       }
     </section>`;
@@ -715,6 +821,7 @@ async function camAction(what) {
     try {
       await Vault.addPhoto(shot.canvas, { date: state.ui.vault.date || todayISO(), pose });
       markPhotoAdded();
+      state.ui.vault.openWeek = photoWeek(state.ui.vault.date || todayISO()).folder;
       toast(`${pose} saved (encrypted)`);
     } catch (err) {
       toast(`Could not save: ${err.message || err}`, 'error');
@@ -727,8 +834,58 @@ async function camAction(what) {
     stopCamera();
     state.ui.vault.pose = poses()[0];
     render();
-    toast('All poses saved. Now save the backup to Files.');
+    toast(`All poses saved. Now save Week ${photoWeek(state.ui.vault.date || todayISO()).n} to Files.`);
   }
+}
+
+/** Open the share sheet with a file prepared before the tap (Save to Files lives there); else download it. */
+function shareFile(file, title, done) {
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    navigator
+      .share({ files: [file], title })
+      .then(() => {
+        done();
+        toast('Saved');
+      })
+      .catch((err) => {
+        if (err?.name !== 'AbortError') toast('Could not open the share sheet', 'error');
+      });
+    return;
+  }
+  const url = URL.createObjectURL(file);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = file.name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  done();
+  toast('Downloaded. Move it to iCloud Drive → Bhimlekha in Files.');
+}
+
+/** Finish a Face ID setup step started (synchronously) from a tap. */
+function faceRun(pending) {
+  const v = state.ui.vault;
+  faceIdBusy = true;
+  pending
+    .then((step) => {
+      if (step === 'done') {
+        v.faceId = { ...v.faceId, on: true };
+        v.faceStep = '';
+        toast('Face ID is on');
+      } else v.faceStep = 'confirm';
+    })
+    .catch((err) => {
+      if (err?.message === 'unsupported') v.faceStep = 'unsupported';
+      else if (err?.name === 'InvalidStateError') toast('A passkey for this vault already exists. Delete “Bhimlekha photo vault” in the Passwords app, then try again.', 'error');
+      else if (err?.name !== 'NotAllowedError' && err?.name !== 'AbortError') toast(`Face ID setup failed: ${err.message || err}`, 'error');
+    })
+    .finally(() => {
+      faceIdBusy = false;
+      touchVault();
+      render();
+    });
 }
 
 /* ------------------------------------------------------------ handlers */
@@ -861,6 +1018,7 @@ const trackActions = {
       return render();
     }
     await refreshPhotos();
+    v.faceId = { ...v.faceId, on: false }; // the vault turned Face ID off: its copy held the old key
     markPhotoAdded(); // the old backup no longer matches: ask for a new one
     toast('Passcode changed. Save a new backup.');
     render();
@@ -889,44 +1047,82 @@ const trackActions = {
     const id = state.ui.vault.viewing;
     const ok = await openModal({ title: 'Delete this photo?', message: 'It is removed from the vault. Older backup files still contain it.', confirmText: 'Delete', danger: true });
     if (!ok) return;
+    const item = state.ui.vault.items.find((i) => i.id === id);
     await Vault.remove(id);
     state.ui.vault.viewing = null;
     markPhotoAdded();
-    await refreshPhotos();
+    await refreshPhotos(item ? photoWeek(item.date).folder : null);
     render();
   },
 
   saveBackup() {
     const b = state.ui.vault.backup;
     if (!b) return;
-    const done = () => {
+    shareFile(b.file, 'Bhimlekha photo backup', () => {
       state.vaultInfo = { ...state.vaultInfo, lastBackupAt: nowISO() };
       save(KEYS.vaultInfo, state.vaultInfo);
       render();
-    };
-    // The share sheet must open straight from the tap, so the file is prepared beforehand (afterPhotosRender).
-    if (navigator.canShare && navigator.canShare({ files: [b.file] })) {
-      navigator
-        .share({ files: [b.file], title: 'Bhimlekha photo backup' })
-        .then(() => {
-          done();
-          toast('Backup saved');
-        })
-        .catch((err) => {
-          if (err?.name !== 'AbortError') toast('Could not open the share sheet', 'error');
-        });
-      return;
-    }
-    const url = URL.createObjectURL(b.file);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = b.file.name;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
-    done();
-    toast('Backup downloaded. Move it to iCloud Drive in Files.');
+    });
+  },
+
+  saveWeek(el) {
+    const folder = el.dataset.folder;
+    const file = state.ui.vault.weekFiles[folder];
+    if (!file) return;
+    touchVault();
+    shareFile(file, folder, () => {
+      state.vaultInfo = { ...state.vaultInfo, weeksSaved: { ...(state.vaultInfo.weeksSaved || {}), [folder]: nowISO() } };
+      save(KEYS.vaultInfo, state.vaultInfo);
+      render();
+    });
+  },
+
+  toggleWeek(el) {
+    const v = state.ui.vault;
+    v.openWeek = openWeek() === el.dataset.folder ? '' : el.dataset.folder; // '' = all closed
+    touchVault();
+    render();
+  },
+
+  // Face ID: each WebAuthn call is the first thing the tap does, because iOS only shows the sheet from a tap.
+  vaultFaceUnlock() {
+    const v = state.ui.vault;
+    faceIdBusy = true;
+    const pending = Vault.unlockWithFaceId();
+    v.busy = 'Waiting for Face ID…';
+    render();
+    pending
+      .then(async (ok) => {
+        if (!ok) return toast('Face ID did not open the vault. Use the passcode, then turn Face ID on again.', 'error');
+        v.status = 'unlocked';
+        await refreshPhotos();
+        touchVault();
+      })
+      .catch((err) => {
+        if (err?.name !== 'NotAllowedError' && err?.name !== 'AbortError') toast(`Face ID failed: ${err.message || err}. Use the passcode.`, 'error');
+      })
+      .finally(() => {
+        faceIdBusy = false;
+        v.busy = '';
+        render();
+      });
+  },
+
+  vaultFaceOn() {
+    faceRun(Vault.faceIdSetup());
+  },
+
+  vaultFaceConfirm() {
+    faceRun(Vault.faceIdConfirm());
+  },
+
+  async vaultFaceOff() {
+    const ok = await openModal({ title: 'Turn off Face ID?', message: 'The vault will open with the passcode only. You can also delete the “Bhimlekha photo vault” passkey in the Passwords app.', confirmText: 'Turn off' });
+    if (!ok) return;
+    await Vault.faceIdOff();
+    state.ui.vault.faceId = { ...state.ui.vault.faceId, on: false };
+    state.ui.vault.faceStep = '';
+    render();
   },
 
   vaultRestorePick() {
@@ -957,6 +1153,7 @@ const trackChanges = {
   photoDate(el) {
     state.ui.vault.date = el.value;
     touchVault();
+    render(); // the "Goes in Week N" line follows the date
   },
   photoPose(el) {
     state.ui.vault.pose = el.value;
@@ -981,6 +1178,7 @@ const trackChanges = {
     try {
       await Vault.addPhoto(file, { date: v.date || todayISO(), pose });
       markPhotoAdded();
+      v.openWeek = photoWeek(v.date || todayISO()).folder;
       await refreshPhotos();
       const next = poses()[poses().indexOf(pose) + 1];
       if (next) v.pose = next;

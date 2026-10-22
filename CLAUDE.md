@@ -281,6 +281,7 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     the Photos screen, on `visibilitychange` hidden, and after `autoLockMinutes` idle. Backup = `.bhimvault`
     binary of the already-encrypted records, shared via the Web Share sheet (owner saves to iCloud Drive); a
     web app cannot write to Files without a tap, so a home banner nags until `lastBackupAt ≥ lastPhotoAt`.
+    (v1.4 relaxes this: see 18. The week folders are readable JPEGs, by the owner's choice.)
 15. **Sync from Sheet** keeps the local copy of a workout already on the phone (it can hold more detail).
 16. **v1.2 (2026-10-22): per-set line above Save set** (`Progress.setComparison`): the set being entered vs the
     same set number last time (weight ± kg, reps ±), live as reps/weight change. ⚠️ Shortfall when this set has
@@ -299,3 +300,20 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     Ending on the start day undoes it; otherwise it ends yesterday. `progression.deloadWeeks` (v1.1) migrates to
     `recovery.schedWeeks`. Shortfall (red) and stagnant (amber) lines above Save set are tinted and lead with the
     key number.
+18. **v1.4 (2026-10-22): Face ID and week folders.**
+    - **Face ID** = a platform passkey with the WebAuthn **PRF** extension (iOS 18+). The PRF output → HKDF →
+      AES key that encrypts the 32 raw vault-key bytes, stored as `meta.faceId { credId, prfSalt, wrapped }`.
+      The raw key is kept in memory only while unlocked (`deriveRaw`, same key as before). If the phone makes the
+      passkey without returning the secret, a second tap ("Confirm with Face ID") fetches it. No PRF → the card
+      says iOS 18 is needed; there is no non-cryptographic "gate" fallback. Changing the passcode drops
+      `faceId`. WebAuthn calls must be the first thing a tap does; `faceIdBusy` stops the lock-on-hide meanwhile.
+    - **Week folders** (owner chose readable JPEGs and Week 1 = first workout's week): weeks end on
+      `checkinDay` (Sunday → Mon–Sun), Week 1 = week of `settings.programStart` or else the first logged
+      workout. Folder "Week 3 - 19 Oct to 25 Oct 2026", file "Week-3 Back.jpg" (pose from settings; `\/:*?"<>|`
+      → "-"; duplicates " (2)"). *Save Week N to Files* shares "<folder>.zip" (stored zip, built by
+      `Vault.exportWeek` before the tap) holding that one folder; Files unpacks it on a tap. Saved state:
+      `vaultInfo.weeksChanged` / `weeksSaved` keyed by folder name (renaming settings makes all weeks unsaved);
+      Home banner lists unsaved weeks. The `.bhimvault` backup stays for restoring on a new phone.
+    - The file inputs live in `#pickers` in index.html (outside `#app`), because a background re-render while
+      the iPhone camera was open replaced the input and lost the photo. Dialogs (`.modal`, z 48) now sit above
+      the photo viewer (45); before this, Delete in the viewer could not be confirmed.

@@ -81,10 +81,15 @@ There are no secrets in the repo. The script URL and token live only in the app'
   Measurements go to the Sheet's **Measurements** tab.
 - **Photos** are an encrypted vault on the phone only: AES-256 with a key made from your passcode, never
   uploaded, never in the Photos app. The in-app camera has a timer and overlays last week's photo to match
-  the pose. **Back up after every check-in**: the Photos screen's *Save backup to Files* opens the share
-  sheet; choose **Save to Files → iCloud Drive → Bhimlekha**. The backup file is encrypted with the same
-  passcode. A web app cannot save to Files on its own, so this one tap is needed each time; a home-screen
-  banner reminds you until it is done. A forgotten passcode cannot be recovered.
+  the pose. **Face ID** (iOS 18+) can unlock it: a passkey in the Passwords app holds the vault key.
+  A forgotten passcode cannot be recovered.
+- **Week folders in Files**: photos are grouped by week ("Week 3 - 19 Oct to 25 Oct 2026", weeks ending on
+  the check-in day, Week 1 = the week of the first workout or the date in Settings) and named from the poses
+  ("Week-3 Back"). *Save Week N to Files* shares a .zip; choose **Save to Files → iCloud Drive → Bhimlekha**,
+  then tap the .zip once in Files to turn it into the week's folder. These copies are readable pictures (owner's
+  choice); lock the Files app with Face ID if wanted. A web app cannot save to Files on its own, so the tap is
+  needed each week; a home banner names the weeks not saved yet. *Full encrypted backup* is a separate
+  passcode-encrypted file for restoring the vault on a new phone.
 
 ## Updating the app
 

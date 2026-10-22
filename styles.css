@@ -718,7 +718,7 @@ fieldset {
 .modal {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: 48; /* above the photo viewer and camera (45), so "Delete this photo?" can be answered */
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -1241,13 +1241,58 @@ label.check input {
 .thumb span {
   position: absolute;
   left: 6px;
+  right: 6px;
   bottom: 6px;
   padding: 2px 8px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
+  line-height: 1.3;
   color: #fff;
   background: rgba(0, 0, 0, 0.55);
-  border-radius: 999px;
+  border-radius: 10px;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+/* Week folders, named as they are saved in the Files app */
+.folder {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--input-bg);
+  overflow: hidden;
+}
+
+.folder.open {
+  border-color: var(--sel-border);
+}
+
+.folder > .thumbs,
+.folder > .btn {
+  margin: 0 12px 12px;
+}
+
+.folder > .btn {
+  width: calc(100% - 24px);
+}
+
+.folder-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  padding: 12px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.folder-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .compare {
