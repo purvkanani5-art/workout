@@ -355,6 +355,10 @@ function renderSmallWorkout() {
           <input id="small-time" type="time" class="input" value="${esc(ui.smallTime || nowTime())}" data-change="smallTime" />
         </div>
       </div>
+      <div>
+        <label for="small-note">Notes (optional)</label>
+        <input id="small-note" class="input" value="${esc(ui.smallNote || '')}" placeholder="e.g. 50 push-ups, 20 min walk" data-input="smallNote" autocomplete="off" />
+      </div>
       <button type="button" class="btn primary" data-action="smallCheckIn">Check in</button>
       ${
         list.length
@@ -362,7 +366,7 @@ function renderSmallWorkout() {
               .slice(0, 5)
               .map(
                 (s) => `<li><div class="exercise-row">
-                  <div class="name">${esc(formatDate(s.date))} · ${esc(s.time)}</div>
+                  <div class="name">${esc(formatDate(s.date))} · ${esc(s.time)}${s.note ? `<span class="small muted">${esc(s.note)}</span>` : ''}</div>
                   <button type="button" class="btn icon ghost" data-action="editSmall" data-id="${esc(s.id)}" aria-label="Change date or time">✎</button>
                   <button type="button" class="btn icon ghost" data-action="deleteSmall" data-id="${esc(s.id)}" aria-label="Delete">🗑</button>
                 </div></li>`,
@@ -1139,9 +1143,12 @@ const trackActions = {
     const date = ui.smallDate || todayISO();
     const time = ui.smallTime || nowTime();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return toast('Pick a date and time', 'error');
-    state.small = [...state.small, { id: uuid(), date, time, savedAt: nowISO() }];
+    const entry = { id: uuid(), date, time, note: (ui.smallNote || '').trim(), savedAt: nowISO() };
+    state.small = [...state.small, entry];
     save(KEYS.small, state.small);
+    queueSmall(entry);
     ui.smallDate = ui.smallTime = null; // back to "now" for the next one
+    ui.smallNote = '';
     toast(`Small workout checked in · ${formatDate(date, false)}, ${time}`);
     render();
   },
@@ -1154,13 +1161,15 @@ const trackActions = {
       fields: [
         { key: 'date', label: 'Date', value: s.date, type: 'date' },
         { key: 'time', label: 'Time', value: s.time, type: 'time' },
+        { key: 'note', label: 'Notes (optional)', value: s.note || '' },
       ],
       confirmText: 'Save',
     });
     if (!values) return;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(values.date) || !/^\d{2}:\d{2}$/.test(values.time)) return toast('Pick a date and time', 'error');
-    Object.assign(s, { date: values.date, time: values.time });
+    Object.assign(s, { date: values.date, time: values.time, note: values.note || '' });
     save(KEYS.small, state.small);
+    queueSmall(s);
     render();
   },
 
@@ -1169,6 +1178,7 @@ const trackActions = {
     if (!ok) return;
     state.small = state.small.filter((x) => x.id !== el.dataset.id);
     save(KEYS.small, state.small);
+    queueSmall({ id: el.dataset.id, deleted: true });
     render();
   },
 
@@ -1512,6 +1522,9 @@ const trackChanges = {
 };
 
 const trackInputs = {
+  smallNote(el) {
+    state.ui.body.smallNote = el.value;
+  },
   sliderPos(el) {
     // Moved live without a re-render, so the images stay put while dragging.
     const pos = Number(el.value);

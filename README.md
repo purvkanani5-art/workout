@@ -86,6 +86,8 @@ There are no secrets in the repo. The script URL and token live only in the app'
 - **Schedule and missed workouts** (Settings → Schedule): Home suggests the day's workout. A scheduled day
   with no workout is marked missed (not made up); Home asks why, and it goes to the Sheet's **Missed** tab.
   Missed days pause that day's exercises' warning clocks and push the lighter week back a little.
+- **Small workout** (Body screen): one tap saves the date and time (changeable) with an optional note, to the
+  Sheet's **Small workouts** tab.
 - **Weekly summary** on Home on the check-in day and the day after, and for any week on Progress.
 - **Settings copy in the Sheet** (Settings tab): saved after every change; a new phone offers to restore it
   after Test connection. Needs the v1.5 Code.gs.

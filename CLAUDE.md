@@ -336,5 +336,10 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
       Restoring sets `scheduleFrom` = today (the new phone lacks old workouts) and fetches the Missed tab.
     - **Weekly summary** (`weekSummary`, weeks = photo-folder weeks): Home on the check-in day and the day after;
       Progress has a picker back to the first workout.
+    - **Small workout** (v1.5.1, Sheet in v1.6): Body card between the weekly check-in and the daily weigh-in.
+      Check in = { date, time (default now, editable), optional note } in `wt.small`; edit (✎) and delete
+      upsert/delete the row in the Sheet tab **Small workouts** (Timestamp, Date, Time, Notes, Entry ID) via
+      `wt.smallOutbox`. Not a workout: it never affects missed days or progress. Fetched back with Sync history
+      and on a settings restore.
     - **Compare weeks**: two week pickers (default first vs latest), every pose side by side (thumbnails); a
       pose with both photos opens a full-screen slider (after-photo clipped over the before-photo).

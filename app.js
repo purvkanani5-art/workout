@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.6.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -31,7 +31,8 @@ const KEYS = {
   missed: 'wt.missed', // [{ id, date, dayType, reason, note, savedAt }] scheduled days with no workout
   missedOutbox: 'wt.missedOutbox', // [{ id, entry }] waiting for the Sheet (entry.deleted = remove the row)
   backup: 'wt.backup', // { linked, dirty, sentAt, error }: the settings copy in the Sheet's Settings tab
-  small: 'wt.small', // [{ id, date, time, savedAt }] "Small workout" check-ins: just when, nothing else
+  small: 'wt.small', // [{ id, date, time, note, savedAt }] "Small workout" check-ins
+  smallOutbox: 'wt.smallOutbox', // [{ id, entry }] waiting for the Sheet's Small workouts tab (entry.deleted = remove)
 };
 
 // Weekday (0 = Sunday) → day type; '' = rest. The owner trains Monday to Saturday. Editable in Settings.
@@ -221,6 +222,7 @@ const state = {
   missedOutbox: load(KEYS.missedOutbox, []),
   backup: load(KEYS.backup, { linked: false, dirty: false, sentAt: null, error: '' }),
   small: load(KEYS.small, []),
+  smallOutbox: load(KEYS.smallOutbox, null), // null = never set up: v1.5.1 entries get queued once (below)
   ui: {
     progress: { metric: 'e1rm', range: '12w' },
     body: { field: null, range: '12w', weighIn: '', draft: null },
@@ -383,6 +385,47 @@ function setMissedReason(id, reason, note) {
   syncOutbox();
 }
 
+/* --------------------------------------------------- small workouts → Sheet */
+
+// Check-ins made in v1.5.1 (before they went to the Sheet) are sent once.
+if (!Array.isArray(state.smallOutbox)) {
+  state.smallOutbox = state.small.map((s) => ({ id: s.id, entry: s }));
+  save(KEYS.smallOutbox, state.smallOutbox);
+}
+
+/** Queue one small-workout change for the Sheet (the latest change per id wins). */
+function queueSmall(entry) {
+  state.smallOutbox = [...state.smallOutbox.filter((x) => x.id !== entry.id), { id: entry.id, entry }];
+  save(KEYS.smallOutbox, state.smallOutbox);
+  syncOutbox();
+}
+
+async function syncSmallOutbox() {
+  for (const item of [...state.smallOutbox]) {
+    try {
+      await apiPost({ action: 'small', entry: item.entry });
+    } catch {
+      break; // offline, or an Apps Script older than v1.6: kept for later
+    }
+    state.smallOutbox = state.smallOutbox.filter((x) => x !== item);
+    save(KEYS.smallOutbox, state.smallOutbox);
+  }
+}
+
+/** Small workouts from the Sheet (a new phone): added by id; this phone's own copies are kept. */
+async function syncSmallFromSheet() {
+  try {
+    const data = await apiGet({ action: 'small' });
+    const byId = new Map(state.small.map((s) => [s.id, s]));
+    for (const e of Array.isArray(data.entries) ? data.entries : []) {
+      if (!e || !e.id || byId.has(e.id) || !/^\d{4}-\d{2}-\d{2}$/.test(String(e.date)) || !/^\d{2}:\d{2}$/.test(String(e.time))) continue;
+      byId.set(e.id, { id: e.id, date: e.date, time: e.time, note: e.note || '', savedAt: '' });
+    }
+    state.small = [...byId.values()];
+    save(KEYS.small, state.small);
+  } catch {}
+}
+
 /** Exercises planned on a day type (the plan as it is now). */
 function dayExercises(dayType) {
   return state.exercises[dayType] || [];
@@ -516,6 +559,7 @@ async function linkSettingsBackup({ ask = true } = {}) {
   if (restore) {
     applySettingsSnapshot(remote.data);
     await syncMissedFromSheet();
+    await syncSmallFromSheet();
     toast('Settings restored from the Sheet');
   }
   saveBackupState({ linked: true, dirty: !restore, remoteAt: null });
@@ -2395,6 +2439,7 @@ const actions = {
     applySettingsSnapshot(remote.data);
     saveBackupState({ linked: true, remoteAt: null });
     await syncMissedFromSheet();
+    await syncSmallFromSheet();
     toast('Settings restored from the Sheet');
     render();
   },
@@ -2714,6 +2759,7 @@ const actions = {
       missed: state.missed,
       missedOutbox: state.missedOutbox,
       small: state.small,
+      smallOutbox: state.smallOutbox,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -3025,7 +3071,9 @@ async function importFromFile(file) {
   save(KEYS.missed, state.missed);
   save(KEYS.missedOutbox, state.missedOutbox);
   if (Array.isArray(data.small)) state.small = data.small;
+  if (Array.isArray(data.smallOutbox)) state.smallOutbox = data.smallOutbox;
   save(KEYS.small, state.small);
+  save(KEYS.smallOutbox, state.smallOutbox);
   save(KEYS.measurements, state.measurements);
   save(KEYS.mOutbox, state.mOutbox);
   if (data.exercises && typeof data.exercises === 'object') state.exercises = data.exercises;
@@ -3205,11 +3253,12 @@ async function syncMissedOutbox() {
 }
 
 async function syncOutbox({ manual = false } = {}) {
-  if (!state.ui.syncing && haveApi() && (state.mOutbox.length || state.missedOutbox.length || !state.backup.linked || state.backup.dirty)) {
+  if (!state.ui.syncing && haveApi() && (state.mOutbox.length || state.missedOutbox.length || state.smallOutbox.length || !state.backup.linked || state.backup.dirty)) {
     state.ui.syncing = true;
     try {
       const m = state.mOutbox.length ? await syncMeasurementOutbox() : 0;
       if (state.missedOutbox.length) await syncMissedOutbox();
+      if (state.smallOutbox.length) await syncSmallOutbox();
       // A copy found in the Sheet but not answered yet waits for Settings → Settings copy (never overwritten here).
       if (!state.backup.linked && !state.backup.remoteAt) await linkSettingsBackup({ ask: false });
       else if (state.backup.dirty) await uploadSettings();
@@ -3272,6 +3321,7 @@ async function syncHistoryFromSheet() {
       .slice(0, HISTORY_LIMIT);
     save(KEYS.history, state.history);
     await syncMissedFromSheet();
+    await syncSmallFromSheet();
     detectMissed();
     state.ui.historySync = `Loaded ${incoming.length} workout${incoming.length === 1 ? '' : 's'} from the last 400 days.`;
   } catch (err) {

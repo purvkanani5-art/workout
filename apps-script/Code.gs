@@ -12,6 +12,8 @@
  *   GET  {scriptUrl}?action=measurements&token=…
  *   POST {scriptUrl}                       body: { token, action: "missed", entry: {...} }
  *   GET  {scriptUrl}?action=missed&token=…
+ *   POST {scriptUrl}                       body: { token, action: "small", entry: {...} }
+ *   GET  {scriptUrl}?action=small&token=…
  *   POST {scriptUrl}                       body: { token, action: "settings", data: {...}, savedAt }
  *   GET  {scriptUrl}?action=settings&token=…
  *
@@ -21,6 +23,8 @@
  * "Waist (cm)") has its own column; a field added in the app's Settings gets a new column automatically.
  * Missed: one row per scheduled workout day with no workout, with the reason. Rewritten in place when the
  * reason changes (same Entry ID), deleted when the app takes it back (a workout was logged for that date).
+ * Small workouts: one row per "Small workout" check-in (date, time, optional notes), rewritten in place when
+ * edited in the app (same Entry ID) and deleted when deleted there.
  * Settings: one row holding the app's settings as JSON (exercises, plans, schedule…; never the URL or token),
  * so a new phone can restore them.
  * Progress photos never come here: they stay encrypted on the phone.
@@ -31,6 +35,8 @@ var M_SHEET_NAME = 'Measurements';
 var M_FIXED = ['Timestamp', 'Date', 'Entry ID', 'Type', 'Notes'];
 var X_SHEET_NAME = 'Missed';
 var X_HEADERS = ['Timestamp', 'Date', 'Weekday', 'Day', 'Reason', 'Note', 'Entry ID'];
+var W_SHEET_NAME = 'Small workouts';
+var W_HEADERS = ['Timestamp', 'Date', 'Time', 'Notes', 'Entry ID'];
 var S_SHEET_NAME = 'Settings';
 var S_HEADERS = ['Saved at', 'Settings (JSON, written by the app)'];
 var HEADERS = [
@@ -68,6 +74,7 @@ function setup() {
   var m = getMeasureSheet_();
   Logger.log('Sheet "%s" is ready.', m.getName());
   Logger.log('Sheet "%s" is ready.', getMissedSheet_().getName());
+  Logger.log('Sheet "%s" is ready.', getSmallSheet_().getName());
   Logger.log('Sheet "%s" is ready.', getSettingsSheet_().getName());
   var token = PropertiesService.getScriptProperties().getProperty('TOKEN');
   if (token) {
@@ -130,6 +137,7 @@ function doGet(e) {
     if (p.action === 'history') return json_({ ok: true, sessions: history_(Number(p.days) || 120) });
     if (p.action === 'measurements') return json_({ ok: true, entries: measurements_() });
     if (p.action === 'missed') return json_({ ok: true, entries: missedList_() });
+    if (p.action === 'small') return json_({ ok: true, entries: smallList_() });
     if (p.action === 'settings') return json_(readSettings_());
     return json_({ ok: false, error: 'unknown action' });
   } catch (err) {
@@ -148,6 +156,7 @@ function doPost(e) {
   if (!authorized_(body.token)) return json_({ ok: false, error: 'unauthorized' });
   if (body.action === 'measure') return measure_(body.entry);
   if (body.action === 'missed') return missed_(body.entry);
+  if (body.action === 'small') return small_(body.entry);
   if (body.action === 'settings') return writeSettings_(body.data, body.savedAt);
   if (body.action !== 'submit') return json_({ ok: false, error: 'unknown action' });
 
@@ -471,6 +480,72 @@ function missedList_() {
         dayType: String(r[3] || ''),
         reason: String(r[4] || ''),
         note: String(r[5] || ''),
+      };
+    });
+}
+
+/* ---------------------------------------------------------- Small workouts */
+
+function getSmallSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(W_SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(W_SHEET_NAME);
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, W_HEADERS.length).setValues([W_HEADERS]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    sheet.getRange(2, 2, Math.max(sheet.getMaxRows() - 1, 1), 2).setNumberFormat('@'); // date and time as text
+  }
+  return sheet;
+}
+
+/** Add, update (same Entry ID) or delete (entry.deleted) one small workout. */
+function small_(entry) {
+  if (!entry || typeof entry.id !== 'string' || !entry.id) return json_({ ok: false, error: 'bad entry' });
+  if (!entry.deleted && (!/^\d{4}-\d{2}-\d{2}$/.test(String(entry.date || '')) || !/^\d{2}:\d{2}$/.test(String(entry.time || '')))) {
+    return json_({ ok: false, error: 'bad entry' });
+  }
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var sheet = getSmallSheet_();
+    var row = 0;
+    var last = sheet.getLastRow();
+    if (last >= 2) {
+      var ids = sheet.getRange(2, 5, last - 1, 1).getValues();
+      for (var i = 0; i < ids.length; i++) if (String(ids[i][0]) === entry.id) row = i + 2;
+    }
+    if (entry.deleted) {
+      if (row) sheet.deleteRow(row);
+      return json_({ ok: true, rows: row ? -1 : 0 });
+    }
+    var values = [[new Date(), String(entry.date), String(entry.time), String(entry.note || ''), entry.id]];
+    if (row) sheet.getRange(row, 1, 1, W_HEADERS.length).setValues(values);
+    else sheet.getRange(sheet.getLastRow() + 1, 1, 1, W_HEADERS.length).setValues(values);
+    return json_({ ok: true, rows: row ? 0 : 1 });
+  } catch (err) {
+    return json_({ ok: false, error: String((err && err.message) || err) });
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (ignore) {}
+  }
+}
+
+function smallList_() {
+  var sheet = getSmallSheet_();
+  var last = sheet.getLastRow();
+  if (last < 2) return [];
+  var tz = Session.getScriptTimeZone();
+  return sheet
+    .getRange(2, 1, last - 1, W_HEADERS.length)
+    .getValues()
+    .filter(function (r) { return r[4]; })
+    .map(function (r) {
+      return {
+        id: String(r[4]),
+        date: r[1] instanceof Date ? Utilities.formatDate(r[1], tz, 'yyyy-MM-dd') : String(r[1] || '').slice(0, 10),
+        time: r[2] instanceof Date ? Utilities.formatDate(r[2], tz, 'HH:mm') : String(r[2] || '').slice(0, 5),
+        note: String(r[3] || ''),
       };
     });
 }
