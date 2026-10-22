@@ -282,3 +282,9 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     binary of the already-encrypted records, shared via the Web Share sheet (owner saves to iCloud Drive); a
     web app cannot write to Files without a tap, so a home banner nags until `lastBackupAt ≥ lastPhotoAt`.
 15. **Sync from Sheet** keeps the local copy of a workout already on the phone (it can hold more detail).
+16. **v1.2 (2026-10-22): per-set line above Save set** (`Progress.setComparison`): the set being entered vs the
+    same set number last time (weight ± kg, reps ±), live as reps/weight change. ⚠️ Shortfall when this set has
+    been below its earlier best level (Epley e1RM) for ≥ `shortfallDays` (14); ⚠️ Stagnant when no new best for
+    > `stagnantDays` (30) over ≥ 3 sessions, except a set already at the top of its rep range (shown as ℹ️
+    instead: it can only move when the weight goes up). The lighter-week (recovery) alert shows on Home and in
+    the post-workout insight as well as on Progress.

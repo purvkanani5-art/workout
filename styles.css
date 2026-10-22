@@ -831,6 +831,42 @@ fieldset {
   border-color: var(--warn-border);
 }
 
+.set-compare {
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: var(--chip-bg);
+  border: 1px solid var(--chip-border);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.set-compare .up {
+  color: var(--up);
+  font-weight: 600;
+}
+
+.set-compare .down {
+  color: var(--down);
+  font-weight: 600;
+}
+
+.set-compare .same {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.set-compare .warn-line {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--chip-border);
+  font-size: 14px;
+  color: var(--warn-text);
+}
+
+#set-compare:empty {
+  display: none;
+}
+
 /* ---------- Insight ---------- */
 .insight {
   padding-top: 16px;

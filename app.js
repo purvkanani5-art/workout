@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -687,9 +687,18 @@ function renderHome() {
 /** Weight increases due, the weekly check-in, and photos waiting for a backup. */
 function homeBanners() {
   const out = [];
-  const due = trackedExercises()
+  const all = trackedExercises()
     .map((n) => analyse(n))
-    .filter((a) => a && a.status.kind === 'increase');
+    .filter(Boolean);
+  const deload = deloadAdvice(all);
+  if (deload) {
+    out.push(`<div class="banner warn">
+      <p class="title">Recovery: lighter week suggested</p>
+      <p class="small" style="margin:0">${esc(deload)}</p>
+      <div class="actions"><button type="button" class="btn" data-action="markDeload">I took a lighter week</button></div>
+    </div>`);
+  }
+  const due = all.filter((a) => a.status.kind === 'increase');
   if (due.length) {
     out.push(`<div class="banner">
       <p class="title">Time to add weight</p>
@@ -828,6 +837,7 @@ function renderEntry() {
         <input id="weight" class="input" type="number" inputmode="decimal" min="0" step="0.5" placeholder="0 for bodyweight" value="${esc(f.weight)}" data-input="weight" />
       </div>
       <button type="button" class="chip toggle" data-action="toggleWarmup" aria-pressed="${f.warmup}">Warm-up set${f.warmup ? ' ✓' : ''}</button>
+      <div id="set-compare" aria-live="polite">${setCompareHtml()}</div>
       <button type="button" class="btn primary" data-action="saveSet">${f.editingId ? 'Update set' : 'Save set'}</button>
       ${f.editingId ? '<button type="button" class="btn ghost secondary" data-action="cancelEdit">Cancel edit</button>' : ''}
     </section>
@@ -862,6 +872,55 @@ function renderEntry() {
     </section>
 
     <button type="button" class="btn secondary" data-action="finishWorkout">Finish workout</button>`;
+}
+
+/** Reps currently entered in the form: a chip, the Other box, or the Failure count (null when not known yet). */
+function formReps(f) {
+  if (typeof f.reps === 'number') return f.reps;
+  const raw = f.reps === 'other' ? f.otherReps : f.reps === 'failure' ? f.failureReps : '';
+  const n = Number(raw);
+  return raw !== '' && Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * The line above Save set: this set against the same set number last time (weight and reps up or down),
+ * plus a shortfall or stagnation warning for this set. Refreshed live as reps and weight change.
+ */
+function setCompareHtml() {
+  const f = state.ui.form;
+  if (!f || !f.exercise || f.warmup || !state.draft) return '';
+  const weight = f.weight === '' ? NaN : Number(f.weight);
+  const sessions = state.history.filter((s) => s.id !== state.draft.id);
+  const c = Progress.setComparison(sessions, f.exercise, f.setNo, { weight, reps: formReps(f) }, state.draft.date || todayISO(), state.settings.progression);
+  if (!c) return '';
+  const delta = (n, unit) => (n > 0 ? `<span class="up">▲ +${esc(fmtKg(n))}${unit}</span>` : n < 0 ? `<span class="down">▼ −${esc(fmtKg(-n))}${unit}</span>` : '<span class="same">● same</span>');
+  const parts = [];
+  if (c.weightDelta !== null) parts.push(`weight ${delta(c.weightDelta, ' kg')}`);
+  parts.push(c.repsDelta !== null ? `reps ${delta(c.repsDelta, '')}` : '<span class="muted">pick reps to compare</span>');
+  const warn = [];
+  if (c.shortfall) {
+    const r = c.shortfall.ref;
+    warn.push(`⚠️ Shortfall: below ${esc(fmtKg(r.weight))} kg × ${r.reps} (${esc(formatDate(r.date, false))}) for ${c.shortfall.days} days`);
+  }
+  const plan = Progress.parsePlan(planText(state.draft.dayType, f.exercise));
+  const capped = c.stagnant && plan && !plan.timed && c.stagnant.best.reps >= plan.max - state.settings.progression.topTolerance;
+  if (capped) {
+    // Already at the top of the rep range: no more reps are expected until the weight goes up, so not "stagnant".
+    warn.push(`ℹ️ This set is at the top of its range (${c.stagnant.best.reps} reps; the range tops out at ${plan.max}). It moves on when the weight goes up.`);
+  } else if (c.stagnant) {
+    const b = c.stagnant.best;
+    warn.push(`⚠️ Stagnant: no new best on this set for ${c.stagnant.days} days (best ${esc(fmtKg(b.weight))} kg × ${b.reps}, ${esc(formatDate(c.stagnant.since, false))})`);
+  }
+  return `<div class="set-compare">
+      <div class="small muted">vs Set ${f.setNo} last time · ${esc(formatDate(c.prev.date, false))} · ${esc(fmtKg(c.prev.weight))} kg × ${c.prev.reps}</div>
+      <div>${parts.join(' · ')}</div>
+      ${warn.map((w) => `<div class="warn-line">${w}</div>`).join('')}
+    </div>`;
+}
+
+function refreshSetCompare() {
+  const el = document.getElementById('set-compare');
+  if (el) el.innerHTML = setCompareHtml();
 }
 
 /** Progression status for the exercise on the entry screen, from saved workouts only (what today should aim for). */
@@ -953,10 +1012,12 @@ function renderInsight(session) {
   const totals = [];
   if (ins.strengthPct !== null) totals.push(`${Progress.signed(ins.strengthPct)} average change per exercise`);
   if (ins.volumePct !== null) totals.push(`volume ${Progress.signed(ins.volumePct)} on the same exercises`);
+  const deload = deloadAdvice(trackedExercises().map((n) => analyse(n)).filter(Boolean));
   return `
     <div class="insight stack">
       <h2 class="section-title" style="margin:0">Progress insight</h2>
       <p class="insight-head">${esc(headline.join(' · '))}${totals.length ? `<br /><span class="small muted">vs last time: ${esc(totals.join(', '))}</span>` : ''}</p>
+      ${deload ? `<p class="flag">⚠️ Recovery: ${esc(deload)}</p>` : ''}
       ${ins.rows
         .map((a) => {
           const t = TREND[a.trend];
@@ -1279,6 +1340,8 @@ const PROGRESSION_FIELDS = [
   ['dropSessions', 'Drop warning after (sessions)', 'Estimated max falling this many sessions in a row.', 1],
   ['watchDays', 'Watch period after adding weight (days)', 'Checks that reps stay inside the range at the new weight.', 1],
   ['deloadWeeks', 'Suggest a lighter week every (weeks)', '', 1],
+  ['shortfallDays', 'Shortfall warning after (days)', 'A set below its earlier level for this long gets ⚠️ above Save set.', 1],
+  ['stagnantDays', 'Stagnant warning after (days)', 'A set with no new best for longer than this is called stagnant.', 1],
   ['muscleSetsMin', 'Weekly hard sets per muscle, low end', '', 1],
   ['muscleSetsMax', 'Weekly hard sets per muscle, high end', '', 1],
 ];
@@ -2054,13 +2117,16 @@ const inputs = {
   },
   otherReps(el) {
     form().otherReps = el.value;
+    refreshSetCompare();
   },
   failureReps(el) {
     form().failureReps = el.value;
+    refreshSetCompare();
   },
   weight(el) {
     form().weight = el.value;
     el.removeAttribute('aria-invalid');
+    refreshSetCompare();
   },
   notes(el) {
     if (state.draft) {

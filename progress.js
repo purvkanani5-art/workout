@@ -23,6 +23,8 @@ const PROGRESSION_DEFAULTS = {
   deloadWeeks: 8, // suggest a lighter week after this many weeks of training without one
   muscleSetsMin: 10, // weekly hard sets per muscle group, low end of the useful range
   muscleSetsMax: 20, // ...and high end
+  shortfallDays: 14, // a set below its earlier level for this long gets a warning on the entry screen
+  stagnantDays: 30, // a set that has not beaten its own best for this long is called stagnant
 };
 
 const DAY_MS = 86400000;
@@ -126,6 +128,65 @@ function qualifies(snap, p) {
   if (rirs.some((r) => r === null)) return { ok: false, reason: 'rir-unknown' };
   if (rirs.some((r) => r < p.readyRir)) return { ok: false, reason: 'rir' };
   return { ok: true };
+}
+
+/* ------------------------------------------------- per set number */
+
+/**
+ * The set being entered compared with the same set number in earlier sessions of the exercise.
+ * `current` = { weight, reps } (reps null until picked). Returns null when there is no earlier set.
+ *  - prev / weightDelta / repsDelta: against the last session that had this set
+ *  - shortfall: the latest sessions (and the set being entered) are all below the level before them, for at
+ *    least `shortfallDays` → { ref: { date, weight, reps }, since, days }
+ *  - stagnant: no new best for this set in more than `stagnantDays` → { since, days, best: { weight, reps } }
+ * "Level" is the one-rep-max estimate of the set, so a heavier weight with fewer reps is judged fairly.
+ */
+function setComparison(sessions, exercise, setNo, current, today, p) {
+  const points = [];
+  const chronological = [...sessions].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  for (const s of chronological) {
+    const set = s.sets.find((x) => x.exercise === exercise && x.setNo === setNo && isWorking(x));
+    if (set) points.push({ date: s.date, weight: Number(set.weightKg) || 0, reps: set.reps, v: e1rm(set.weightKg, set.reps) });
+  }
+  if (!points.length) return null;
+  const prev = points[points.length - 1];
+  const hasNow = current && current.reps != null && current.reps > 0 && Number.isFinite(current.weight);
+  const series = hasNow ? [...points, { date: today, weight: current.weight, reps: current.reps, v: e1rm(current.weight, current.reps), now: true }] : points;
+  const out = {
+    prev,
+    weightDelta: Number.isFinite(current?.weight) ? current.weight - prev.weight : null,
+    repsDelta: hasNow ? current.reps - prev.reps : null,
+    shortfall: null,
+    stagnant: null,
+  };
+
+  // Shortfall: the trailing run of points that are all below the best point before the run.
+  let k = series.length - 1;
+  const bestBefore = (i) => Math.max(...series.slice(0, i).map((x) => x.v));
+  while (k >= 1 && series[k].v < bestBefore(k)) k--;
+  if (k < series.length - 1) {
+    const first = series[k + 1];
+    const refV = bestBefore(k + 1);
+    const ref = [...series.slice(0, k + 1)].reverse().find((x) => x.v === refV);
+    const days = daysBetween(first.date, today);
+    if (days >= p.shortfallDays) out.shortfall = { ref, since: first.date, days };
+  }
+
+  // Stagnant: days since this set last set a new best (the first ever counts as a best).
+  let lastBest = series[0];
+  let best = series[0].v;
+  for (const x of series.slice(1)) {
+    if (x.v > best) {
+      best = x.v;
+      lastBest = x;
+    }
+  }
+  const sinceBest = daysBetween(lastBest.date, today);
+  // At least 3 sessions, so one long break between two sessions does not count as stagnation.
+  if (!lastBest.now && sinceBest > p.stagnantDays && series.length >= 3) {
+    out.stagnant = { since: lastBest.date, days: sinceBest, best: { weight: lastBest.weight, reps: lastBest.reps } };
+  }
+  return out;
 }
 
 /* ------------------------------------------------------ per exercise */
@@ -499,6 +560,7 @@ const Progress = {
   isWorking,
   exerciseSnapshot,
   qualifies,
+  setComparison,
   analyseExercise,
   progressionStatus,
   warningFlags,
