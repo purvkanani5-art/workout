@@ -31,6 +31,8 @@
   --chart-grid: #e6e6e6;
   --up: #9a4a0b;
   --down: #b03a2e;
+  --alert-red-bg: #fdecea;
+  --ok-border: #3f8f5a;
   color-scheme: light dark;
 }
 
@@ -62,6 +64,8 @@
     --chart-grid: #2c2c2c;
     --up: #f7b27a;
     --down: #ff8a7e;
+    --alert-red-bg: #3a1714;
+    --ok-border: #5fbf80;
   }
 }
 
@@ -855,12 +859,107 @@ fieldset {
   font-weight: 600;
 }
 
+.set-compare .deltas {
+  font-size: 17px;
+}
+
 .set-compare .warn-line {
-  margin-top: 6px;
-  padding-top: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid var(--chip-border);
+  font-size: 15px;
+}
+
+.set-compare .warn-line.info {
   font-size: 14px;
+  color: var(--muted);
+}
+
+.set-compare .lead {
+  display: block;
+  font-size: 19px;
+}
+
+/* Shortfall: red, stagnant: amber, so they read at a glance between sets. */
+.set-compare.shortfall {
+  background: var(--alert-red-bg);
+  border: 2px solid var(--down);
+}
+
+.set-compare.shortfall .warn-line.shortfall .lead {
+  color: var(--down);
+}
+
+.set-compare.stagnant {
+  background: var(--warn-bg);
+  border: 2px solid var(--warn-border);
+}
+
+.set-compare.stagnant .warn-line.stagnant .lead {
   color: var(--warn-text);
+}
+
+/* ---------- Recovery alert ---------- */
+.alert {
+  border-radius: 16px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.alert-title {
+  margin: 0 0 6px;
+  font-size: 19px;
+  font-weight: 700;
+}
+
+.alert .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.alert.recovery-due {
+  background: var(--warn-bg);
+  border: 2px solid var(--saffron);
+}
+
+.insight .alert.recovery-due {
+  margin-bottom: 0;
+}
+
+.alert.recovery-active {
+  background: var(--chip-bg);
+  border: 2px solid var(--ok-border);
+}
+
+.alert .reasons {
+  margin: 0 0 8px;
+  padding-left: 18px;
+}
+
+.alert .reasons .lead {
+  font-size: 17px;
+}
+
+.btn.primary-alert {
+  background: var(--saffron);
+  border-color: var(--saffron);
+  color: var(--ink);
+}
+
+.next-deload {
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  font-size: 14px;
+  border-radius: 14px;
+  background: var(--chip-bg);
+  border: 1px solid var(--chip-border);
+}
+
+fieldset.trigger {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 
 #set-compare:empty {

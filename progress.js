@@ -20,11 +20,26 @@ const PROGRESSION_DEFAULTS = {
   stallSessions: 3, // sessions at one weight with no rep gain = stalled
   dropSessions: 2, // estimated max falling this many sessions in a row = dropping
   watchDays: 7, // after a weight increase, watch this many days for reps falling under the range
-  deloadWeeks: 8, // suggest a lighter week after this many weeks of training without one
   muscleSetsMin: 10, // weekly hard sets per muscle group, low end of the useful range
   muscleSetsMax: 20, // ...and high end
   shortfallDays: 14, // a set below its earlier level for this long gets a warning on the entry screen
   stagnantDays: 30, // a set that has not beaten its own best for this long is called stagnant
+};
+
+// Recovery (lighter week) alert: any enabled trigger fires it. Editable in Settings → Recovery.
+const RECOVERY_DEFAULTS = {
+  schedOn: true, // A: every N weeks since the last lighter week
+  schedWeeks: 8,
+  strengthOn: true, // B: overall strength down more than X% for N weeks in a row
+  strengthWeeks: 2,
+  strengthPct: 1,
+  dropOn: true, // C: at least K exercises flagged "dropping" at once
+  dropCount: 3,
+  feelOn: true, // D: Energy/Strength ratings averaging ≤ R over the last N rated workouts
+  feelMax: 2.5,
+  feelWorkouts: 3,
+  lengthDays: 7, // how long a lighter week lasts
+  snoozeDays: 3, // "Not now" hides the alert for this many days
 };
 
 const DAY_MS = 86400000;
@@ -535,6 +550,67 @@ function weeklyAverages(entries, field) {
   return [...byWeek.values()].sort((a, b) => a.week.localeCompare(b.week)).map((w) => ({ week: w.week, avg: w.sum / w.n, n: w.n }));
 }
 
+function mondayOf(iso) {
+  const d = new Date(Date.parse(iso));
+  return new Date(d.getTime() - ((d.getUTCDay() + 6) % 7) * DAY_MS).toISOString().slice(0, 10);
+}
+
+/**
+ * Overall strength per calendar week (Monday start), oldest first: [{ week, pct, n }].
+ * For every exercise trained in a week, its mean `perf` that week is compared with its own mean over the
+ * 4 weeks before; the week's `pct` is the average of those changes over the `n` exercises that have a baseline.
+ * Comparing each exercise with itself keeps a strong day from hiding a weak one.
+ */
+function weeklyStrength(sessions) {
+  const byExercise = new Map(); // exercise → [{ date, perf }]
+  for (const s of sessions) {
+    const names = new Set(s.sets.filter(isWorking).map((x) => x.exercise));
+    for (const name of names) {
+      const snap = exerciseSnapshot(s, name, null);
+      if (!snap) continue;
+      if (!byExercise.has(name)) byExercise.set(name, []);
+      byExercise.get(name).push({ date: s.date, perf: snap.perf });
+    }
+  }
+  const weeks = new Map(); // week → [pct]
+  for (const points of byExercise.values()) {
+    const perWeek = new Map();
+    for (const p of points) {
+      const w = mondayOf(p.date);
+      if (!perWeek.has(w)) perWeek.set(w, []);
+      perWeek.get(w).push(p.perf);
+    }
+    for (const [w, vals] of perWeek) {
+      const from = addDays(w, -28);
+      const base = points.filter((p) => p.date >= from && p.date < w).map((p) => p.perf);
+      if (!base.length) continue;
+      const b = base.reduce((v, x) => v + x, 0) / base.length;
+      const now = vals.reduce((v, x) => v + x, 0) / vals.length;
+      if (!weeks.has(w)) weeks.set(w, []);
+      weeks.get(w).push(pct(now, b));
+    }
+  }
+  return [...weeks.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([week, list]) => ({ week, pct: list.reduce((v, x) => v + x, 0) / list.length, n: list.length }));
+}
+
+/** Average 1–5 rating over the last `n` rated workouts, using the named questions when present (else all). */
+function recentFeel(sessions, n, names) {
+  const rated = [...sessions]
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+    .map((s) => {
+      const sat = s.satisfaction || {};
+      const pick = names.filter((q) => Number.isFinite(sat[q])).map((q) => sat[q]);
+      const vals = pick.length ? pick : Object.values(sat).filter(Number.isFinite);
+      return vals.length ? vals.reduce((v, x) => v + x, 0) / vals.length : null;
+    })
+    .filter((v) => v !== null)
+    .slice(0, n);
+  if (rated.length < n) return null;
+  return rated.reduce((v, x) => v + x, 0) / rated.length;
+}
+
 /** Hard (working) sets per muscle group in the 7 days ending `today`. */
 function weeklyMuscleSets(sessions, muscleOf, today) {
   const from = addDays(today, -6);
@@ -553,6 +629,7 @@ function weeklyMuscleSets(sessions, muscleOf, today) {
 
 const Progress = {
   PROGRESSION_DEFAULTS,
+  RECOVERY_DEFAULTS,
   parsePlan,
   e1rm,
   pct,
@@ -571,6 +648,9 @@ const Progress = {
   analyseBody,
   weeklyAverages,
   weeklyMuscleSets,
+  weeklyStrength,
+  recentFeel,
+  mondayOf,
   signed,
   daysBetween,
   addDays,

@@ -47,7 +47,6 @@ function renderProgress() {
     .map((n) => analyse(n))
     .filter(Boolean)
     .sort((a, b) => STATUS_ORDER[a.status.kind] - STATUS_ORDER[b.status.kind] || a.exercise.localeCompare(b.exercise));
-  const deload = deloadAdvice(analyses);
   const p = state.settings.progression;
   const counts = Progress.weeklyMuscleSets(state.history, muscleOf, todayISO());
   const assigned = Object.values(state.settings.muscles || {});
@@ -55,12 +54,8 @@ function renderProgress() {
   const maxCount = Math.max(p.muscleSetsMax, ...Object.values(counts));
   return `
     ${topbar('Progress', { href: 'home', label: 'Home' })}
-    ${
-      deload
-        ? `<div class="banner warn"><p class="title">Lighter week suggested</p><p class="small" style="margin:0">${esc(deload)}</p>
-            <div class="actions"><button type="button" class="btn" data-action="markDeload">I took a lighter week</button></div></div>`
-        : ''
-    }
+    ${recoveryCard('progress')}
+    ${renderWeeklyStrength()}
     <section class="card">
       <h2 class="section-title">Exercises</h2>
       ${
@@ -102,6 +97,23 @@ function renderProgress() {
               .join('')}</div>`
           : '<p class="empty">Set muscle groups per exercise in Settings → Exercises.</p>'
       }
+    </section>`;
+}
+
+/** Overall strength per week (each exercise vs its own previous 4 weeks), the number trigger B watches. */
+function renderWeeklyStrength() {
+  const weeks = Progress.weeklyStrength(statsHistory()).slice(-12);
+  if (!weeks.length) return '';
+  const r = state.settings.recovery;
+  const last = weeks[weeks.length - 1];
+  const below = [...weeks].reverse().findIndex((w) => w.pct >= -r.strengthPct);
+  const run = below === -1 ? weeks.length : below;
+  return `<section class="card stack">
+      <h2 class="section-title" style="margin:0">Overall strength by week</h2>
+      ${Charts.line(weeks.map((w) => ({ date: w.week, y: w.pct, label: `${w.n} exercise${w.n === 1 ? '' : 's'}` })), { title: 'Change vs each exercise’s previous 4 weeks', unit: '%', digits: 1 })}
+      <p class="small" style="margin:0">This week ${esc(Progress.signed(last.pct))} over ${last.n} exercise${last.n === 1 ? '' : 's'}.${
+        run ? ` Below −${esc(r.strengthPct)}% for ${run} week${run === 1 ? '' : 's'} in a row; the recovery alert fires at ${esc(r.strengthWeeks)}.` : ''
+      }</p>
     </section>`;
 }
 
@@ -726,12 +738,6 @@ const trackActions = {
     go('progress', el.dataset.name);
   },
 
-  markDeload() {
-    state.settings.lastDeload = todayISO();
-    save(KEYS.settings, state.settings);
-    toast('Noted. The 8-week count starts again today.');
-    render();
-  },
 
   saveCheckin() {
     const d = bodyDraft();

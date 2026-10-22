@@ -288,3 +288,14 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     > `stagnantDays` (30) over ≥ 3 sessions, except a set already at the top of its rep range (shown as ℹ️
     instead: it can only move when the weight goes up). The lighter-week (recovery) alert shows on Home and in
     the post-workout insight as well as on Progress.
+17. **v1.3 (2026-10-22): recovery alert with four triggers** (`settings.recovery`, defaults
+    `Progress.RECOVERY_DEFAULTS`, each switchable/editable in Settings → Recovery; any one fires it):
+    A every 8 weeks since the last lighter week (or first workout); B overall strength (`Progress.weeklyStrength`:
+    per Monday-week, each exercise's mean perf vs its own previous 4 weeks, averaged) below −1% for 2 consecutive
+    recent weeks; C ≥ 3 exercises flagged dropping; D Energy+Strength ratings averaging ≤ 2.5 over the last 3 rated
+    workouts. Home always shows the countdown ("Next lighter week: date · in N weeks · last one …") or the alert
+    (Start lighter week / Not now = snooze 3 days). A lighter week is a window in `settings.deloads` (7 days); its
+    workouts are excluded everywhere via `statsHistory()` (no comparisons, no warnings, no add-weight banner).
+    Ending on the start day undoes it; otherwise it ends yesterday. `progression.deloadWeeks` (v1.1) migrates to
+    `recovery.schedWeeks`. Shortfall (red) and stagnant (amber) lines above Save set are tinted and lead with the
+    key number.

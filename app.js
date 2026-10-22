@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -181,9 +181,16 @@ const state = {
     photoPoses: DEFAULT_POSES,
     cameraTimer: 10, // seconds of countdown on the in-app camera
     autoLockMinutes: 3,
-    lastDeload: null, // YYYY-MM-DD of the last lighter week
+    lastDeload: null, // YYYY-MM-DD of the last lighter week (v1.1; kept as a fallback for `deloads`)
+    deloads: [], // [{ start, end }] lighter weeks; their workouts are left out of the progress maths
+    snoozeUntil: null, // "Not now" on the recovery alert hides it until this date
     ...savedSettings,
     progression: { ...Progress.PROGRESSION_DEFAULTS, ...(savedSettings.progression || {}) },
+    recovery: {
+      ...Progress.RECOVERY_DEFAULTS,
+      ...(savedSettings.progression?.deloadWeeks ? { schedWeeks: savedSettings.progression.deloadWeeks } : {}),
+      ...(savedSettings.recovery || {}),
+    },
   },
   exercises: load(KEYS.exercises, null),
   targets: load(KEYS.targets, null),
@@ -261,29 +268,132 @@ function progressCtx() {
   };
 }
 
-/** Analysis of one exercise over all saved workouts (plus the draft when `withDraft`). */
-function analyse(exercise, withDraft = false) {
-  const sessions = withDraft && state.draft ? [...state.history.filter((s) => s.id !== state.draft.id), state.draft] : state.history;
-  return Progress.analyseExercise(sessions, exercise, progressCtx());
+/* ------------------------------------------------ lighter weeks (recovery) */
+
+const DELOAD_PLAN = 'Same exercises, about half the sets, about 10% less weight, stop with 3–4 reps in reserve.';
+
+function deloadWindows() {
+  return (Array.isArray(state.settings.deloads) ? state.settings.deloads : []).filter((w) => w && w.start && w.end);
+}
+
+function inDeload(date) {
+  return Boolean(date) && deloadWindows().some((w) => date >= w.start && date <= w.end);
+}
+
+/** Saved workouts that count for progress: lighter-week workouts are left out so they cannot trigger warnings. */
+function statsHistory() {
+  return state.history.filter((s) => !inDeload(s.date));
+}
+
+/** Analysis of one exercise over the saved workouts that count. */
+function analyse(exercise) {
+  return Progress.analyseExercise(statsHistory(), exercise, progressCtx());
 }
 
 function trackedExercises() {
   const names = new Set();
-  for (const s of state.history) for (const set of s.sets) if (Progress.isWorking(set)) names.add(set.exercise);
+  for (const s of statsHistory()) for (const set of s.sets) if (Progress.isWorking(set)) names.add(set.exercise);
   return [...names];
 }
 
-/** Suggest a lighter week after `deloadWeeks` of training without one, or when several lifts are dropping. */
-function deloadAdvice(analyses) {
-  const p = state.settings.progression;
-  const dates = state.history.map((s) => s.date).filter(Boolean).sort();
-  if (!dates.length) return null;
-  const since = state.settings.lastDeload && state.settings.lastDeload > dates[0] ? state.settings.lastDeload : dates[0];
-  const weeks = Math.floor(Progress.daysBetween(since, todayISO()) / 7);
-  const dropping = analyses.filter((a) => a.flags.some((f) => f.kind === 'drop')).length;
-  if (weeks >= p.deloadWeeks) return `You have trained ${weeks} weeks without a lighter week. Plan one soon: same exercises, about half the sets, and stop 3–4 reps short of failure.`;
-  if (dropping >= 2) return `${dropping} exercises are dropping at once. That usually means fatigue, not weakness: a lighter week (about half the sets) often brings strength back.`;
-  return null;
+/**
+ * Recovery state: an active lighter week, or the triggers that fire now (any one is enough), plus the date the
+ * scheduled one is due. Triggers (each switchable in Settings → Recovery):
+ *  A every `schedWeeks` weeks since the last lighter week (or since the first workout)
+ *  B overall strength (Progress.weeklyStrength) down more than `strengthPct`% for `strengthWeeks` weeks in a row
+ *  C at least `dropCount` exercises flagged dropping at once
+ *  D Energy/Strength ratings averaging ≤ `feelMax` over the last `feelWorkouts` rated workouts
+ */
+function recoveryState() {
+  const r = state.settings.recovery;
+  const today = todayISO();
+  const windows = deloadWindows().sort((a, b) => a.start.localeCompare(b.start));
+  const active = windows.find((w) => w.start <= today && today <= w.end) || null;
+  const ended = windows.filter((w) => w.end < today).map((w) => w.end);
+  const lastEnd = [...ended, state.settings.lastDeload].filter(Boolean).sort().pop() || null;
+  const stats = statsHistory();
+  const firstDate = stats.map((s) => s.date).filter(Boolean).sort()[0] || null;
+  const base = lastEnd && (!firstDate || lastEnd > firstDate) ? lastEnd : firstDate;
+  const next = base ? Progress.addDays(base, r.schedWeeks * 7) : null;
+  const out = { active: null, reasons: [], due: false, snoozed: false, next, last: lastEnd, base };
+  if (active) {
+    out.active = { ...active, day: Progress.daysBetween(active.start, today) + 1, length: Progress.daysBetween(active.start, active.end) + 1 };
+    return out;
+  }
+  if (!stats.length) return out;
+
+  if (r.schedOn && next && today >= next) {
+    const weeks = Math.floor(Progress.daysBetween(base, today) / 7);
+    out.reasons.push({ key: 'sched', lead: `${weeks} weeks`, text: `of training since ${lastEnd ? 'your last lighter week' : 'you started'} (alert every ${r.schedWeeks})` });
+  }
+  if (r.strengthOn && r.strengthWeeks >= 1) {
+    const weeks = Progress.weeklyStrength(stats);
+    const tail = weeks.slice(-r.strengthWeeks);
+    const recent = tail.length && tail[tail.length - 1].week >= Progress.addDays(Progress.mondayOf(today), -7);
+    const consecutive = tail.every((w, i) => i === 0 || Progress.daysBetween(tail[i - 1].week, w.week) === 7);
+    if (tail.length === r.strengthWeeks && recent && consecutive && tail.every((w) => w.pct < -r.strengthPct)) {
+      out.reasons.push({ key: 'strength', lead: tail.map((w) => Progress.signed(w.pct)).join(', '), text: `overall strength, ${r.strengthWeeks} week${r.strengthWeeks === 1 ? '' : 's'} in a row` });
+    }
+  }
+  if (r.dropOn) {
+    const dropping = trackedExercises()
+      .map((n) => analyse(n))
+      .filter((a) => a && a.flags.some((f) => f.kind === 'drop'));
+    if (dropping.length >= r.dropCount) {
+      out.reasons.push({ key: 'drop', lead: `${dropping.length} exercises`, text: `dropping at once: ${dropping.map((a) => a.exercise).join(', ')}` });
+    }
+  }
+  if (r.feelOn) {
+    const feel = Progress.recentFeel(stats, r.feelWorkouts, ['Energy', 'Strength']);
+    if (feel !== null && feel <= r.feelMax) {
+      out.reasons.push({ key: 'feel', lead: `${feel.toFixed(1)} / 5`, text: `Energy and Strength ratings over your last ${r.feelWorkouts} workouts` });
+    }
+  }
+  out.due = out.reasons.length > 0;
+  out.snoozed = out.due && Boolean(state.settings.snoozeUntil) && today < state.settings.snoozeUntil;
+  return out;
+}
+
+/**
+ * The recovery card. `where`: 'home' (always shown: countdown, alert or active week), 'entry' (only when a lighter
+ * week is running or the alert is due) and 'progress'.
+ */
+function recoveryCard(where) {
+  const rs = recoveryState();
+  const r = state.settings.recovery;
+  const buttons = where !== 'entry';
+  if (rs.active) {
+    const a = rs.active;
+    return `<div class="alert recovery-active" role="status">
+      <p class="alert-title">🟢 Lighter week · day ${Math.min(a.day, a.length)} of ${a.length}</p>
+      <p class="small" style="margin:0">Ends ${esc(formatDate(a.end))}. ${esc(DELOAD_PLAN)} These workouts are not counted in progress.</p>
+      ${buttons ? '<div class="actions"><button type="button" class="btn" data-action="endDeload">End lighter week now</button></div>' : ''}
+    </div>`;
+  }
+  if (rs.due && !rs.snoozed) {
+    return `<div class="alert recovery-due" role="alert">
+      <p class="alert-title">⚠️ Recovery: lighter week now</p>
+      <ul class="reasons">${rs.reasons.map((x) => `<li><strong class="lead">${esc(x.lead)}</strong> ${esc(x.text)}</li>`).join('')}</ul>
+      <p class="small" style="margin:0">${esc(r.lengthDays)} days: ${esc(DELOAD_PLAN)}</p>
+      ${
+        buttons
+          ? `<div class="actions">
+              <button type="button" class="btn primary-alert" data-action="startDeload">Start lighter week</button>
+              <button type="button" class="btn" data-action="snoozeRecovery">Not now (${esc(r.snoozeDays)} days)</button>
+            </div>`
+          : ''
+      }
+    </div>`;
+  }
+  if (where === 'entry') return '';
+  if (!rs.next) return `<p class="next-deload">🗓 Lighter week: every ${esc(r.schedWeeks)} weeks, counted from your first workout.</p>`;
+  const left = Progress.daysBetween(todayISO(), rs.next);
+  const weeksLeft = Math.max(0, Math.ceil(left / 7));
+  return `<p class="next-deload">🗓 <strong>Next lighter week:</strong> ${esc(formatDate(rs.next))} · ${
+    left <= 0 ? 'due now' : `in ${weeksLeft} week${weeksLeft === 1 ? '' : 's'}`
+  }${rs.last ? ` · last one ${esc(formatDate(rs.last, false))}` : ''}${
+    rs.snoozed ? ` · alert snoozed until ${esc(formatDate(state.settings.snoozeUntil, false))}` : ''
+  }${!r.schedOn ? ' · schedule off' : ''}</p>`;
 }
 
 if (!state.exercises) {
@@ -690,15 +800,8 @@ function homeBanners() {
   const all = trackedExercises()
     .map((n) => analyse(n))
     .filter(Boolean);
-  const deload = deloadAdvice(all);
-  if (deload) {
-    out.push(`<div class="banner warn">
-      <p class="title">Recovery: lighter week suggested</p>
-      <p class="small" style="margin:0">${esc(deload)}</p>
-      <div class="actions"><button type="button" class="btn" data-action="markDeload">I took a lighter week</button></div>
-    </div>`);
-  }
-  const due = all.filter((a) => a.status.kind === 'increase');
+  out.push(recoveryCard('home'));
+  const due = recoveryState().active ? [] : all.filter((a) => a.status.kind === 'increase');
   if (due.length) {
     out.push(`<div class="banner">
       <p class="title">Time to add weight</p>
@@ -774,6 +877,7 @@ function renderEntry() {
 
   return `
     ${topbar('', { href: 'home', label: 'Home' })}
+    ${recoveryCard('entry')}
     <section class="card stack">
       <div>
         <h1 class="card-title">Workout entry</h1>
@@ -889,8 +993,9 @@ function formReps(f) {
 function setCompareHtml() {
   const f = state.ui.form;
   if (!f || !f.exercise || f.warmup || !state.draft) return '';
+  if (inDeload(state.draft.date)) return '<div class="set-compare"><div class="small">🟢 Lighter week: comparisons are paused. Go easy, with 3–4 reps in reserve.</div></div>';
   const weight = f.weight === '' ? NaN : Number(f.weight);
-  const sessions = state.history.filter((s) => s.id !== state.draft.id);
+  const sessions = statsHistory().filter((s) => s.id !== state.draft.id);
   const c = Progress.setComparison(sessions, f.exercise, f.setNo, { weight, reps: formReps(f) }, state.draft.date || todayISO(), state.settings.progression);
   if (!c) return '';
   const delta = (n, unit) => (n > 0 ? `<span class="up">▲ +${esc(fmtKg(n))}${unit}</span>` : n < 0 ? `<span class="down">▼ −${esc(fmtKg(-n))}${unit}</span>` : '<span class="same">● same</span>');
@@ -900,21 +1005,22 @@ function setCompareHtml() {
   const warn = [];
   if (c.shortfall) {
     const r = c.shortfall.ref;
-    warn.push(`⚠️ Shortfall: below ${esc(fmtKg(r.weight))} kg × ${r.reps} (${esc(formatDate(r.date, false))}) for ${c.shortfall.days} days`);
+    warn.push({ cls: 'shortfall', html: `<strong class="lead">⚠️ ${c.shortfall.days} days below</strong> your ${esc(fmtKg(r.weight))} kg × ${r.reps} of ${esc(formatDate(r.date, false))} on this set` });
   }
   const plan = Progress.parsePlan(planText(state.draft.dayType, f.exercise));
   const capped = c.stagnant && plan && !plan.timed && c.stagnant.best.reps >= plan.max - state.settings.progression.topTolerance;
   if (capped) {
     // Already at the top of the rep range: no more reps are expected until the weight goes up, so not "stagnant".
-    warn.push(`ℹ️ This set is at the top of its range (${c.stagnant.best.reps} reps; the range tops out at ${plan.max}). It moves on when the weight goes up.`);
+    warn.push({ cls: 'info', html: `ℹ️ This set is at the top of its range (${c.stagnant.best.reps} reps; the range tops out at ${plan.max}). It moves on when the weight goes up.` });
   } else if (c.stagnant) {
     const b = c.stagnant.best;
-    warn.push(`⚠️ Stagnant: no new best on this set for ${c.stagnant.days} days (best ${esc(fmtKg(b.weight))} kg × ${b.reps}, ${esc(formatDate(c.stagnant.since, false))})`);
+    warn.push({ cls: 'stagnant', html: `<strong class="lead">⚠️ Stagnant ${c.stagnant.days} days</strong> no new best on this set since ${esc(fmtKg(b.weight))} kg × ${b.reps} (${esc(formatDate(c.stagnant.since, false))})` });
   }
-  return `<div class="set-compare">
+  const tone = warn.some((w) => w.cls === 'shortfall') ? 'shortfall' : warn.some((w) => w.cls === 'stagnant') ? 'stagnant' : '';
+  return `<div class="set-compare ${tone}">
       <div class="small muted">vs Set ${f.setNo} last time · ${esc(formatDate(c.prev.date, false))} · ${esc(fmtKg(c.prev.weight))} kg × ${c.prev.reps}</div>
-      <div>${parts.join(' · ')}</div>
-      ${warn.map((w) => `<div class="warn-line">${w}</div>`).join('')}
+      <div class="deltas">${parts.join(' · ')}</div>
+      ${warn.map((w) => `<div class="warn-line ${w.cls}">${w.html}</div>`).join('')}
     </div>`;
 }
 
@@ -925,6 +1031,7 @@ function refreshSetCompare() {
 
 /** Progression status for the exercise on the entry screen, from saved workouts only (what today should aim for). */
 function entryStatus(exercise) {
+  if (state.draft && inDeload(state.draft.date)) return '';
   const a = analyse(exercise);
   if (!a || a.status.kind === 'untracked') return '';
   const line = Progress.statusLine(a.status, todayISO());
@@ -997,9 +1104,13 @@ const TREND = {
 
 /** "How did this workout compare": per exercise trend, numbers in words, progression status and warnings. */
 function renderInsight(session) {
+  if (inDeload(session.date)) {
+    return `<div class="insight stack"><h2 class="section-title" style="margin:0">Progress insight</h2>
+      <p class="small" style="margin:0">🟢 Lighter-week workout: not compared and not counted in progress, so it cannot set off warnings.</p></div>`;
+  }
   const ctx = progressCtx();
   ctx.today = session.date || todayISO();
-  const others = state.history.filter((s) => s.id !== session.id);
+  const others = statsHistory().filter((s) => s.id !== session.id);
   const ins = Progress.workoutInsight(session, others, ctx);
   if (!ins.rows.length) return '';
   const p = state.settings.progression;
@@ -1012,12 +1123,22 @@ function renderInsight(session) {
   const totals = [];
   if (ins.strengthPct !== null) totals.push(`${Progress.signed(ins.strengthPct)} average change per exercise`);
   if (ins.volumePct !== null) totals.push(`volume ${Progress.signed(ins.volumePct)} on the same exercises`);
-  const deload = deloadAdvice(trackedExercises().map((n) => analyse(n)).filter(Boolean));
+  // Recovery check including this workout, so a drop it causes shows up straight away.
+  const saved = state.history;
+  if (!saved.some((s) => s.id === session.id)) state.history = [...saved, session];
+  const rs = recoveryState();
+  state.history = saved;
   return `
     <div class="insight stack">
       <h2 class="section-title" style="margin:0">Progress insight</h2>
       <p class="insight-head">${esc(headline.join(' · '))}${totals.length ? `<br /><span class="small muted">vs last time: ${esc(totals.join(', '))}</span>` : ''}</p>
-      ${deload ? `<p class="flag">⚠️ Recovery: ${esc(deload)}</p>` : ''}
+      ${
+        rs.due
+          ? `<div class="alert recovery-due"><p class="alert-title">⚠️ Recovery: lighter week now</p>
+              <ul class="reasons">${rs.reasons.map((x) => `<li><strong class="lead">${esc(x.lead)}</strong> ${esc(x.text)}</li>`).join('')}</ul>
+              <p class="small" style="margin:0">Start it from the Home screen.</p></div>`
+          : ''
+      }
       ${ins.rows
         .map((a) => {
           const t = TREND[a.trend];
@@ -1239,6 +1360,7 @@ function renderSettings() {
     </section>
 
     ${renderProgressionSettings()}
+    ${renderRecoverySettings()}
     ${renderBodySettings()}
 
     <section class="card stack">
@@ -1339,7 +1461,6 @@ const PROGRESSION_FIELDS = [
   ['stallSessions', 'Stall warning after (sessions)', 'Same weight and no extra reps for this many sessions.', 1],
   ['dropSessions', 'Drop warning after (sessions)', 'Estimated max falling this many sessions in a row.', 1],
   ['watchDays', 'Watch period after adding weight (days)', 'Checks that reps stay inside the range at the new weight.', 1],
-  ['deloadWeeks', 'Suggest a lighter week every (weeks)', '', 1],
   ['shortfallDays', 'Shortfall warning after (days)', 'A set below its earlier level for this long gets ⚠️ above Save set.', 1],
   ['stagnantDays', 'Stagnant warning after (days)', 'A set with no new best for longer than this is called stagnant.', 1],
   ['muscleSetsMin', 'Weekly hard sets per muscle, low end', '', 1],
@@ -1364,6 +1485,40 @@ function renderProgressionSettings() {
         ).join('')}
       </div>
       <button type="button" class="btn secondary" data-action="resetProgression">Restore the defaults</button>
+    </section>`;
+}
+
+// Recovery triggers: [switch key, title, [[number key, label, step], …]]
+const RECOVERY_TRIGGERS = [
+  ['schedOn', 'A · On a schedule', [['schedWeeks', 'Every (weeks)', 1]]],
+  ['strengthOn', 'B · Overall strength falling', [['strengthWeeks', 'Weeks in a row', 1], ['strengthPct', 'Down more than (%)', 0.5]]],
+  ['dropOn', 'C · Several exercises dropping', [['dropCount', 'At least (exercises)', 1]]],
+  ['feelOn', 'D · Feeling run down', [['feelMax', 'Energy & Strength ≤ (of 5)', 0.5], ['feelWorkouts', 'Over the last (workouts)', 1]]],
+];
+
+function renderRecoverySettings() {
+  const r = state.settings.recovery;
+  const num = (key, label, step) => `<div>
+      <label for="rec-${key}">${esc(label)}</label>
+      <input id="rec-${key}" class="input" type="number" inputmode="decimal" min="0" step="${step}" value="${esc(r[key])}" data-change="recoveryNum" data-key="${key}" />
+    </div>`;
+  return `
+    <section class="card stack">
+      <div>
+        <h2 class="section-title" style="margin:0">Recovery (lighter week)</h2>
+        <p class="hint">The alert fires when any switched-on trigger is met. Workouts during a lighter week are left out of progress, so they never set off warnings.</p>
+      </div>
+      ${RECOVERY_TRIGGERS.map(
+        ([on, title, fields]) => `<fieldset class="trigger">
+          <label class="check"><input type="checkbox" data-change="recoveryToggle" data-key="${on}" ${r[on] ? 'checked' : ''} /> ${esc(title)}</label>
+          <div class="two">${fields.map(([k, l, s]) => num(k, l, s)).join('')}</div>
+        </fieldset>`,
+      ).join('')}
+      <div class="two">
+        ${num('lengthDays', 'Lighter week length (days)', 1)}
+        ${num('snoozeDays', '"Not now" hides it for (days)', 1)}
+      </div>
+      <button type="button" class="btn secondary" data-action="resetRecovery">Restore the defaults</button>
     </section>`;
 }
 
@@ -1924,6 +2079,45 @@ const actions = {
     render();
   },
 
+  async resetRecovery() {
+    const ok = await openModal({ title: 'Restore the recovery defaults?', confirmText: 'Restore' });
+    if (!ok) return;
+    state.settings.recovery = { ...Progress.RECOVERY_DEFAULTS };
+    save(KEYS.settings, state.settings);
+    render();
+  },
+
+  /** Start a lighter week today; its workouts are left out of progress until it ends. */
+  startDeload() {
+    const today = todayISO();
+    const len = Math.max(1, Math.round(Number(state.settings.recovery.lengthDays) || 7));
+    state.settings.deloads = [...deloadWindows().filter((w) => w.end < today), { start: today, end: Progress.addDays(today, len - 1) }];
+    state.settings.snoozeUntil = null;
+    save(KEYS.settings, state.settings);
+    toast(`Lighter week started: ${len} days`);
+    render();
+  },
+
+  async endDeload() {
+    const today = todayISO();
+    const ok = await openModal({ title: 'End the lighter week now?', message: "From today, workouts count for progress again.", confirmText: 'End it' });
+    if (!ok) return;
+    // Started today: drop it. Otherwise it ended yesterday, so today's workout counts.
+    state.settings.deloads = deloadWindows()
+      .filter((w) => !(w.start === today && w.end >= today))
+      .map((w) => (w.start < today && today <= w.end ? { ...w, end: Progress.addDays(today, -1) } : w));
+    save(KEYS.settings, state.settings);
+    render();
+  },
+
+  snoozeRecovery() {
+    const days = Math.max(1, Math.round(Number(state.settings.recovery.snoozeDays) || 3));
+    state.settings.snoozeUntil = Progress.addDays(todayISO(), days);
+    save(KEYS.settings, state.settings);
+    toast(`Reminder again on ${formatDate(state.settings.snoozeUntil, false)}`);
+    render();
+  },
+
   addField() {
     addToList('measureFields', measureFields(), state.ui.newField, 'newField', 'field-new');
   },
@@ -2036,6 +2230,21 @@ const changes = {
     state.settings.repsChips = unique;
     save(KEYS.settings, state.settings);
     render();
+  },
+  recoveryToggle(el) {
+    state.settings.recovery = { ...state.settings.recovery, [el.dataset.key]: el.checked };
+    save(KEYS.settings, state.settings);
+  },
+  recoveryNum(el) {
+    const key = el.dataset.key;
+    const v = Number(el.value);
+    const min = ['schedWeeks', 'strengthWeeks', 'dropCount', 'feelWorkouts', 'lengthDays'].includes(key) ? 1 : 0;
+    if (!Number.isFinite(v) || v < min) {
+      el.value = state.settings.recovery[key];
+      return toast(`Enter a number of ${min} or more`, 'error');
+    }
+    state.settings.recovery = { ...state.settings.recovery, [key]: v };
+    save(KEYS.settings, state.settings);
   },
   requireRir(el) {
     state.settings.requireRir = el.checked;
@@ -2227,6 +2436,7 @@ async function importFromFile(file) {
       ...state.settings,
       ...data.settings,
       progression: { ...Progress.PROGRESSION_DEFAULTS, ...(data.settings.progression || state.settings.progression) },
+      recovery: { ...Progress.RECOVERY_DEFAULTS, ...(data.settings.recovery || state.settings.recovery) },
     };
   }
   if (Array.isArray(data.measurements)) state.measurements = data.measurements;
