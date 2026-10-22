@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -28,7 +28,14 @@ const KEYS = {
   measurements: 'wt.measurements',
   mOutbox: 'wt.mOutbox',
   vaultInfo: 'wt.vaultInfo', // { lastPhotoAt, lastBackupAt }: dates only, never photo data
+  missed: 'wt.missed', // [{ id, date, dayType, reason, note, savedAt }] scheduled days with no workout
+  missedOutbox: 'wt.missedOutbox', // [{ id, entry }] waiting for the Sheet (entry.deleted = remove the row)
+  backup: 'wt.backup', // { linked, dirty, sentAt, error }: the settings copy in the Sheet's Settings tab
 };
+
+// Weekday (0 = Sunday) → day type; '' = rest. The owner trains Monday to Saturday. Editable in Settings.
+const DEFAULT_SCHEDULE = { 0: '', 1: 'Push A', 2: 'Pull A', 3: 'Legs A', 4: 'Push B', 5: 'Pull B', 6: 'Legs B' };
+const DEFAULT_MISS_REASONS = ['Sick', 'Injury or pain', 'Tired or sore', 'Work', 'Travel', 'Family', 'Planned rest', 'Other'];
 
 // Muscle group of each exercise in the owner's plan, for the weekly-sets count. Editable per exercise in Settings.
 const DEFAULT_MUSCLES = {
@@ -143,9 +150,13 @@ function load(key, fallback) {
   }
 }
 
+// What the Sheet's Settings tab mirrors: any save of these schedules an upload (see backupSettingsSoon).
+const BACKED_UP_KEYS = ['wt.settings', 'wt.exercises', 'wt.targets', 'wt.cardio'];
+
 function save(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
+    if (BACKED_UP_KEYS.includes(key) && typeof backupSettingsSoon === 'function') backupSettingsSoon();
     return true;
   } catch {
     toast('Could not save on this device (storage full or blocked)', 'error');
@@ -180,6 +191,9 @@ const state = {
     checkinDay: 0, // Sunday
     photoPoses: DEFAULT_POSES,
     programStart: '', // YYYY-MM-DD in Week 1 of the photo folders; blank = the first logged workout
+    schedule: { ...DEFAULT_SCHEDULE },
+    scheduleFrom: null, // first day missed workouts are looked for (set on first run, so nothing is back-filled)
+    missReasons: DEFAULT_MISS_REASONS,
     cameraTimer: 10, // seconds of countdown on the in-app camera
     autoLockMinutes: 3,
     lastDeload: null, // YYYY-MM-DD of the last lighter week (v1.1; kept as a fallback for `deloads`)
@@ -202,6 +216,9 @@ const state = {
   measurements: load(KEYS.measurements, []),
   mOutbox: load(KEYS.mOutbox, []),
   vaultInfo: load(KEYS.vaultInfo, { lastPhotoAt: null, lastBackupAt: null }),
+  missed: load(KEYS.missed, []),
+  missedOutbox: load(KEYS.missedOutbox, []),
+  backup: load(KEYS.backup, { linked: false, dirty: false, sentAt: null, error: '' }),
   ui: {
     progress: { metric: 'e1rm', range: '12w' },
     body: { field: null, range: '12w', weighIn: '', draft: null },
@@ -221,6 +238,9 @@ const state = {
     historySync: '',
     newExercise: '',
     newQuestion: '',
+    newReason: '',
+    startPicked: false, // the owner chose a day on Home, so it no longer follows the schedule
+    summaryWeek: null, // Progress → weekly summary shown (week end date)
   },
 };
 
@@ -285,6 +305,239 @@ function unsavedWeeks() {
     .sort((a, b) => Number(a.split(' ')[1]) - Number(b.split(' ')[1]));
 }
 
+/* -------------------------------------------------- schedule and missed days */
+
+/** The day type scheduled on a date ('' = rest day). */
+function scheduledDay(iso) {
+  const dow = new Date(Date.parse(iso)).getUTCDay();
+  const s = state.settings.schedule || DEFAULT_SCHEDULE;
+  return String(s[dow] ?? s[String(dow)] ?? '');
+}
+
+function missReasons() {
+  return Array.isArray(state.settings.missReasons) && state.settings.missReasons.length ? state.settings.missReasons : DEFAULT_MISS_REASONS;
+}
+
+/** Dates with a workout saved (or one in progress), so they are never called missed. */
+function trainedDates() {
+  const dates = new Set(state.history.map((s) => s.date));
+  if (state.draft && state.draft.sets.length) dates.add(state.draft.date);
+  return dates;
+}
+
+/**
+ * Mark scheduled days that passed with no workout as missed (the owner never makes them up: the next day's
+ * workout follows). Looks from `scheduleFrom` (set on first run, so older days are not back-filled) to yesterday.
+ * A missed day that gets a workout logged afterwards (a late entry for that date) is taken back.
+ * Ids are "missed-YYYY-MM-DD", so two phones agree. Returns true when something changed.
+ */
+function detectMissed() {
+  const today = todayISO();
+  if (!state.settings.scheduleFrom) {
+    state.settings.scheduleFrom = today;
+    save(KEYS.settings, state.settings);
+    return false;
+  }
+  const trained = trainedDates();
+  const have = new Map(state.missed.map((m) => [m.date, m]));
+  let changed = false;
+  for (const m of [...state.missed]) {
+    if (trained.has(m.date)) {
+      state.missed = state.missed.filter((x) => x.id !== m.id);
+      queueMissed({ id: m.id, deleted: true });
+      changed = true;
+    }
+  }
+  const from = state.settings.scheduleFrom > Progress.addDays(today, -60) ? state.settings.scheduleFrom : Progress.addDays(today, -60);
+  for (let d = from; d < today; d = Progress.addDays(d, 1)) {
+    const dayType = scheduledDay(d);
+    if (!dayType || trained.has(d) || have.has(d)) continue;
+    const entry = { id: `missed-${d}`, date: d, dayType, reason: '', note: '', savedAt: nowISO() };
+    state.missed.push(entry);
+    queueMissed(entry);
+    changed = true;
+  }
+  if (changed) {
+    state.missed.sort((a, b) => a.date.localeCompare(b.date));
+    save(KEYS.missed, state.missed);
+  }
+  return changed;
+}
+
+/** Queue one missed-day change for the Sheet (the latest change per id wins). */
+function queueMissed(entry) {
+  state.missedOutbox = [...state.missedOutbox.filter((x) => x.id !== entry.id), { id: entry.id, entry }];
+  save(KEYS.missedOutbox, state.missedOutbox);
+}
+
+function setMissedReason(id, reason, note) {
+  const m = state.missed.find((x) => x.id === id);
+  if (!m) return;
+  m.reason = reason;
+  if (note !== undefined) m.note = note;
+  m.savedAt = nowISO();
+  save(KEYS.missed, state.missed);
+  queueMissed(m);
+  syncOutbox();
+}
+
+/** Exercises planned on a day type (the plan as it is now). */
+function dayExercises(dayType) {
+  return state.exercises[dayType] || [];
+}
+
+/**
+ * Days to leave out of an exercise's clocks (shortfall, stagnant, watch) between `from` and `to`: each missed
+ * workout whose day has this exercise counts `missedPauseDays`, so a skipped session is not "no progress".
+ */
+function missedPause(exercise, from, to) {
+  const per = Number(state.settings.progression.missedPauseDays) || 0;
+  if (!per) return 0;
+  return state.missed.filter((m) => m.date > from && m.date <= to && dayExercises(m.dayType).includes(exercise)).length * per;
+}
+
+/** Muscle groups in the plan not trained (working sets) for more than `neglectDays`. Newest workouts count. */
+function neglectedMuscles() {
+  const limit = Number(state.settings.progression.neglectDays) || 0;
+  if (!limit) return [];
+  const planned = new Set();
+  for (const day of Object.keys(state.exercises)) for (const ex of dayExercises(day)) if (muscleOf(ex)) planned.add(muscleOf(ex));
+  const last = {};
+  for (const s of state.history) {
+    for (const set of s.sets) {
+      const m = muscleOf(set.exercise);
+      if (m && Progress.isWorking(set) && (!last[m] || s.date > last[m])) last[m] = s.date;
+    }
+  }
+  const today = todayISO();
+  const started = state.history.length ? state.history.map((s) => s.date).sort()[0] : null;
+  if (!started) return [];
+  return [...planned]
+    .map((m) => ({ muscle: m, last: last[m] || null, days: Progress.daysBetween(last[m] || started, today) }))
+    .filter((x) => x.days > limit)
+    .sort((a, b) => b.days - a.days);
+}
+
+/* ------------------------------------------------- settings copy in the Sheet */
+
+let backupTimer = null;
+
+/** The settings worth restoring on a new phone. The Sheet URL and token stay out: you need them to get here. */
+function settingsSnapshot() {
+  const { scriptUrl, token, ...settings } = state.settings;
+  return { settings, exercises: state.exercises, targets: state.targets, cardio: state.cardio, app: APP_VERSION };
+}
+
+function saveBackupState(patch) {
+  state.backup = { ...state.backup, ...patch };
+  try {
+    localStorage.setItem(KEYS.backup, JSON.stringify(state.backup));
+  } catch {}
+}
+
+/** Called by save(): upload a few seconds after the last change (many saves in a row become one upload). */
+function backupSettingsSoon() {
+  if (!state || !state.backup) return;
+  if (!state.backup.dirty) saveBackupState({ dirty: true });
+  clearTimeout(backupTimer);
+  backupTimer = setTimeout(() => uploadSettings().catch(() => {}), 3000);
+}
+
+async function uploadSettings() {
+  if (!haveApi() || !state.backup.linked || !state.backup.dirty) return false;
+  const savedAt = nowISO();
+  try {
+    await apiPost({ action: 'settings', data: settingsSnapshot(), savedAt });
+    saveBackupState({ dirty: false, sentAt: savedAt, error: '' });
+    return true;
+  } catch (err) {
+    saveBackupState({ error: err instanceof ApiError ? err.message : 'offline' });
+    return false;
+  } finally {
+    // Only the status line is refreshed, so a field being typed in Settings keeps its focus.
+    const el = document.getElementById('backup-status');
+    if (el) el.innerHTML = settingsCopyStatus();
+  }
+}
+
+/** Put a settings copy from the Sheet into effect (keeps this phone's URL and token). */
+function applySettingsSnapshot(data) {
+  const s = data.settings && typeof data.settings === 'object' ? data.settings : {};
+  state.settings = {
+    ...state.settings,
+    ...s,
+    scriptUrl: state.settings.scriptUrl,
+    token: state.settings.token,
+    progression: { ...Progress.PROGRESSION_DEFAULTS, ...(s.progression || {}) },
+    recovery: { ...Progress.RECOVERY_DEFAULTS, ...(s.recovery || {}) },
+    // This phone may not hold the past workouts yet, so it looks for missed days only from today; the
+    // earlier ones come from the Sheet's Missed tab.
+    scheduleFrom: todayISO(),
+  };
+  if (data.exercises && typeof data.exercises === 'object') state.exercises = data.exercises;
+  if (data.targets && typeof data.targets === 'object') state.targets = data.targets;
+  if (data.cardio && typeof data.cardio === 'object') state.cardio = data.cardio;
+  save(KEYS.settings, state.settings);
+  save(KEYS.exercises, state.exercises);
+  save(KEYS.targets, state.targets);
+  save(KEYS.cardio, state.cardio);
+  saveBackupState({ dirty: false });
+}
+
+/**
+ * First contact with the Sheet's Settings tab from this phone. Empty tab → this phone becomes the source.
+ * A copy already there (a new phone, or a reinstall) → ask before anything is overwritten either way, so
+ * fresh defaults on a new phone can never replace the real settings.
+ * `ask` false (background sync) leaves the question for Settings → Settings copy.
+ */
+async function linkSettingsBackup({ ask = true } = {}) {
+  if (!haveApi() || state.backup.linked) return;
+  let remote;
+  try {
+    remote = await apiGet({ action: 'settings' });
+  } catch (err) {
+    saveBackupState({ error: err instanceof ApiError ? err.message : 'offline' });
+    return;
+  }
+  if (!remote.data) {
+    saveBackupState({ linked: true, dirty: true, error: '' });
+    await uploadSettings();
+    return;
+  }
+  saveBackupState({ remoteAt: remote.savedAt || null, error: '' });
+  if (!ask) return;
+  const restore = await openModal({
+    title: 'Settings found in the Sheet',
+    message: `Saved ${remote.savedAt ? formatDate(String(remote.savedAt).slice(0, 10)) : 'earlier'}: exercises, plans, schedule, rep buttons, progression and recovery settings. Use them on this phone? (Cancel keeps this phone's settings and replaces the Sheet's copy.)`,
+    confirmText: 'Use the Sheet’s settings',
+  });
+  if (restore) {
+    applySettingsSnapshot(remote.data);
+    await syncMissedFromSheet();
+    toast('Settings restored from the Sheet');
+  }
+  saveBackupState({ linked: true, dirty: !restore, remoteAt: null });
+  if (!restore) await uploadSettings();
+  render();
+}
+
+/** Missed days from the Sheet (a new phone): merged by id, the Sheet's reason wins when this phone has none. */
+async function syncMissedFromSheet() {
+  try {
+    const data = await apiGet({ action: 'missed' });
+    const byId = new Map(state.missed.map((m) => [m.id, m]));
+    for (const e of Array.isArray(data.entries) ? data.entries : []) {
+      if (!e || !e.id || !/^\d{4}-\d{2}-\d{2}$/.test(String(e.date))) continue;
+      const local = byId.get(e.id);
+      if (local) {
+        if (!local.reason && e.reason) Object.assign(local, { reason: e.reason, note: e.note || '' });
+      } else byId.set(e.id, { id: e.id, date: e.date, dayType: e.dayType || '', reason: e.reason || '', note: e.note || '', savedAt: '' });
+    }
+    state.missed = [...byId.values()].sort((a, b) => a.date.localeCompare(b.date));
+    save(KEYS.missed, state.missed);
+  } catch {}
+}
+
 /* ------------------------------------------------- progress engine glue */
 
 /** The plan text for an exercise: the day's own plan first, else the first day that has one. */
@@ -306,6 +559,7 @@ function progressCtx() {
     isLower: (dayType, exercise) => (muscleOf(exercise) ? LOWER_MUSCLES.includes(muscleOf(exercise)) : /leg/i.test(dayType || '')),
     stepFor: (exercise) => state.settings.steps?.[exercise],
     today: todayISO(),
+    pauseFor: missedPause,
   };
 }
 
@@ -355,8 +609,11 @@ function recoveryState() {
   const stats = statsHistory();
   const firstDate = stats.map((s) => s.date).filter(Boolean).sort()[0] || null;
   const base = lastEnd && (!firstDate || lastEnd > firstDate) ? lastEnd : firstDate;
-  const next = base ? Progress.addDays(base, r.schedWeeks * 7) : null;
-  const out = { active: null, reasons: [], due: false, snoozed: false, next, last: lastEnd, base };
+  // Missed workouts are rest the body got anyway: each pushes the scheduled lighter week back a little.
+  const missedSince = base ? state.missed.filter((m) => m.date > base).length : 0;
+  const pushed = missedSince * (Number(state.settings.progression.missedSchedDays) || 0);
+  const next = base ? Progress.addDays(base, r.schedWeeks * 7 + pushed) : null;
+  const out = { active: null, reasons: [], due: false, snoozed: false, next, last: lastEnd, base, pushed };
   if (active) {
     out.active = { ...active, day: Progress.daysBetween(active.start, today) + 1, length: Progress.daysBetween(active.start, active.end) + 1 };
     return out;
@@ -433,6 +690,8 @@ function recoveryCard(where) {
   return `<p class="next-deload">🗓 <strong>Next lighter week:</strong> ${esc(formatDate(rs.next))} · ${
     left <= 0 ? 'due now' : `in ${weeksLeft} week${weeksLeft === 1 ? '' : 's'}`
   }${rs.last ? ` · last one ${esc(formatDate(rs.last, false))}` : ''}${
+    rs.pushed ? ` · +${rs.pushed} day${rs.pushed === 1 ? '' : 's'} for missed workouts` : ''
+  }${
     rs.snoozed ? ` · alert snoozed until ${esc(formatDate(state.settings.snoozeUntil, false))}` : ''
   }${!r.schedOn ? ' · schedule off' : ''}</p>`;
 }
@@ -765,6 +1024,8 @@ function renderHome() {
   const d = state.draft;
   const st = state.ui.start;
   const waiting = state.outbox.length;
+  const planned = /^\d{4}-\d{2}-\d{2}$/.test(st.date) ? scheduledDay(st.date) : '';
+  if (!state.ui.startPicked && planned && DAY_TYPES.includes(planned)) st.dayType = planned;
   return `
     <div class="topbar">
       <div class="brand">
@@ -806,6 +1067,7 @@ function renderHome() {
     }
     <section class="card stack">
       <h2 class="section-title" style="margin:0">Start workout</h2>
+      ${nextWorkoutHtml(planned)}
       <fieldset>
         <legend>Day</legend>
         <div class="segments">
@@ -835,9 +1097,58 @@ function renderHome() {
     </section>`;
 }
 
+/** "Today · Tuesday: Pull A", when it was last done, and muscle groups left untrained too long. */
+function nextWorkoutHtml(planned) {
+  const st = state.ui.start;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(st.date)) return '';
+  const today = st.date === todayISO();
+  const when = `${today ? 'Today' : formatDate(st.date, false)} · ${WEEKDAYS[new Date(Date.parse(st.date)).getUTCDay()]}`;
+  let line;
+  if (!planned) line = `${esc(when)}: <strong>rest day</strong> on your schedule.`;
+  else {
+    const last = state.history.filter((s) => s.dayType === planned && s.date < st.date).map((s) => s.date).sort().pop();
+    line = `${esc(when)}: <strong>${esc(planned)}</strong>${last ? ` · last done ${esc(formatDate(last, false))} (${Progress.daysBetween(last, st.date)} days ago)` : ''}`;
+  }
+  const neglected = today ? neglectedMuscles() : [];
+  return `<div class="next-workout">
+      <p class="small" style="margin:0">🗓 ${line}</p>
+      ${
+        neglected.length
+          ? `<p class="small warn-text" style="margin:4px 0 0">⚠️ Not trained for over ${esc(state.settings.progression.neglectDays)} days: ${neglected
+              .map((n) => `<strong>${esc(n.muscle)}</strong> ${n.last ? `${n.days} days` : 'not yet'}`)
+              .join(', ')}</p>`
+          : ''
+      }
+    </div>`;
+}
+
+/** Missed days still waiting for a reason (newest first), each with one-tap reasons. */
+function missedCard() {
+  const open = state.missed.filter((m) => !m.reason).sort((a, b) => b.date.localeCompare(a.date));
+  if (!open.length) return '';
+  return `<div class="banner warn">
+      <p class="title">Missed workout${open.length === 1 ? '' : 's'}: why?</p>
+      <p class="small muted" style="margin:0">Goes to the Missed tab in the Sheet. Their exercises' clocks pause for ${esc(state.settings.progression.missedPauseDays)} days each, so a skip does not count as stalling.</p>
+      ${open
+        .slice(0, 4)
+        .map(
+          (m) => `<div class="missed-item">
+            <p class="small" style="margin:8px 0 4px"><strong>${esc(m.dayType)}</strong> · ${esc(WEEKDAYS[new Date(Date.parse(m.date)).getUTCDay()])} ${esc(formatDate(m.date, false))}</p>
+            <div class="pills">${missReasons()
+              .map((r) => `<button type="button" class="pill-btn" data-action="missedReason" data-id="${esc(m.id)}" data-reason="${esc(r)}">${esc(r)}</button>`)
+              .join('')}</div>
+          </div>`,
+        )
+        .join('')}
+      ${open.length > 4 ? `<p class="small muted" style="margin:6px 0 0">${open.length - 4} more in History.</p>` : ''}
+    </div>`;
+}
+
 /** Weight increases due, the weekly check-in, and photos waiting for a backup. */
 function homeBanners() {
   const out = [];
+  out.push(missedCard());
+  out.push(weekSummaryHome());
   const all = trackedExercises()
     .map((n) => analyse(n))
     .filter(Boolean);
@@ -1041,7 +1352,9 @@ function setCompareHtml() {
   if (inDeload(state.draft.date)) return '<div class="set-compare"><div class="small">🟢 Lighter week: comparisons are paused. Go easy, with 3–4 reps in reserve.</div></div>';
   const weight = f.weight === '' ? NaN : Number(f.weight);
   const sessions = statsHistory().filter((s) => s.id !== state.draft.id);
-  const c = Progress.setComparison(sessions, f.exercise, f.setNo, { weight, reps: formReps(f) }, state.draft.date || todayISO(), state.settings.progression);
+  const c = Progress.setComparison(sessions, f.exercise, f.setNo, { weight, reps: formReps(f) }, state.draft.date || todayISO(), state.settings.progression, (from, to) =>
+    missedPause(f.exercise, from, to),
+  );
   if (!c) return '';
   const delta = (n, unit) => (n > 0 ? `<span class="up">▲ +${esc(fmtKg(n))}${unit}</span>` : n < 0 ? `<span class="down">▼ −${esc(fmtKg(-n))}${unit}</span>` : '<span class="same">● same</span>');
   const parts = [];
@@ -1050,7 +1363,12 @@ function setCompareHtml() {
   const warn = [];
   if (c.shortfall) {
     const r = c.shortfall.ref;
-    warn.push({ cls: 'shortfall', html: `<strong class="lead">⚠️ ${c.shortfall.days} days below</strong> your ${esc(fmtKg(r.weight))} kg × ${r.reps} of ${esc(formatDate(r.date, false))} on this set` });
+    warn.push({
+      cls: 'shortfall',
+      html: `<strong class="lead">⚠️ ${c.shortfall.days} days below</strong> your ${esc(fmtKg(r.weight))} kg × ${r.reps} of ${esc(formatDate(r.date, false))} on this set${
+        c.shortfall.paused ? ` (not counting ${c.shortfall.paused} days paused for missed workouts)` : ''
+      }`,
+    });
   }
   const plan = Progress.parsePlan(planText(state.draft.dayType, f.exercise));
   const capped = c.stagnant && plan && !plan.timed && c.stagnant.best.reps >= plan.max - state.settings.progression.topTolerance;
@@ -1059,7 +1377,12 @@ function setCompareHtml() {
     warn.push({ cls: 'info', html: `ℹ️ This set is at the top of its range (${c.stagnant.best.reps} reps; the range tops out at ${plan.max}). It moves on when the weight goes up.` });
   } else if (c.stagnant) {
     const b = c.stagnant.best;
-    warn.push({ cls: 'stagnant', html: `<strong class="lead">⚠️ Stagnant ${c.stagnant.days} days</strong> no new best on this set since ${esc(fmtKg(b.weight))} kg × ${b.reps} (${esc(formatDate(c.stagnant.since, false))})` });
+    warn.push({
+      cls: 'stagnant',
+      html: `<strong class="lead">⚠️ Stagnant ${c.stagnant.days} days</strong> no new best on this set since ${esc(fmtKg(b.weight))} kg × ${b.reps} (${esc(formatDate(c.stagnant.since, false))})${
+        c.stagnant.paused ? `, not counting ${c.stagnant.paused} days paused for missed workouts` : ''
+      }`,
+    });
   }
   const tone = warn.some((w) => w.cls === 'shortfall') ? 'shortfall' : warn.some((w) => w.cls === 'stagnant') ? 'stagnant' : '';
   return `<div class="set-compare ${tone}">
@@ -1293,15 +1616,29 @@ function wellbeingSummary(session) {
 }
 
 function renderHistory() {
-  const sessions = sortedHistory();
+  // Workouts and missed days in one list, newest first.
+  const rows = [...sortedHistory().map((s) => ({ date: s.date, s })), ...state.missed.map((m) => ({ date: m.date, m }))].sort((a, b) =>
+    (b.date || '').localeCompare(a.date || ''),
+  );
   return `
     ${topbar('History', { href: 'home', label: 'Home' })}
     <section class="card">
       ${
-        sessions.length
-          ? `<ul class="list">${sessions
-              .map(
-                (s) => `
+        rows.length
+          ? `<ul class="list">${rows
+              .map(({ s, m }) =>
+                m
+                  ? `
+            <li>
+              <button type="button" class="list-item missed" data-action="missedReason" data-id="${esc(m.id)}" data-edit="1">
+                <div>
+                  <div class="primary-text">${esc(formatDate(m.date))} · ${esc(m.dayType)}</div>
+                  <div class="secondary-text">Missed · ${m.reason ? esc(m.reason) : 'tap to add the reason'}${m.note ? ` · ${esc(m.note)}` : ''}</div>
+                </div>
+                <span class="badge pending">✕ missed</span>
+              </button>
+            </li>`
+                  : `
             <li>
               <button type="button" class="list-item" data-action="openSession" data-id="${s.id}">
                 <div>
@@ -1404,6 +1741,7 @@ function renderSettings() {
       </label>
     </section>
 
+    ${renderScheduleSettings()}
     ${renderProgressionSettings()}
     ${renderRecoverySettings()}
     ${renderBodySettings()}
@@ -1483,6 +1821,8 @@ function renderSettings() {
       </div>
     </section>
 
+    ${renderSettingsCopy()}
+
     <section class="card stack">
       <h2 class="section-title" style="margin:0">Backup</h2>
       <button type="button" class="btn secondary" data-action="exportData">Export local data (JSON)</button>
@@ -1491,6 +1831,79 @@ function renderSettings() {
       <p class="hint">The export includes workouts, measurements, settings, your script URL and token so a new phone can be set up from it. Keep the file private. Photos are not in it: they have their own encrypted backup on the Photos screen.</p>
     </section>
     <p class="version">Bhimlekha v${esc(APP_VERSION)} · भीमलेखा</p>`;
+}
+
+/** Weekly schedule (drives "today's workout" and missed days) and the reasons offered for a missed day. */
+function renderScheduleSettings() {
+  const sched = state.settings.schedule || DEFAULT_SCHEDULE;
+  const days = [1, 2, 3, 4, 5, 6, 0];
+  const options = [...new Set([...manageDays().filter((d) => d !== 'Custom'), ...Object.values(sched).filter(Boolean)])];
+  return `
+    <section class="card stack">
+      <div>
+        <h2 class="section-title" style="margin:0">Schedule & missed workouts</h2>
+        <p class="hint">Home suggests the day's workout. A scheduled day that passes with no workout is marked missed (you don't make it up; the next day's workout follows), asks for a reason, and goes to the Sheet's Missed tab.</p>
+      </div>
+      <div class="two">
+        ${days
+          .map(
+            (d) => `<div>
+              <label for="sched-${d}">${WEEKDAYS[d]}</label>
+              <select id="sched-${d}" class="select" data-change="scheduleDay" data-dow="${d}">
+                <option value="" ${!sched[d] ? 'selected' : ''}>Rest</option>
+                ${options.map((o) => `<option value="${esc(o)}" ${sched[d] === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}
+              </select>
+            </div>`,
+          )
+          .join('')}
+      </div>
+      <p class="hint" style="margin:0">Missed days are counted from ${esc(formatDate(state.settings.scheduleFrom || todayISO()))}. Each one pauses its exercises' clocks and pushes the lighter week back (Progression below).</p>
+      <fieldset>
+        <legend>Reasons for a missed day</legend>
+        <div class="pills">${missReasons()
+          .map((r, i) => `<span class="pill">${esc(r)}<button type="button" class="pill-x" data-action="removeReason" data-index="${i}" aria-label="Remove ${esc(r)}">×</button></span>`)
+          .join('')}</div>
+        <div class="input-row" style="margin-top:8px">
+          <label for="reason-new" class="sr-only">New reason</label>
+          <input id="reason-new" class="input" placeholder="e.g. Exams" value="${esc(state.ui.newReason)}" data-input="newReason" autocomplete="off" />
+          <button type="button" class="btn" data-action="addReason">Add</button>
+        </div>
+        <p class="hint">"Other" asks for your own words. Changing the list never changes reasons already given.</p>
+      </fieldset>
+    </section>`;
+}
+
+/** One line on where the settings copy stands. */
+function settingsCopyStatus() {
+  const b = state.backup;
+  let status;
+  if (!haveApi()) status = 'Add the script URL and token above to keep a copy of these settings in the Sheet.';
+  else if (!b.linked && b.remoteAt) status = `<strong>The Sheet has settings saved ${esc(formatDate(String(b.remoteAt).slice(0, 10)))}.</strong> Use them, or make this phone's settings the copy.`;
+  else if (b.error && b.error !== 'offline') status = `⚠️ The Sheet said: ${esc(b.error)}${/unknown action/.test(b.error) ? '. Paste the new Code.gs and deploy a new version.' : ''}`;
+  else if (b.dirty) status = b.error === 'offline' ? 'Changes waiting: will save when online.' : 'Saving…';
+  else status = b.sentAt ? `✓ Saved in the Sheet ${esc(formatDate(b.sentAt.slice(0, 10)))}, ${esc(new Date(b.sentAt).toTimeString().slice(0, 5))}.` : 'Not saved yet.';
+  return status;
+}
+
+/** Status of the settings copy in the Sheet's Settings tab, with save and restore. */
+function renderSettingsCopy() {
+  const b = state.backup;
+  const status = settingsCopyStatus();
+  return `
+    <section class="card stack">
+      <div>
+        <h2 class="section-title" style="margin:0">Settings copy in the Sheet</h2>
+        <p class="hint">Exercises, plans, schedule, buttons, questions, progression, recovery and lighter weeks are saved to the Sheet's Settings tab after every change, so a new phone gets them back. The Sheet URL and token are not in it; photos never are.</p>
+      </div>
+      <p class="small" style="margin:0" id="backup-status">${status}</p>
+      ${
+        !b.linked && b.remoteAt
+          ? `<button type="button" class="btn primary" data-action="restoreSettings">Use the Sheet's settings</button>
+             <button type="button" class="btn secondary" data-action="keepPhoneSettings">Keep this phone's settings</button>`
+          : `<button type="button" class="btn secondary" data-action="backupSettingsNow" ${haveApi() ? '' : 'disabled'}>Save to Sheet now</button>
+             <button type="button" class="btn secondary" data-action="restoreSettings" ${haveApi() ? '' : 'disabled'}>Restore from the Sheet…</button>`
+      }
+    </section>`;
 }
 
 // Every progression assumption, editable. [key, label, hint, step]
@@ -1510,6 +1923,9 @@ const PROGRESSION_FIELDS = [
   ['stagnantDays', 'Stagnant warning after (days)', 'A set with no new best for longer than this is called stagnant.', 1],
   ['muscleSetsMin', 'Weekly hard sets per muscle, low end', '', 1],
   ['muscleSetsMax', 'Weekly hard sets per muscle, high end', '', 1],
+  ['missedPauseDays', 'Clock pause per missed workout (days)', 'Shortfall, stagnant and new-weight clocks of that day’s exercises skip this many days.', 1],
+  ['missedSchedDays', 'Lighter week pushed back per missed workout (days)', '0 keeps the lighter-week schedule fixed.', 1],
+  ['neglectDays', 'Flag a muscle not trained for over (days)', 'Shown on Home. 0 turns it off.', 1],
 ];
 
 function renderProgressionSettings() {
@@ -1951,6 +2367,74 @@ const actions = {
       state.ui.ping = { ok: false, message: describeError(err) };
     }
     render();
+    // A new phone: offer the settings saved in the Sheet before anything overwrites them.
+    if (state.ui.ping.ok && !state.backup.linked) {
+      saveBackupState({ remoteAt: null });
+      await linkSettingsBackup({ ask: true });
+    }
+  },
+
+  async restoreSettings() {
+    if (!haveApi()) return toast('Add the script URL and token first', 'error');
+    let remote;
+    try {
+      remote = await apiGet({ action: 'settings' });
+    } catch (err) {
+      return toast(describeError(err), 'error');
+    }
+    if (!remote.data) return toast('No settings saved in the Sheet yet', 'error');
+    const ok = await openModal({
+      title: 'Replace this phone’s settings?',
+      message: `With the copy saved ${remote.savedAt ? formatDate(String(remote.savedAt).slice(0, 10)) : 'earlier'}: exercises, plans, schedule, buttons, progression and recovery. Workouts, measurements and photos are not touched.`,
+      confirmText: 'Restore',
+      danger: true,
+    });
+    if (!ok) return;
+    applySettingsSnapshot(remote.data);
+    saveBackupState({ linked: true, remoteAt: null });
+    await syncMissedFromSheet();
+    toast('Settings restored from the Sheet');
+    render();
+  },
+
+  async keepPhoneSettings() {
+    saveBackupState({ linked: true, dirty: true, remoteAt: null });
+    const ok = await uploadSettings();
+    toast(ok ? 'This phone’s settings are now the Sheet’s copy' : 'Will save to the Sheet when online', ok ? 'ok' : 'error');
+    render();
+  },
+
+  async backupSettingsNow() {
+    if (!haveApi()) return toast('Add the script URL and token first', 'error');
+    if (!state.backup.linked) return linkSettingsBackup({ ask: true });
+    saveBackupState({ dirty: true });
+    const ok = await uploadSettings();
+    toast(ok ? 'Settings saved to the Sheet' : state.backup.error === 'offline' ? 'Offline: will retry' : `The Sheet said: ${state.backup.error}`, ok ? 'ok' : 'error');
+    render();
+  },
+
+  async missedReason(el) {
+    const id = el.dataset.id;
+    const reason = el.dataset.reason;
+    const m = state.missed.find((x) => x.id === id);
+    if (!m) return;
+    if (reason === 'Other' || el.dataset.edit) {
+      const values = await openModal({
+        title: `${m.dayType} · ${formatDate(m.date)}`,
+        message: 'Why was it missed? The reason and note go to the Missed tab in the Sheet.',
+        fields: [
+          { key: 'reason', label: 'Reason', value: reason === 'Other' ? 'Other' : m.reason || '' },
+          { key: 'note', label: 'Note (optional)', value: m.note || '' },
+        ],
+        confirmText: 'Save',
+      });
+      if (!values) return;
+      setMissedReason(id, (values.reason || 'Other').trim(), (values.note || '').trim());
+    } else {
+      setMissedReason(id, reason);
+    }
+    toast(`${m.dayType}: ${m.reason}`);
+    render();
   },
 
   moveExercise(el) {
@@ -2075,6 +2559,27 @@ const actions = {
     if (!ok) return;
     list.splice(i, 1);
     state.settings.questions = list;
+    save(KEYS.settings, state.settings);
+    render();
+  },
+
+  addReason() {
+    const r = state.ui.newReason.trim();
+    if (!r) return toast('Type the reason', 'error');
+    if (missReasons().some((x) => x.toLowerCase() === r.toLowerCase())) return toast('Already in the list', 'error');
+    const list = [...missReasons()];
+    const other = list.indexOf('Other');
+    list.splice(other === -1 ? list.length : other, 0, r); // keep "Other" last
+    state.settings.missReasons = list;
+    state.ui.newReason = '';
+    save(KEYS.settings, state.settings);
+    render();
+  },
+
+  removeReason(el) {
+    const list = missReasons().filter((_, i) => i !== Number(el.dataset.index));
+    if (!list.length) return toast('Keep at least one reason', 'error');
+    state.settings.missReasons = list;
     save(KEYS.settings, state.settings);
     render();
   },
@@ -2204,6 +2709,8 @@ const actions = {
       history: state.history,
       measurements: state.measurements,
       mOutbox: state.mOutbox,
+      missed: state.missed,
+      missedOutbox: state.missedOutbox,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -2225,11 +2732,13 @@ const actions = {
 const changes = {
   startDay(el) {
     state.ui.start.dayType = el.value;
+    state.ui.startPicked = true;
     render();
     if (el.value === 'Custom') document.getElementById('custom-day')?.focus();
   },
   startDate(el) {
     state.ui.start.date = el.value;
+    if (!state.ui.startPicked) render(); // the suggested day follows the date
   },
   exercise(el) {
     const f = form();
@@ -2313,6 +2822,11 @@ const changes = {
     state.settings.progression = { ...state.settings.progression, [key]: v };
     save(KEYS.settings, state.settings);
   },
+  scheduleDay(el) {
+    state.settings.schedule = { ...(state.settings.schedule || DEFAULT_SCHEDULE), [el.dataset.dow]: el.value };
+    save(KEYS.settings, state.settings);
+    render();
+  },
   checkinDay(el) {
     state.settings.checkinDay = Number(el.value);
     save(KEYS.settings, state.settings);
@@ -2373,6 +2887,9 @@ const inputs = {
   },
   newQuestion(el) {
     state.ui.newQuestion = el.value;
+  },
+  newReason(el) {
+    state.ui.newReason = el.value;
   },
   newRep(el) {
     state.ui.newRep = el.value;
@@ -2500,6 +3017,10 @@ async function importFromFile(file) {
   }
   if (Array.isArray(data.measurements)) state.measurements = data.measurements;
   if (Array.isArray(data.mOutbox)) state.mOutbox = data.mOutbox;
+  if (Array.isArray(data.missed)) state.missed = data.missed;
+  if (Array.isArray(data.missedOutbox)) state.missedOutbox = data.missedOutbox;
+  save(KEYS.missed, state.missed);
+  save(KEYS.missedOutbox, state.missedOutbox);
   save(KEYS.measurements, state.measurements);
   save(KEYS.mOutbox, state.mOutbox);
   if (data.exercises && typeof data.exercises === 'object') state.exercises = data.exercises;
@@ -2621,6 +3142,7 @@ async function submitWorkout() {
   addToHistory(session);
   state.draft = null;
   saveDraft();
+  detectMissed(); // a late entry for a day already marked missed takes the mark back
   state.ui.form = null;
   state.ui.timer = null;
   state.ui.submit = { status: 'sending', message: '', session };
@@ -2629,6 +3151,7 @@ async function submitWorkout() {
   const result = await uploadSession(session);
   state.ui.submit = { status: result.kind, message: result.message, session };
   render();
+  if (result.kind === 'ok' && state.missedOutbox.length) syncOutbox(); // e.g. a missed mark this workout took back
   if (result.kind === 'ok') {
     setTimeout(() => {
       if (route().name === 'review' && state.ui.submit.status === 'ok') {
@@ -2659,11 +3182,33 @@ async function syncMeasurementOutbox() {
   return sent;
 }
 
+/** Send missed-day changes; the Sheet updates a row with the same Entry ID instead of adding one. */
+async function syncMissedOutbox() {
+  let sent = 0;
+  for (const item of [...state.missedOutbox]) {
+    try {
+      await apiPost({ action: 'missed', entry: item.entry });
+    } catch {
+      break; // offline, or the Apps Script is older than v1.5: kept for later
+    }
+    // Only drop it if no newer change for this id arrived meanwhile.
+    state.missedOutbox = state.missedOutbox.filter((x) => x !== item);
+    save(KEYS.missedOutbox, state.missedOutbox);
+    sent++;
+  }
+  return sent;
+}
+
 async function syncOutbox({ manual = false } = {}) {
-  if (!state.ui.syncing && state.mOutbox.length && haveApi()) {
+  if (!state.ui.syncing && haveApi() && (state.mOutbox.length || state.missedOutbox.length || !state.backup.linked || state.backup.dirty)) {
     state.ui.syncing = true;
     try {
-      if (await syncMeasurementOutbox()) render();
+      const m = state.mOutbox.length ? await syncMeasurementOutbox() : 0;
+      if (state.missedOutbox.length) await syncMissedOutbox();
+      // A copy found in the Sheet but not answered yet waits for Settings → Settings copy (never overwritten here).
+      if (!state.backup.linked && !state.backup.remoteAt) await linkSettingsBackup({ ask: false });
+      else if (state.backup.dirty) await uploadSettings();
+      if (m) render();
     } finally {
       state.ui.syncing = false;
     }
@@ -2721,6 +3266,8 @@ async function syncHistoryFromSheet() {
       .sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.finishedAt || '').localeCompare(a.finishedAt || ''))
       .slice(0, HISTORY_LIMIT);
     save(KEYS.history, state.history);
+    await syncMissedFromSheet();
+    detectMissed();
     state.ui.historySync = `Loaded ${incoming.length} workout${incoming.length === 1 ? '' : 's'} from the last 400 days.`;
   } catch (err) {
     state.ui.historySync = describeError(err);
@@ -2833,6 +3380,7 @@ function bindEvents() {
       if (route().name === 'photos') render();
     }
     if (document.visibilityState === 'visible') {
+      if (detectMissed() && route().name === 'home') render(); // a new day may have passed
       syncOutbox();
       if (route().name === 'entry') tickTimer();
     }
@@ -2847,6 +3395,7 @@ function registerServiceWorker() {
 }
 
 bindEvents();
+detectMissed();
 render();
 registerServiceWorker();
 syncOutbox();

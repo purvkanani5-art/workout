@@ -55,6 +55,7 @@ function renderProgress() {
   return `
     ${topbar('Progress', { href: 'home', label: 'Home' })}
     ${recoveryCard('progress')}
+    ${renderWeekSummaries()}
     ${renderWeeklyStrength()}
     <section class="card">
       <h2 class="section-title">Exercises</h2>
@@ -114,6 +115,145 @@ function renderWeeklyStrength() {
       <p class="small" style="margin:0">This week ${esc(Progress.signed(last.pct))} over ${last.n} exercise${last.n === 1 ? '' : 's'}.${
         run ? ` Below −${esc(r.strengthPct)}% for ${run} week${run === 1 ? '' : 's'} in a row; the recovery alert fires at ${esc(r.strengthWeeks)}.` : ''
       }</p>
+    </section>`;
+}
+
+/* ------------------------------------------------------ weekly summary */
+
+/**
+ * One week (ending on the check-in day, numbered like the photo folders): workouts done vs planned, missed
+ * days, sets per muscle, overall strength, best/weakest exercise, weight and waist, ratings, photos.
+ */
+function weekSummary(endIso) {
+  const { start, end } = weekBounds(endIso);
+  const week = photoWeek(end);
+  const today = todayISO();
+  const p = state.settings.progression;
+  const inWeek = (d) => d >= start && d <= end;
+  const sessions = state.history.filter((s) => inWeek(s.date));
+  let planned = 0;
+  for (let d = start; d <= end && d <= today; d = Progress.addDays(d, 1)) if (scheduledDay(d)) planned++;
+  const missed = state.missed.filter((m) => inWeek(m.date)).sort((a, b) => a.date.localeCompare(b.date));
+  const deload = sessions.some((s) => inDeload(s.date));
+
+  // Sets per muscle over the week's 7 days (or up to today while it runs).
+  const counts = Progress.weeklyMuscleSets(state.history, muscleOf, end < today ? end : today);
+  const low = Object.entries(counts).filter(([, n]) => n < p.muscleSetsMin);
+  const high = Object.entries(counts).filter(([, n]) => n > p.muscleSetsMax);
+
+  // Overall strength with the same weeks as this summary.
+  const stats = statsHistory();
+  const strength = Progress.weeklyStrength(stats, (iso) => weekBounds(iso).start).find((w) => w.week === start) || null;
+
+  // Each exercise's last session this week vs its last one before the week.
+  const changes = [];
+  const names = new Set();
+  for (const s of stats) if (inWeek(s.date)) for (const set of s.sets) if (Progress.isWorking(set)) names.add(set.exercise);
+  for (const name of names) {
+    const perfAt = (list) => {
+      const s = list.sort((a, b) => a.date.localeCompare(b.date)).pop();
+      return s ? Progress.exerciseSnapshot(s, name, null)?.perf : null;
+    };
+    const has = (s) => s.sets.some((x) => x.exercise === name && Progress.isWorking(x));
+    const now = perfAt(stats.filter((s) => inWeek(s.date) && has(s)));
+    const before = perfAt(stats.filter((s) => s.date < start && has(s)));
+    if (now && before) changes.push({ name, pct: Progress.pct(now, before) });
+  }
+  changes.sort((a, b) => b.pct - a.pct);
+
+  // Bodyweight (weekly average) and waist (latest), vs the week before.
+  const wf = weightField();
+  const avgIn = (from, to) => {
+    const v = state.measurements.filter((m) => m.date >= from && m.date <= to && Number.isFinite(m.values?.[wf])).map((m) => m.values[wf]);
+    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+  };
+  const weightNow = wf ? avgIn(start, end) : null;
+  const weightBefore = wf ? avgIn(Progress.addDays(start, -7), Progress.addDays(start, -1)) : null;
+  const waistField = measureFields().find((f) => /waist/i.test(f));
+  const latest = (from, to) => {
+    const m = state.measurements.filter((x) => x.date >= from && x.date <= to && Number.isFinite(x.values?.[waistField])).sort((a, b) => a.date.localeCompare(b.date)).pop();
+    return m ? m.values[waistField] : null;
+  };
+  const waistNow = waistField ? latest(start, end) : null;
+  const waistBefore = waistField ? latest('0000-01-01', Progress.addDays(start, -1)) : null;
+
+  const feel = (() => {
+    const vals = sessions.flatMap((s) => ['Energy', 'Strength'].map((q) => s.satisfaction?.[q]).filter(Number.isFinite));
+    return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  })();
+
+  const info = state.vaultInfo;
+  const photos = info.weeksChanged?.[week.folder] ? (unsavedWeeks().includes(week.folder) ? 'unsaved' : 'saved') : 'none';
+
+  return {
+    week, start, end, running: end >= today, planned, done: new Set(sessions.map((s) => s.date)).size, sessions, missed, deload,
+    counts, low, high, strength, best: changes[0] || null, worst: changes.length > 1 ? changes[changes.length - 1] : null,
+    weight: weightNow !== null ? { now: weightNow, delta: weightBefore !== null ? weightNow - weightBefore : null } : null,
+    waist: waistNow !== null ? { now: waistNow, delta: waistBefore !== null ? waistNow - waistBefore : null, field: waistField } : null,
+    feel, photos,
+  };
+}
+
+function renderWeekSummary(w) {
+  const rows = [];
+  rows.push(
+    `<li><span>Workouts</span><strong>${w.done} of ${w.planned} planned</strong>${w.sessions.length ? ` <span class="muted">(${esc([...new Set(w.sessions.map((s) => s.dayType))].join(', '))})</span>` : ''}${
+      w.deload ? ' · 🟢 lighter week' : ''
+    }</li>`,
+  );
+  if (w.missed.length) {
+    rows.push(
+      `<li><span>Missed</span><strong class="down">${w.missed.length}</strong> ${w.missed
+        .map((m) => `${esc(m.dayType)} (${esc(WEEKDAYS[new Date(Date.parse(m.date)).getUTCDay()].slice(0, 3))}${m.reason ? `, ${esc(m.reason)}` : ', no reason yet'})`)
+        .join('; ')}</li>`,
+    );
+  }
+  if (w.strength) rows.push(`<li><span>Overall strength</span><strong class="${w.strength.pct >= 0 ? 'up' : 'down'}">${esc(Progress.signed(w.strength.pct))}</strong> over ${w.strength.n} exercise${w.strength.n === 1 ? '' : 's'}, vs their previous 4 weeks</li>`);
+  if (w.best) rows.push(`<li><span>Best</span><strong>${esc(w.best.name)}</strong> ${esc(Progress.signed(w.best.pct))}</li>`);
+  if (w.worst && w.worst.pct < w.best.pct) rows.push(`<li><span>Weakest</span><strong>${esc(w.worst.name)}</strong> ${esc(Progress.signed(w.worst.pct))}</li>`);
+  const setsText = Object.keys(w.counts).length
+    ? w.low.length || w.high.length
+      ? [w.low.length ? `low: ${w.low.map(([m, n]) => `${m} ${n}`).join(', ')}` : '', w.high.length ? `high: ${w.high.map(([m, n]) => `${m} ${n}`).join(', ')}` : ''].filter(Boolean).join(' · ')
+      : 'every muscle in range'
+    : 'none logged';
+  rows.push(`<li><span>Sets per muscle</span>${esc(setsText)} <span class="muted">(${esc(state.settings.progression.muscleSetsMin)}–${esc(state.settings.progression.muscleSetsMax)})</span></li>`);
+  if (w.weight) rows.push(`<li><span>Bodyweight</span><strong>${esc(fmtKg(Math.round(w.weight.now * 10) / 10))} kg</strong> avg${w.weight.delta !== null ? ` · ${esc(Progress.signed(w.weight.delta, 1, ' kg'))} vs last week` : ''}</li>`);
+  if (w.waist) rows.push(`<li><span>Waist</span><strong>${esc(fmtKg(w.waist.now))} cm</strong>${w.waist.delta !== null ? ` · ${esc(Progress.signed(w.waist.delta, 1, ' cm'))}` : ''}</li>`);
+  if (w.feel !== null) rows.push(`<li><span>Energy & Strength</span><strong>${w.feel.toFixed(1)} / 5</strong> average</li>`);
+  rows.push(`<li><span>Photos</span>${w.photos === 'saved' ? '✓ saved to Files' : w.photos === 'unsaved' ? '<strong class="down">not saved to Files yet</strong>' : 'none this week'}</li>`);
+  return `<ul class="summary-list">${rows.join('')}</ul>`;
+}
+
+/** On Home: on the check-in day (the week so far) and the day after (the week just finished). */
+function weekSummaryHome() {
+  if (!state.history.length) return '';
+  const today = todayISO();
+  const yesterday = Progress.addDays(today, -1);
+  const end = weekBounds(today).end === today ? today : weekBounds(yesterday).end === yesterday ? yesterday : null;
+  if (!end) return '';
+  const w = weekSummary(end);
+  return `<div class="banner week-summary">
+      <p class="title">📋 ${esc(w.week.folder.split(' - ')[0])} summary${w.running ? ' (ends today)' : ''}</p>
+      <p class="small muted" style="margin:0">${esc(formatDate(w.start, false))} to ${esc(formatDate(w.end, false))}</p>
+      ${renderWeekSummary(w)}
+      <div class="actions"><a class="btn" href="#progress">All weeks</a></div>
+    </div>`;
+}
+
+/** Progress: pick any week back to the first workout. */
+function renderWeekSummaries() {
+  const first = state.history.map((s) => s.date).filter(Boolean).sort()[0];
+  if (!first) return '';
+  const ends = [];
+  for (let e = weekBounds(todayISO()).end; e >= weekBounds(first).end && ends.length < 52; e = Progress.addDays(e, -7)) ends.push(e);
+  const pick = ends.includes(state.ui.summaryWeek) ? state.ui.summaryWeek : ends[0];
+  const w = weekSummary(pick);
+  return `<section class="card stack">
+      <h2 class="section-title" style="margin:0">Weekly summary</h2>
+      <select class="select" data-change="summaryWeek" aria-label="Week">${ends
+        .map((e) => `<option value="${esc(e)}" ${e === pick ? 'selected' : ''}>${esc(photoWeek(e).folder)}</option>`)
+        .join('')}</select>
+      ${renderWeekSummary(w)}
     </section>`;
 }
 
@@ -326,6 +466,7 @@ function lockVault() {
   Vault.revokeAll();
   v.items = [];
   v.compare = null;
+  v.slider = null;
   v.viewing = null;
   v.weekFiles = {};
   v.faceStep = '';
@@ -395,7 +536,6 @@ async function refreshPhotos(changedFolder = null) {
   const v = state.ui.vault;
   Vault.revokeAll();
   v.items = await Vault.list();
-  v.compare = null;
   v.backup = null; // the files must be rebuilt to include changes
   v.weekFiles = {};
   noteWeeks(v.items, changedFolder);
@@ -505,12 +645,6 @@ function weeksLater(a, b) {
 function renderVaultOpen() {
   const v = state.ui.vault;
   const pose = poses().includes(v.pose) ? v.pose : poses()[0];
-  const dates = [...new Set(v.items.filter((i) => i.pose === pose).map((i) => i.date))].sort();
-  const cmp = v.compare || { a: dates[0], b: dates[dates.length - 1] };
-  const pick = (k, val) =>
-    `<select class="select" data-change="compareDate" data-k="${k}" aria-label="${k === 'a' ? 'Before' : 'After'} date">${dates
-      .map((d) => `<option value="${esc(d)}" ${d === val ? 'selected' : ''}>${esc(formatDate(d, d.slice(0, 4) !== todayISO().slice(0, 4)))}</option>`)
-      .join('')}</select>`;
   const target = photoWeek(v.date || todayISO());
   return `
     <section class="card stack">
@@ -532,18 +666,7 @@ function renderVaultOpen() {
 
     ${renderWeekFolders()}
 
-    <section class="card stack">
-      <h2 class="section-title" style="margin:0">Compare · ${esc(pose)}</h2>
-      ${
-        dates.length >= 2
-          ? `<div class="two">${pick('a', cmp.a)}${pick('b', cmp.b)}</div>
-             <div class="compare" id="compare" data-a="${esc(v.items.find((i) => i.pose === pose && i.date === cmp.a)?.id || '')}" data-b="${esc(v.items.find((i) => i.pose === pose && i.date === cmp.b)?.id || '')}">
-               <figure><img id="cmp-a" alt="${esc(pose)} on ${esc(formatDate(cmp.a))}" /><figcaption>${esc(formatDate(cmp.a))}</figcaption></figure>
-               <figure><img id="cmp-b" alt="${esc(pose)} on ${esc(formatDate(cmp.b))}" /><figcaption>${esc(formatDate(cmp.b))}${cmp.a && cmp.b ? ` · ${weeksLater(cmp.a, cmp.b)}` : ''}</figcaption></figure>
-             </div>`
-          : `<p class="empty">Two dates with a ${esc(pose)} photo are needed to compare.</p>`
-      }
-    </section>
+    ${renderCompareWeeks()}
 
     ${renderFaceIdCard()}
 
@@ -555,7 +678,70 @@ function renderVaultOpen() {
       <button type="button" class="btn secondary" data-action="vaultChangePass">Change passcode</button>
       <p class="hint" style="margin:0">Old backup files keep the old passcode. Make a new backup after changing it.${v.faceId?.on ? ' Face ID turns off and needs turning on again.' : ''}</p>
     </section>
-    ${v.viewing ? '<div class="viewer" id="viewer"><img id="viewer-img" alt="" /><div class="viewer-bar"><button type="button" class="btn" data-action="closePhoto">Close</button><button type="button" class="btn danger" data-action="deletePhoto">Delete</button></div></div>' : ''}`;
+    ${v.viewing ? '<div class="viewer" id="viewer"><img id="viewer-img" alt="" /><div class="viewer-bar"><button type="button" class="btn" data-action="closePhoto">Close</button><button type="button" class="btn danger" data-action="deletePhoto">Delete</button></div></div>' : ''}
+    ${renderSlider()}`;
+}
+
+/** The two weeks being compared: chosen ones, else the first and the latest week with photos. */
+function compareWeeks() {
+  const weeks = weekFolders(state.ui.vault.items); // newest first
+  const c = state.ui.vault.compare || {};
+  const find = (f) => weeks.find((w) => w.folder === f);
+  return { weeks, a: find(c.a) || weeks[weeks.length - 1], b: find(c.b) || weeks[0] };
+}
+
+/** The photo of a pose in a week (the latest one if it was taken twice). */
+const photoIn = (week, pose) => (week ? week.items.filter((i) => i.pose === pose).pop() : null);
+
+/** Every pose of two weeks side by side; tap a row for the full-screen slider. */
+function renderCompareWeeks() {
+  const { weeks, a, b } = compareWeeks();
+  if (weeks.length < 2) return `<section class="card stack"><h2 class="section-title" style="margin:0">Compare weeks</h2><p class="empty">Photos from two different weeks are needed to compare.</p></section>`;
+  const pick = (k, sel) =>
+    `<select class="select" data-change="compareWeek" data-k="${k}" aria-label="${k === 'a' ? 'Before' : 'After'} week">${[...weeks]
+      .reverse()
+      .map((w) => `<option value="${esc(w.folder)}" ${w.folder === sel.folder ? 'selected' : ''}>Week ${w.n}</option>`)
+      .join('')}</select>`;
+  const all = [...new Set([...poses(), ...a.items.map((i) => i.pose), ...b.items.map((i) => i.pose)])];
+  const rows = all
+    .map((pose) => ({ pose, x: photoIn(a, pose), y: photoIn(b, pose) }))
+    .filter((r) => r.x || r.y)
+    .map(
+      (r) => `<button type="button" class="compare-row" data-action="openSlider" data-pose="${esc(r.pose)}" ${r.x && r.y ? '' : 'disabled'} aria-label="Compare ${esc(r.pose)}">
+        <span class="compare-pose">${esc(r.pose)}</span>
+        <span class="compare">
+          <figure>${r.x ? `<img src="${r.x.thumbUrl}" alt="" />` : '<span class="no-photo">—</span>'}</figure>
+          <figure>${r.y ? `<img src="${r.y.thumbUrl}" alt="" />` : '<span class="no-photo">—</span>'}</figure>
+        </span>
+      </button>`,
+    )
+    .join('');
+  const gap = Progress.daysBetween(a.end, b.end);
+  return `<section class="card stack">
+      <h2 class="section-title" style="margin:0">Compare weeks</h2>
+      <div class="two">${pick('a', a)}${pick('b', b)}</div>
+      <p class="hint" style="margin:0">Week ${a.n} (${esc(formatDate(a.start, false))} to ${esc(formatDate(a.end, false))}) → Week ${b.n} (${esc(formatDate(b.start, false))} to ${esc(formatDate(b.end, false))})${gap ? `, ${weeksLater(a.end, b.end)}` : ''}. Tap a pose to slide between the two.</p>
+      ${rows}
+    </section>`;
+}
+
+/** Full screen: the "after" photo over the "before" one, revealed by dragging the slider. */
+function renderSlider() {
+  const s = state.ui.vault.slider;
+  if (!s) return '';
+  const pos = Number.isFinite(s.pos) ? s.pos : 50;
+  return `<div class="viewer slider-view" id="slider">
+      <div class="slider-stage">
+        <img data-photo="${esc(s.a)}" alt="Week ${s.na} ${esc(s.pose)}" />
+        <img data-photo="${esc(s.b)}" class="slider-top" id="slider-top" style="clip-path: inset(0 0 0 ${pos}%)" alt="Week ${s.nb} ${esc(s.pose)}" />
+        <span class="slider-line" id="slider-line" style="left:${pos}%"></span>
+        <span class="slider-tag left">Week ${s.na}</span><span class="slider-tag right">Week ${s.nb}</span>
+      </div>
+      <div class="viewer-bar">
+        <input type="range" min="0" max="100" value="${pos}" class="slider-range" data-input="sliderPos" aria-label="Before or after" />
+        <button type="button" class="btn" data-action="closeSlider">Close</button>
+      </div>
+    </div>`;
 }
 
 const fileSize = (bytes) => (bytes < 1048576 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1048576).toFixed(1)} MB`);
@@ -648,13 +834,8 @@ function renderBackupCard() {
 async function loadVisibleImages() {
   const v = state.ui.vault;
   if (!Vault.isUnlocked()) return;
-  const cmp = document.getElementById('compare');
-  if (cmp) {
-    for (const [k, el] of [['a', 'cmp-a'], ['b', 'cmp-b']]) {
-      const id = cmp.dataset[k];
-      const img = document.getElementById(el);
-      if (id && img) img.src = (await Vault.imageUrl(id)) || '';
-    }
+  for (const img of document.querySelectorAll('img[data-photo]')) {
+    if (!img.src && img.dataset.photo) img.src = (await Vault.imageUrl(img.dataset.photo)) || '';
   }
   if (v.viewing) {
     const img = document.getElementById('viewer-img');
@@ -1077,6 +1258,21 @@ const trackActions = {
     });
   },
 
+  openSlider(el) {
+    const { a, b } = compareWeeks();
+    const x = photoIn(a, el.dataset.pose);
+    const y = photoIn(b, el.dataset.pose);
+    if (!x || !y) return;
+    state.ui.vault.slider = { pose: el.dataset.pose, a: x.id, b: y.id, na: a.n, nb: b.n, pos: 50 };
+    touchVault();
+    render();
+  },
+
+  closeSlider() {
+    state.ui.vault.slider = null;
+    render();
+  },
+
   toggleWeek(el) {
     const v = state.ui.vault;
     v.openWeek = openWeek() === el.dataset.folder ? '' : el.dataset.folder; // '' = all closed
@@ -1131,6 +1327,10 @@ const trackActions = {
 };
 
 const trackChanges = {
+  summaryWeek(el) {
+    state.ui.summaryWeek = el.value;
+    render();
+  },
   progressMetric(el) {
     state.ui.progress.metric = el.value;
     render();
@@ -1157,14 +1357,12 @@ const trackChanges = {
   },
   photoPose(el) {
     state.ui.vault.pose = el.value;
-    state.ui.vault.compare = null;
     render();
   },
-  compareDate(el) {
-    const v = state.ui.vault;
-    const pose = poses().includes(v.pose) ? v.pose : poses()[0];
-    const dates = [...new Set(v.items.filter((i) => i.pose === pose).map((i) => i.date))].sort();
-    v.compare = { a: dates[0], b: dates[dates.length - 1], ...(v.compare || {}), [el.dataset.k]: el.value };
+  compareWeek(el) {
+    const { a, b } = compareWeeks();
+    state.ui.vault.compare = { a: a.folder, b: b.folder, [el.dataset.k]: el.value };
+    touchVault();
     render();
   },
   async photoFile(el) {
@@ -1225,6 +1423,16 @@ const trackChanges = {
 };
 
 const trackInputs = {
+  sliderPos(el) {
+    // Moved live without a re-render, so the images stay put while dragging.
+    const pos = Number(el.value);
+    if (state.ui.vault.slider) state.ui.vault.slider.pos = pos;
+    const top = document.getElementById('slider-top');
+    const line = document.getElementById('slider-line');
+    if (top) top.style.clipPath = `inset(0 0 0 ${pos}%)`;
+    if (line) line.style.left = `${pos}%`;
+    touchVault();
+  },
   mValue(el) {
     bodyDraft().values[el.dataset.field] = el.value;
   },

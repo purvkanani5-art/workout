@@ -10,17 +10,29 @@
  *   GET  {scriptUrl}?action=ping&token=…
  *   GET  {scriptUrl}?action=history&token=…&days=120
  *   GET  {scriptUrl}?action=measurements&token=…
+ *   POST {scriptUrl}                       body: { token, action: "missed", entry: {...} }
+ *   GET  {scriptUrl}?action=missed&token=…
+ *   POST {scriptUrl}                       body: { token, action: "settings", data: {...}, savedAt }
+ *   GET  {scriptUrl}?action=settings&token=…
  *
  * Log: one row per set. Writing is idempotent by Session ID: submitting the same session twice adds
  * nothing and returns { ok: true, duplicate: true, rows: 0 }.
  * Measurements: one row per check-in or weigh-in, idempotent by Entry ID. Each measurement field (e.g.
  * "Waist (cm)") has its own column; a field added in the app's Settings gets a new column automatically.
+ * Missed: one row per scheduled workout day with no workout, with the reason. Rewritten in place when the
+ * reason changes (same Entry ID), deleted when the app takes it back (a workout was logged for that date).
+ * Settings: one row holding the app's settings as JSON (exercises, plans, schedule…; never the URL or token),
+ * so a new phone can restore them.
  * Progress photos never come here: they stay encrypted on the phone.
  */
 
 var SHEET_NAME = 'Log';
 var M_SHEET_NAME = 'Measurements';
 var M_FIXED = ['Timestamp', 'Date', 'Entry ID', 'Type', 'Notes'];
+var X_SHEET_NAME = 'Missed';
+var X_HEADERS = ['Timestamp', 'Date', 'Weekday', 'Day', 'Reason', 'Note', 'Entry ID'];
+var S_SHEET_NAME = 'Settings';
+var S_HEADERS = ['Saved at', 'Settings (JSON, written by the app)'];
 var HEADERS = [
   'Timestamp',
   'Date',
@@ -55,6 +67,8 @@ function setup() {
   Logger.log('Sheet "%s" is ready with %s columns.', sheet.getName(), HEADERS.length);
   var m = getMeasureSheet_();
   Logger.log('Sheet "%s" is ready.', m.getName());
+  Logger.log('Sheet "%s" is ready.', getMissedSheet_().getName());
+  Logger.log('Sheet "%s" is ready.', getSettingsSheet_().getName());
   var token = PropertiesService.getScriptProperties().getProperty('TOKEN');
   if (token) {
     Logger.log('TOKEN is set. Deploy → New deployment → Web app (Execute as Me, Anyone) and copy the /exec URL.');
@@ -115,6 +129,8 @@ function doGet(e) {
     if (p.action === 'ping') return json_({ ok: true, sheet: SHEET_NAME });
     if (p.action === 'history') return json_({ ok: true, sessions: history_(Number(p.days) || 120) });
     if (p.action === 'measurements') return json_({ ok: true, entries: measurements_() });
+    if (p.action === 'missed') return json_({ ok: true, entries: missedList_() });
+    if (p.action === 'settings') return json_(readSettings_());
     return json_({ ok: false, error: 'unknown action' });
   } catch (err) {
     return json_({ ok: false, error: String((err && err.message) || err) });
@@ -131,6 +147,8 @@ function doPost(e) {
   }
   if (!authorized_(body.token)) return json_({ ok: false, error: 'unauthorized' });
   if (body.action === 'measure') return measure_(body.entry);
+  if (body.action === 'missed') return missed_(body.entry);
+  if (body.action === 'settings') return writeSettings_(body.data, body.savedAt);
   if (body.action !== 'submit') return json_({ ok: false, error: 'unknown action' });
 
   var session = body.session;
@@ -383,6 +401,124 @@ function measurements_() {
         values: values,
       };
     });
+}
+
+/* ------------------------------------------------------------------ Missed */
+
+function getMissedSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(X_SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(X_SHEET_NAME);
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, X_HEADERS.length).setValues([X_HEADERS]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    sheet.getRange(2, 2, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat('@'); // keep dates as text
+  }
+  return sheet;
+}
+
+/** Row number (2+) holding this Entry ID, or 0. */
+function missedRow_(sheet, id) {
+  var last = sheet.getLastRow();
+  if (last < 2) return 0;
+  var ids = sheet.getRange(2, 7, last - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) if (String(ids[i][0]) === id) return i + 2;
+  return 0;
+}
+
+/** Add, update (same Entry ID) or delete (entry.deleted) one missed day. */
+function missed_(entry) {
+  if (!entry || typeof entry.id !== 'string' || !entry.id) return json_({ ok: false, error: 'bad entry' });
+  if (!entry.deleted && !/^\d{4}-\d{2}-\d{2}$/.test(String(entry.date || ''))) return json_({ ok: false, error: 'bad entry' });
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var sheet = getMissedSheet_();
+    var row = missedRow_(sheet, entry.id);
+    if (entry.deleted) {
+      if (row) sheet.deleteRow(row);
+      return json_({ ok: true, rows: row ? -1 : 0 });
+    }
+    var weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    var p = String(entry.date).split('-');
+    var weekday = weekdays[new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2])).getDay()];
+    var values = [[new Date(), String(entry.date), weekday, String(entry.dayType || ''), String(entry.reason || ''), String(entry.note || ''), entry.id]];
+    if (row) sheet.getRange(row, 1, 1, X_HEADERS.length).setValues(values);
+    else sheet.getRange(sheet.getLastRow() + 1, 1, 1, X_HEADERS.length).setValues(values);
+    return json_({ ok: true, rows: row ? 0 : 1 });
+  } catch (err) {
+    return json_({ ok: false, error: String((err && err.message) || err) });
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (ignore) {}
+  }
+}
+
+function missedList_() {
+  var sheet = getMissedSheet_();
+  var last = sheet.getLastRow();
+  if (last < 2) return [];
+  var tz = Session.getScriptTimeZone();
+  return sheet
+    .getRange(2, 1, last - 1, X_HEADERS.length)
+    .getValues()
+    .filter(function (r) { return r[6]; })
+    .map(function (r) {
+      return {
+        id: String(r[6]),
+        date: r[1] instanceof Date ? Utilities.formatDate(r[1], tz, 'yyyy-MM-dd') : String(r[1] || '').slice(0, 10),
+        dayType: String(r[3] || ''),
+        reason: String(r[4] || ''),
+        note: String(r[5] || ''),
+      };
+    });
+}
+
+/* ---------------------------------------------------------------- Settings */
+
+function getSettingsSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(S_SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(S_SHEET_NAME);
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, S_HEADERS.length).setValues([S_HEADERS]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+/** Keep one row: the latest settings. A cell holds up to 50,000 characters, plenty for these. */
+function writeSettings_(data, savedAt) {
+  if (!data || typeof data !== 'object') return json_({ ok: false, error: 'bad settings' });
+  var text = JSON.stringify(data);
+  if (text.length > 49000) return json_({ ok: false, error: 'settings too large' });
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var sheet = getSettingsSheet_();
+    sheet.getRange(2, 1, 1, 2).setValues([[String(savedAt || new Date().toISOString()), text]]);
+    return json_({ ok: true });
+  } catch (err) {
+    return json_({ ok: false, error: String((err && err.message) || err) });
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (ignore) {}
+  }
+}
+
+function readSettings_() {
+  var sheet = getSettingsSheet_();
+  if (sheet.getLastRow() < 2) return { ok: true, data: null, savedAt: null };
+  var row = sheet.getRange(2, 1, 1, 2).getValues()[0];
+  var data = null;
+  try {
+    data = JSON.parse(String(row[1] || 'null'));
+  } catch (err) {
+    data = null;
+  }
+  return { ok: true, data: data, savedAt: row[0] instanceof Date ? row[0].toISOString() : String(row[0] || '') };
 }
 
 function isoDate_(d) {

@@ -83,6 +83,12 @@ There are no secrets in the repo. The script URL and token live only in the app'
   uploaded, never in the Photos app. The in-app camera has a timer and overlays last week's photo to match
   the pose. **Face ID** (iOS 18+) can unlock it: a passkey in the Passwords app holds the vault key.
   A forgotten passcode cannot be recovered.
+- **Schedule and missed workouts** (Settings → Schedule): Home suggests the day's workout. A scheduled day
+  with no workout is marked missed (not made up); Home asks why, and it goes to the Sheet's **Missed** tab.
+  Missed days pause that day's exercises' warning clocks and push the lighter week back a little.
+- **Weekly summary** on Home on the check-in day and the day after, and for any week on Progress.
+- **Settings copy in the Sheet** (Settings tab): saved after every change; a new phone offers to restore it
+  after Test connection. Needs the v1.5 Code.gs.
 - **Week folders in Files**: photos are grouped by week ("Week 3 - 19 Oct to 25 Oct 2026", weeks ending on
   the check-in day, Week 1 = the week of the first workout or the date in Settings) and named from the poses
   ("Week-3 Back"). *Save Week N to Files* shares a .zip; choose **Save to Files → iCloud Drive → Bhimlekha**,

@@ -317,3 +317,24 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     - The file inputs live in `#pickers` in index.html (outside `#app`), because a background re-render while
       the iPhone camera was open replaced the input and lost the photo. Dialogs (`.modal`, z 48) now sit above
       the photo viewer (45); before this, Delete in the viewer could not be confirmed.
+19. **v1.5 (2026-10-22): schedule, missed days, settings copy, weekly summary, week comparison.**
+    - **Schedule** `settings.schedule` (weekday → day type, '' = rest; owner: Mon Push A … Sat Legs B, Sun rest).
+      Home pre-selects the date's scheduled day until the owner picks one (`ui.startPicked`).
+    - **Missed** (owner's rule: never made up, never swapped): `detectMissed()` marks each scheduled day from
+      `settings.scheduleFrom` (first v1.5 run; no back-fill; capped 60 days) to yesterday with no workout that
+      date. Id `missed-YYYY-MM-DD`. A workout logged later for that date takes the mark back (row deleted in the
+      Sheet). Home asks for a reason (`settings.missReasons`, editable; "Other" = own words + note); History
+      lists them. Sheet tab **Missed** (Timestamp, Date, Weekday, Day, Reason, Note, Entry ID), upserted by
+      Entry ID via `wt.missedOutbox`, for the owner's dashboard.
+    - **Pause**: each missed day subtracts `progression.missedPauseDays` (7) from the shortfall, stagnant and
+      watch clocks of the exercises planned on that day (`missedPause` → `pause`/`pauseFor` in progress.js);
+      the scheduled lighter week moves back `missedSchedDays` (1) per missed day. Comparisons already use the
+      last workout done. `neglectDays` (7) flags planned muscle groups on Home.
+    - **Settings copy**: Sheet tab **Settings**, one row (Saved at, JSON of settings minus URL/token +
+      exercises/targets/cardio). `save()` of those keys → upload 3 s later (`wt.backup`). A phone links once:
+      empty tab → upload; a copy there → ask (Settings or after Test connection), never overwrite silently.
+      Restoring sets `scheduleFrom` = today (the new phone lacks old workouts) and fetches the Missed tab.
+    - **Weekly summary** (`weekSummary`, weeks = photo-folder weeks): Home on the check-in day and the day after;
+      Progress has a picker back to the first workout.
+    - **Compare weeks**: two week pickers (default first vs latest), every pose side by side (thumbnails); a
+      pose with both photos opens a full-screen slider (after-photo clipped over the before-photo).

@@ -24,6 +24,9 @@ const PROGRESSION_DEFAULTS = {
   muscleSetsMax: 20, // ...and high end
   shortfallDays: 14, // a set below its earlier level for this long gets a warning on the entry screen
   stagnantDays: 30, // a set that has not beaten its own best for this long is called stagnant
+  missedPauseDays: 7, // each missed workout pauses the clocks of its exercises by this many days
+  missedSchedDays: 1, // ...and pushes the scheduled lighter week back by this many days
+  neglectDays: 7, // a muscle group not trained for longer than this is flagged on Home
 };
 
 // Recovery (lighter week) alert: any enabled trigger fires it. Editable in Settings → Recovery.
@@ -155,8 +158,10 @@ function qualifies(snap, p) {
  *    least `shortfallDays` → { ref: { date, weight, reps }, since, days }
  *  - stagnant: no new best for this set in more than `stagnantDays` → { since, days, best: { weight, reps } }
  * "Level" is the one-rep-max estimate of the set, so a heavier weight with fewer reps is judged fairly.
+ * `pause(from, to)` (optional) = days to leave out of a clock running from `from` to `to`: missed workouts of
+ * this exercise, so a skipped session does not count as time without progress.
  */
-function setComparison(sessions, exercise, setNo, current, today, p) {
+function setComparison(sessions, exercise, setNo, current, today, p, pause = () => 0) {
   const points = [];
   const chronological = [...sessions].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
   for (const s of chronological) {
@@ -183,8 +188,9 @@ function setComparison(sessions, exercise, setNo, current, today, p) {
     const first = series[k + 1];
     const refV = bestBefore(k + 1);
     const ref = [...series.slice(0, k + 1)].reverse().find((x) => x.v === refV);
-    const days = daysBetween(first.date, today);
-    if (days >= p.shortfallDays) out.shortfall = { ref, since: first.date, days };
+    const paused = pause(first.date, today);
+    const days = Math.max(0, daysBetween(first.date, today) - paused);
+    if (days >= p.shortfallDays) out.shortfall = { ref, since: first.date, days, paused };
   }
 
   // Stagnant: days since this set last set a new best (the first ever counts as a best).
@@ -196,10 +202,11 @@ function setComparison(sessions, exercise, setNo, current, today, p) {
       lastBest = x;
     }
   }
-  const sinceBest = daysBetween(lastBest.date, today);
+  const bestPaused = pause(lastBest.date, today);
+  const sinceBest = Math.max(0, daysBetween(lastBest.date, today) - bestPaused);
   // At least 3 sessions, so one long break between two sessions does not count as stagnation.
   if (!lastBest.now && sinceBest > p.stagnantDays && series.length >= 3) {
-    out.stagnant = { since: lastBest.date, days: sinceBest, best: { weight: lastBest.weight, reps: lastBest.reps } };
+    out.stagnant = { since: lastBest.date, days: sinceBest, paused: bestPaused, best: { weight: lastBest.weight, reps: lastBest.reps } };
   }
   return out;
 }
@@ -212,7 +219,7 @@ function setComparison(sessions, exercise, setNo, current, today, p) {
  * `planFor(dayType, exercise)` returns the parsed plan for the exercise on that day (or any day); `isLower` and
  * `stepFor` pick the weight step.
  */
-function analyseExercise(sessions, exercise, { p, planFor, isLower, stepFor, today }) {
+function analyseExercise(sessions, exercise, { p, planFor, isLower, stepFor, today, pauseFor }) {
   const chronological = [...sessions].sort(
     (a, b) => (a.date || '').localeCompare(b.date || '') || (a.finishedAt || a.startedAt || '').localeCompare(b.finishedAt || b.startedAt || ''),
   );
@@ -258,7 +265,8 @@ function analyseExercise(sessions, exercise, { p, planFor, isLower, stepFor, tod
     trend = compare.scorePct > p.maintainBand ? 'up' : compare.scorePct < -p.maintainBand ? 'down' : 'flat';
   }
 
-  const status = progressionStatus(snaps, { p, isLower: isLower(last.dayType, exercise), step: stepFor(exercise), today });
+  const pause = pauseFor ? (from, to) => pauseFor(exercise, from, to) : () => 0;
+  const status = progressionStatus(snaps, { p, isLower: isLower(last.dayType, exercise), step: stepFor(exercise), today, pause });
   const flags = warningFlags(snaps, p);
   return { exercise, snaps, last, prev, compare, vsAvg, trend, status, flags };
 }
@@ -272,7 +280,7 @@ function analyseExercise(sessions, exercise, { p, planFor, isLower, stepFor, tod
  *  - watch: weight went up within `watchDays`; `holding` says whether reps stayed inside the range
  *  - untracked: no rep plan for this exercise (e.g. timed planks)
  */
-function progressionStatus(snaps, { p, isLower, step, today }) {
+function progressionStatus(snaps, { p, isLower, step, today, pause = () => 0 }) {
   const last = snaps[snaps.length - 1];
   const plan = last.plan;
   if (!plan || plan.timed) return { kind: 'untracked' };
@@ -291,7 +299,7 @@ function progressionStatus(snaps, { p, isLower, step, today }) {
   const q = qualifies(last, p);
 
   if (before && before.weight < last.weight) {
-    const since = daysBetween(atWeight[0].date, today);
+    const since = Math.max(0, daysBetween(atWeight[0].date, today) - pause(atWeight[0].date, today));
     if (since <= p.watchDays && streak === 0) {
       const holding = last.reps.every((r) => r >= plan.min);
       return { kind: 'watch', from: before.weight, weight: last.weight, holding, daysLeft: Math.max(0, p.watchDays - since), plan, done, target, step: kg };
@@ -561,7 +569,7 @@ function mondayOf(iso) {
  * 4 weeks before; the week's `pct` is the average of those changes over the `n` exercises that have a baseline.
  * Comparing each exercise with itself keeps a strong day from hiding a weak one.
  */
-function weeklyStrength(sessions) {
+function weeklyStrength(sessions, weekOf = mondayOf) {
   const byExercise = new Map(); // exercise → [{ date, perf }]
   for (const s of sessions) {
     const names = new Set(s.sets.filter(isWorking).map((x) => x.exercise));
@@ -576,7 +584,7 @@ function weeklyStrength(sessions) {
   for (const points of byExercise.values()) {
     const perWeek = new Map();
     for (const p of points) {
-      const w = mondayOf(p.date);
+      const w = weekOf(p.date);
       if (!perWeek.has(w)) perWeek.set(w, []);
       perWeek.get(w).push(p.perf);
     }

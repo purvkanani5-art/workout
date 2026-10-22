@@ -1437,3 +1437,147 @@ label.check input {
   z-index: 4;
   text-align: center;
 }
+
+/* ---------- v1.5: schedule, missed days, weekly summary, week comparison ---------- */
+.next-workout {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--chip-bg);
+  border: 1px solid var(--chip-border);
+}
+
+.warn-text {
+  color: var(--warn-text);
+}
+
+.pill-btn {
+  min-height: 40px;
+  padding: 0 14px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--chip-text);
+  background: var(--input-bg);
+  border: 1px solid var(--chip-border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.pill-btn:active {
+  background: var(--sel-bg);
+  border-color: var(--sel-border);
+}
+
+.list-item.missed .primary-text {
+  color: var(--muted);
+}
+
+.summary-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  font-size: 14px;
+}
+
+.summary-list li {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.summary-list li > span:first-child {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.summary-list .up {
+  color: var(--up);
+}
+
+.summary-list .down {
+  color: var(--down);
+}
+
+.compare-row {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.compare-row[disabled] {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.compare-pose {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.compare .no-photo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 3 / 4;
+  border-radius: 12px;
+  background: var(--chip-bg);
+  color: var(--muted);
+}
+
+.slider-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.slider-stage img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.slider-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--saffron);
+  pointer-events: none;
+}
+
+.slider-tag {
+  position: absolute;
+  top: calc(12px + env(safe-area-inset-top));
+  padding: 4px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 999px;
+}
+
+.slider-tag.left {
+  left: 12px;
+}
+
+.slider-tag.right {
+  right: 12px;
+}
+
+.slider-range {
+  flex: 1;
+  accent-color: var(--saffron);
+  min-height: 44px;
+}
