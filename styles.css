@@ -27,6 +27,10 @@
   --toast-text: #17120f;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
   --radius: 20px;
+  --chart-line: #d4680f; /* saffron stepped darker so the line holds 3:1 on the light card */
+  --chart-grid: #e6e6e6;
+  --up: #9a4a0b;
+  --down: #b03a2e;
   color-scheme: light dark;
 }
 
@@ -54,6 +58,10 @@
     --toast-bg: #f07f1e;
     --toast-text: #17120f;
     --shadow: none;
+    --chart-line: #f59a4a;
+    --chart-grid: #2c2c2c;
+    --up: #f7b27a;
+    --down: #ff8a7e;
   }
 }
 
@@ -778,4 +786,474 @@ fieldset {
   .modal {
     align-items: center;
   }
+}
+
+/* ---------- Home sections ---------- */
+.tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.tabs .btn {
+  padding: 0 8px;
+}
+
+/* ---------- Entry: RIR, warm-up, status ---------- */
+.chips.four {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.chip.toggle {
+  width: 100%;
+  border-radius: 999px;
+}
+
+.status-line {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 14px;
+  background: var(--chip-bg);
+  border: 1px solid var(--chip-border);
+}
+
+.status-line.increase,
+.status-line.ready {
+  background: var(--sel-bg);
+  border-color: var(--sel-border);
+  color: var(--sel-text);
+}
+
+.status-line.watch {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+}
+
+/* ---------- Insight ---------- */
+.insight {
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.card > .insight:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.insight-head {
+  margin: 0;
+  font-weight: 600;
+}
+
+.insight-row {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.trend {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.trend.up {
+  color: var(--up);
+}
+
+.trend.down {
+  color: var(--down);
+}
+
+.trend.flat,
+.trend.first {
+  color: var(--muted);
+}
+
+.flag {
+  margin: 8px 0 0;
+  font-size: 14px;
+}
+
+/* ---------- Settings editors ---------- */
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 14px;
+  min-height: 44px;
+  font-weight: 600;
+  background: var(--chip-bg);
+  border: 1px solid var(--chip-border);
+  border-radius: 999px;
+}
+
+.pill-x {
+  min-width: 40px;
+  min-height: 44px;
+  font: inherit;
+  font-size: 18px;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+label.check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  font-weight: 500;
+}
+
+label.check input {
+  width: 22px;
+  height: 22px;
+  accent-color: var(--saffron);
+}
+
+/* ---------- Segments (compact, for chart switches) ---------- */
+.segments.compact .seg {
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 12px;
+  font-size: 14px;
+}
+
+/* ---------- Charts ---------- */
+.chart {
+  position: relative;
+  margin: 0;
+  touch-action: pan-y;
+}
+
+.chart-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.chart .grid {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+}
+
+.chart .axis {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
+.chart .series {
+  fill: none;
+  stroke: var(--chart-line);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.chart .dot {
+  fill: var(--chart-line);
+  stroke: var(--card);
+  stroke-width: 2;
+}
+
+.chart .direct {
+  fill: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chart .cross {
+  stroke: var(--muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.chart .hover {
+  fill: var(--chart-line);
+  stroke: var(--card);
+  stroke-width: 2;
+}
+
+.chart-tip {
+  position: absolute;
+  top: 18px;
+  transform: translateX(-50%);
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  pointer-events: none;
+}
+
+.analysis {
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: var(--chip-bg);
+  border: 1px solid var(--chip-border);
+}
+
+.analysis p {
+  margin: 8px 0 0;
+}
+
+.quant {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.quant li + li {
+  margin-top: 4px;
+}
+
+/* ---------- Weekly sets bars ---------- */
+.bars {
+  display: grid;
+  gap: 10px;
+}
+
+.bar-row {
+  display: grid;
+  grid-template-columns: 92px 1fr 64px;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.bar-track {
+  position: relative;
+  height: 12px;
+  border-radius: 6px;
+  background: var(--chip-bg);
+  overflow: hidden;
+}
+
+.bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 0 4px 4px 0;
+  background: var(--chart-line);
+}
+
+.bar-fill.low,
+.bar-fill.high {
+  background: var(--muted);
+}
+
+.bar-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed var(--text);
+  border-right: 1px dashed var(--text);
+  opacity: 0.35;
+}
+
+.bar-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+/* ---------- Photos ---------- */
+.thumbs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.thumb {
+  position: relative;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--chip-bg);
+  aspect-ratio: 3 / 4;
+  cursor: pointer;
+}
+
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.thumb span {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 999px;
+}
+
+.compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.compare figure {
+  margin: 0;
+}
+
+.compare img {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border-radius: 12px;
+  background: var(--chip-bg);
+  display: block;
+}
+
+.compare figcaption {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 4px;
+  text-align: center;
+}
+
+.viewer,
+.camera {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+}
+
+.camera[hidden] {
+  display: none;
+}
+
+.viewer img {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  object-fit: contain;
+}
+
+.viewer-bar,
+.cam-bar {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  align-items: center;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  background: #000;
+}
+
+.viewer-bar .btn,
+.cam-bar .btn {
+  background: #1f1f1f;
+  color: #fff;
+  border-color: #3a3a3a;
+}
+
+.cam-bar .btn.primary {
+  width: auto;
+  flex: 1;
+  background: var(--saffron);
+  color: var(--ink);
+  border-color: var(--saffron);
+}
+
+.cam-bar .btn[aria-pressed='true'] {
+  border-color: var(--saffron);
+  color: var(--saffron);
+}
+
+.cam-bar .btn.shutter {
+  width: 72px;
+  height: 72px;
+  min-height: 72px;
+  padding: 0;
+  border-radius: 50%;
+  background: #fff;
+  border: 4px solid var(--saffron);
+}
+
+.cam-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cam-stage video,
+.cam-stage .ghost,
+.cam-stage .shot {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.cam-stage.mirror video {
+  transform: scaleX(-1);
+}
+
+.cam-stage .ghost {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.cam-stage .shot {
+  z-index: 2;
+}
+
+.cam-count {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 120px;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 2px 16px rgba(0, 0, 0, 0.6);
+}
+
+.cam-count[hidden] {
+  display: none;
+}
+
+.cam-top {
+  position: absolute;
+  top: calc(12px + env(safe-area-inset-top));
+  left: 0;
+  right: 0;
+  z-index: 4;
+  text-align: center;
 }

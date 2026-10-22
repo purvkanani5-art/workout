@@ -255,3 +255,30 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
    only; satisfaction as "Energy 4 · Strength 5" text so questions can change freely). `Code.gs` fills missing
    header cells on an existing Log tab by itself (`ensureHeaders_`), so a column addition only needs the new
    code pasted and a new deployment version. Exercise, reps and question edits never need a Sheet change.
+
+## Owner's decisions (2026-10-22, v1.1: progress, body, photos)
+
+9. **Files:** `progress.js` (pure progression/analysis engine, also `require`-able in Node), `charts.js` (SVG line
+   charts), `vault.js` (encrypted photo vault), `track.js` (Progress, Body, Photos screens; its handlers are merged
+   into app.js's tables). Load order in index.html: progress, charts, vault, track, app. All are in sw.js SHELL.
+10. **Sets** gain `rir` (0–3, 3 = "3+"; failure ⇒ 0; null when unknown) and `warmup`. RIR is required on working
+    sets unless Settings turns it off. Log columns 16–17: `RIR | Warm-up`.
+11. **Double progression per exercise.** Rep range = the exercise's plan text ("3 × 8-12"; timed plans are not
+    tracked). Ready = every planned set ≥ top − tolerance with RIR ≥ readyRir, in `readySessions` sessions in a
+    row whose first and last are ≥ `readyMinDays` apart (the "week timer"). Then suggest +stepUpper/+stepLower
+    (lower = muscle group in legs/glutes/calves/lower back, else day name has "Leg") or the exercise's own step.
+    After an increase, `watchDays` of watching that reps stay ≥ range min. All thresholds live in
+    `settings.progression` (defaults `Progress.PROGRESSION_DEFAULTS`), editable in Settings → Progression.
+12. **Verdict** (Improved/Maintained/Dropped, band ±maintainBand %): same weight → total reps change; weight
+    changed → change in `perf` = mean Epley e1RM over working sets. Best-set e1RM was rejected because it stays
+    flat during rep progression (12-10-8 → 12-11-9 read as 0%). Charts' "Strength" metric is `perf` too.
+13. **Measurements**: `wt.measurements` + `wt.mOutbox`; kinds `checkin` and `weighin`; fields editable
+    (`settings.measureFields`, unit in brackets, the one containing "weight" is bodyweight). Sheet tab
+    `Measurements` with dynamic field columns; POST `action=measure` (idempotent by Entry ID), GET
+    `action=measurements`. Check-in day `settings.checkinDay` (0 = Sunday) drives a home banner.
+14. **Photos never leave the phone unencrypted** and never touch GitHub or Google. IndexedDB `bhimlekha-vault`;
+    PBKDF2-SHA-256 600k → AES-256-GCM; meta, thumbnail and image encrypted separately. Vault locks on leaving
+    the Photos screen, on `visibilitychange` hidden, and after `autoLockMinutes` idle. Backup = `.bhimvault`
+    binary of the already-encrypted records, shared via the Web Share sheet (owner saves to iCloud Drive); a
+    web app cannot write to Files without a tap, so a home banner nags until `lastBackupAt ≥ lastPhotoAt`.
+15. **Sync from Sheet** keeps the local copy of a workout already on the phone (it can hold more detail).

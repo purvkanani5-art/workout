@@ -6,14 +6,21 @@
  *
  * The web app accepts:
  *   POST {scriptUrl}                       body: { token, action: "submit", session: {...} }
+ *   POST {scriptUrl}                       body: { token, action: "measure", entry: {...} }
  *   GET  {scriptUrl}?action=ping&token=…
  *   GET  {scriptUrl}?action=history&token=…&days=120
+ *   GET  {scriptUrl}?action=measurements&token=…
  *
- * One row is written per set. Writing is idempotent by Session ID: submitting the same session twice adds
+ * Log: one row per set. Writing is idempotent by Session ID: submitting the same session twice adds
  * nothing and returns { ok: true, duplicate: true, rows: 0 }.
+ * Measurements: one row per check-in or weigh-in, idempotent by Entry ID. Each measurement field (e.g.
+ * "Waist (cm)") has its own column; a field added in the app's Settings gets a new column automatically.
+ * Progress photos never come here: they stay encrypted on the phone.
  */
 
 var SHEET_NAME = 'Log';
+var M_SHEET_NAME = 'Measurements';
+var M_FIXED = ['Timestamp', 'Date', 'Entry ID', 'Type', 'Notes'];
 var HEADERS = [
   'Timestamp',
   'Date',
@@ -30,11 +37,14 @@ var HEADERS = [
   'Active kcal',
   'Score /10',
   'Satisfaction',
+  'RIR',
+  'Warm-up',
 ];
-// Column numbers (1-based) used below. The last five are per-session and filled on a session's first row only.
+// Column numbers (1-based) used below. Notes to Satisfaction are per-session and filled on a session's first row
+// only; RIR (reps in reserve, 3 = "3 or more") and Warm-up are per set and were added after the first version.
 var COL = {
   timestamp: 1, date: 2, sessionId: 3, day: 4, exercise: 5, setNo: 6, reps: 7, toFailure: 8, weight: 9, volume: 10,
-  notes: 11, avgHr: 12, kcal: 13, score: 14, satisfaction: 15,
+  notes: 11, avgHr: 12, kcal: 13, score: 14, satisfaction: 15, rir: 16, warmup: 17,
 };
 
 /**
@@ -43,6 +53,8 @@ var COL = {
 function setup() {
   var sheet = getLogSheet_();
   Logger.log('Sheet "%s" is ready with %s columns.', sheet.getName(), HEADERS.length);
+  var m = getMeasureSheet_();
+  Logger.log('Sheet "%s" is ready.', m.getName());
   var token = PropertiesService.getScriptProperties().getProperty('TOKEN');
   if (token) {
     Logger.log('TOKEN is set. Deploy → New deployment → Web app (Execute as Me, Anyone) and copy the /exec URL.');
@@ -102,6 +114,7 @@ function doGet(e) {
   try {
     if (p.action === 'ping') return json_({ ok: true, sheet: SHEET_NAME });
     if (p.action === 'history') return json_({ ok: true, sessions: history_(Number(p.days) || 120) });
+    if (p.action === 'measurements') return json_({ ok: true, entries: measurements_() });
     return json_({ ok: false, error: 'unknown action' });
   } catch (err) {
     return json_({ ok: false, error: String((err && err.message) || err) });
@@ -117,6 +130,7 @@ function doPost(e) {
     return json_({ ok: false, error: 'bad json' });
   }
   if (!authorized_(body.token)) return json_({ ok: false, error: 'unauthorized' });
+  if (body.action === 'measure') return measure_(body.entry);
   if (body.action !== 'submit') return json_({ ok: false, error: 'unknown action' });
 
   var session = body.session;
@@ -210,6 +224,8 @@ function buildRows_(session) {
       i === 0 ? numberOrBlank_(session.activeCalories) : '', // Active kcal
       i === 0 ? numberOrBlank_(session.score) : '', // Score /10
       i === 0 ? satisfactionText_(session.satisfaction) : '', // Satisfaction
+      numberOrBlank_(s.toFailure ? 0 : s.rir), // RIR (blank when not logged)
+      Boolean(s.warmup), // Warm-up
     ]);
   }
   return rows;
@@ -260,6 +276,8 @@ function history_(days) {
       setNo: Number(r[COL.setNo - 1]) || session.sets.length + 1,
       reps: reps === '' || reps === null || reps === undefined ? null : Number(reps),
       toFailure: r[COL.toFailure - 1] === true || String(r[COL.toFailure - 1]).toLowerCase() === 'true',
+      rir: r[COL.rir - 1] === '' || r[COL.rir - 1] === null || r[COL.rir - 1] === undefined ? null : Number(r[COL.rir - 1]),
+      warmup: r[COL.warmup - 1] === true || String(r[COL.warmup - 1]).toLowerCase() === 'true',
       weightKg: Number(r[COL.weight - 1]) || 0,
       loggedAt: loggedAt,
     });
@@ -271,6 +289,100 @@ function history_(days) {
     return b.date < a.date ? -1 : b.date > a.date ? 1 : b.finishedAt < a.finishedAt ? -1 : 1;
   });
   return sessions;
+}
+
+/* ------------------------------------------------------------ Measurements */
+
+/** The Measurements sheet, created with its fixed header cells if missing. Field columns follow the fixed ones. */
+function getMeasureSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(M_SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(M_SHEET_NAME);
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, M_FIXED.length).setValues([M_FIXED]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    sheet.getRange(2, 2, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat('@'); // keep dates as text
+  }
+  return sheet;
+}
+
+/** Header row as an array of strings (trailing blanks dropped). */
+function measureHeaders_(sheet) {
+  var lastCol = Math.max(sheet.getLastColumn(), M_FIXED.length);
+  var row = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+  while (row.length && row[row.length - 1] === '') row.pop();
+  return row;
+}
+
+/** Append one check-in / weigh-in row. Unknown field names get a new column at the end. */
+function measure_(entry) {
+  if (!entry || typeof entry.id !== 'string' || !entry.id || !/^\d{4}-\d{2}-\d{2}$/.test(String(entry.date || ''))) {
+    return json_({ ok: false, error: 'bad entry' });
+  }
+  var values = entry.values && typeof entry.values === 'object' ? entry.values : {};
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var sheet = getMeasureSheet_();
+    var last = sheet.getLastRow();
+    if (last >= 2) {
+      var ids = sheet.getRange(2, 3, last - 1, 1).getValues();
+      for (var i = 0; i < ids.length; i++) if (String(ids[i][0]) === entry.id) return json_({ ok: true, duplicate: true, rows: 0 });
+    }
+    var headers = measureHeaders_(sheet);
+    var fields = Object.keys(values);
+    var added = fields.filter(function (f) { return headers.indexOf(f) === -1; });
+    if (added.length) {
+      if (sheet.getMaxColumns() < headers.length + added.length) {
+        sheet.insertColumnsAfter(sheet.getMaxColumns(), headers.length + added.length - sheet.getMaxColumns());
+      }
+      sheet.getRange(1, headers.length + 1, 1, added.length).setValues([added]).setFontWeight('bold');
+      headers = headers.concat(added);
+    }
+    var row = headers.map(function (h, i) {
+      if (i === 0) return new Date();
+      if (i === 1) return String(entry.date);
+      if (i === 2) return entry.id;
+      if (i === 3) return entry.kind === 'weighin' ? 'Weigh-in' : 'Check-in';
+      if (i === 4) return String(entry.notes || '');
+      return values.hasOwnProperty(h) ? numberOrBlank_(values[h]) : '';
+    });
+    sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+    return json_({ ok: true, duplicate: false, rows: 1 });
+  } catch (err) {
+    return json_({ ok: false, error: String((err && err.message) || err) });
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (ignore) {}
+  }
+}
+
+/** Every measurement entry, rebuilt from the rows (values keyed by column header). */
+function measurements_() {
+  var sheet = getMeasureSheet_();
+  var last = sheet.getLastRow();
+  if (last < 2) return [];
+  var headers = measureHeaders_(sheet);
+  var rows = sheet.getRange(2, 1, last - 1, headers.length).getValues();
+  var tz = Session.getScriptTimeZone();
+  return rows
+    .filter(function (r) { return r[2]; })
+    .map(function (r) {
+      var values = {};
+      for (var i = M_FIXED.length; i < headers.length; i++) {
+        if (r[i] !== '' && r[i] !== null && !isNaN(Number(r[i]))) values[headers[i]] = Number(r[i]);
+      }
+      var date = r[1] instanceof Date ? Utilities.formatDate(r[1], tz, 'yyyy-MM-dd') : String(r[1] || '').slice(0, 10);
+      return {
+        id: String(r[2]),
+        date: date,
+        kind: String(r[3]).toLowerCase().indexOf('weigh') === 0 ? 'weighin' : 'checkin',
+        notes: String(r[4] || ''),
+        savedAt: r[0] instanceof Date ? r[0].toISOString() : String(r[0] || ''),
+        values: values,
+      };
+    });
 }
 
 function isoDate_(d) {

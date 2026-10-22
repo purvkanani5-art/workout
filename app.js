@@ -4,11 +4,17 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '1.0.0';
-const HISTORY_LIMIT = 200;
+const APP_VERSION = '1.1.0';
+const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
 const DEFAULT_QUESTIONS = ['Energy', 'Strength', 'Focus', 'Pump', 'Enjoyment']; // satisfaction matrix, 1–5 each
+const RIR_CHOICES = [0, 1, 2, 3]; // reps in reserve; 3 means "3 or more"
+const DEFAULT_MEASURE_FIELDS = ['Bodyweight (kg)', 'Waist (cm)', 'Chest (cm)', 'Arm L (cm)', 'Arm R (cm)', 'Thigh L (cm)', 'Thigh R (cm)', 'Hips (cm)', 'Neck (cm)'];
+const DEFAULT_POSES = ['Front', 'Side', 'Back'];
+const MUSCLE_GROUPS = ['Chest', 'Shoulders', 'Triceps', 'Back', 'Rear delts', 'Biceps', 'Quads', 'Hamstrings', 'Glutes', 'Calves', 'Core', 'Lower back'];
+const LOWER_MUSCLES = ['Quads', 'Hamstrings', 'Glutes', 'Calves', 'Lower back'];
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 const KEYS = {
@@ -19,6 +25,46 @@ const KEYS = {
   draft: 'wt.draft',
   outbox: 'wt.outbox',
   history: 'wt.history',
+  measurements: 'wt.measurements',
+  mOutbox: 'wt.mOutbox',
+  vaultInfo: 'wt.vaultInfo', // { lastPhotoAt, lastBackupAt }: dates only, never photo data
+};
+
+// Muscle group of each exercise in the owner's plan, for the weekly-sets count. Editable per exercise in Settings.
+const DEFAULT_MUSCLES = {
+  'Barbell Bench Press': 'Chest',
+  'Incline Chest Press Machine': 'Chest',
+  'Seated Chest Press Machine': 'Chest',
+  'Cable Chest Fly': 'Chest',
+  'Seated Shoulder Press Machine': 'Shoulders',
+  'Shoulder Press Machine': 'Shoulders',
+  'Cable Lateral Raises': 'Shoulders',
+  'Cable Y-Raise': 'Shoulders',
+  'Overhead Rope Triceps Extension': 'Triceps',
+  'Rope Pushdown': 'Triceps',
+  Plank: 'Core',
+  'Lat Pulldown': 'Back',
+  'Neutral-Grip Lat Pulldown': 'Back',
+  'Single-Arm Cable Pulldown': 'Back',
+  'Chest-Supported Row Machine': 'Back',
+  'Seated Cable Row': 'Back',
+  'Straight-Arm Pulldown': 'Back',
+  'Reverse Pec Deck': 'Rear delts',
+  'Face Pulls': 'Rear delts',
+  'Cable Preacher Curl': 'Biceps',
+  'Preacher Curl Machine': 'Biceps',
+  'Rope Hammer Curl': 'Biceps',
+  'Leg Press': 'Quads',
+  'Leg Extension': 'Quads',
+  'Romanian Deadlift': 'Hamstrings',
+  'Seated Leg Curl': 'Hamstrings',
+  'Lying Leg Curl': 'Hamstrings',
+  'Hip Thrust Machine': 'Glutes',
+  '45° Back Extension (weighted)': 'Lower back',
+  'Standing Calf Raise': 'Calves',
+  'Seated Calf Raise': 'Calves',
+  "Captain's Chair Knee Raise": 'Core',
+  'Cable Crunch': 'Core',
 };
 
 // The owner's plan. Each day: [exercise, planned sets × reps]. Editable in Settings; this is only the seed.
@@ -119,6 +165,7 @@ function seedExercises() {
 
 /* ------------------------------------------------------------------ state */
 
+const savedSettings = load(KEYS.settings, {});
 const state = {
   settings: {
     scriptUrl: '',
@@ -126,7 +173,17 @@ const state = {
     restSeconds: 90,
     repsChips: DEFAULT_REPS,
     questions: DEFAULT_QUESTIONS,
-    ...load(KEYS.settings, {}),
+    requireRir: true, // ask for reps in reserve on every working set
+    steps: {}, // { exercise: kg } weight step overrides
+    muscles: { ...DEFAULT_MUSCLES }, // { exercise: muscle group }
+    measureFields: DEFAULT_MEASURE_FIELDS,
+    checkinDay: 0, // Sunday
+    photoPoses: DEFAULT_POSES,
+    cameraTimer: 10, // seconds of countdown on the in-app camera
+    autoLockMinutes: 3,
+    lastDeload: null, // YYYY-MM-DD of the last lighter week
+    ...savedSettings,
+    progression: { ...Progress.PROGRESSION_DEFAULTS, ...(savedSettings.progression || {}) },
   },
   exercises: load(KEYS.exercises, null),
   targets: load(KEYS.targets, null),
@@ -134,7 +191,16 @@ const state = {
   draft: load(KEYS.draft, null),
   outbox: load(KEYS.outbox, []),
   history: load(KEYS.history, []),
+  measurements: load(KEYS.measurements, []),
+  mOutbox: load(KEYS.mOutbox, []),
+  vaultInfo: load(KEYS.vaultInfo, { lastPhotoAt: null, lastBackupAt: null }),
   ui: {
+    progress: { metric: 'e1rm', range: '12w' },
+    body: { field: null, range: '12w', weighIn: '', draft: null },
+    vault: { status: 'unknown', items: [], busy: '', backup: null, compare: null, viewing: null, pose: null },
+    newRep: '',
+    newField: '',
+    newPose: '',
     form: null, // the Workout entry form
     timer: null, // { endsAt, total }
     start: { dayType: DAY_TYPES[0], custom: '', date: todayISO() },
@@ -157,6 +223,67 @@ function repsChips() {
 
 function questions() {
   return Array.isArray(state.settings.questions) ? state.settings.questions : DEFAULT_QUESTIONS;
+}
+
+function measureFields() {
+  return Array.isArray(state.settings.measureFields) && state.settings.measureFields.length ? state.settings.measureFields : DEFAULT_MEASURE_FIELDS;
+}
+
+function weightField() {
+  return measureFields().find((f) => /weight/i.test(f)) || null;
+}
+
+function poses() {
+  return Array.isArray(state.settings.photoPoses) && state.settings.photoPoses.length ? state.settings.photoPoses : DEFAULT_POSES;
+}
+
+/* ------------------------------------------------- progress engine glue */
+
+/** The plan text for an exercise: the day's own plan first, else the first day that has one. */
+function planText(dayType, exercise) {
+  const own = state.targets[dayType]?.[exercise];
+  if (own) return own;
+  for (const day of Object.keys(state.targets)) if (state.targets[day]?.[exercise]) return state.targets[day][exercise];
+  return '';
+}
+
+function muscleOf(exercise) {
+  return state.settings.muscles?.[exercise] || '';
+}
+
+function progressCtx() {
+  return {
+    p: state.settings.progression,
+    planFor: (dayType, exercise) => Progress.parsePlan(planText(dayType, exercise)),
+    isLower: (dayType, exercise) => (muscleOf(exercise) ? LOWER_MUSCLES.includes(muscleOf(exercise)) : /leg/i.test(dayType || '')),
+    stepFor: (exercise) => state.settings.steps?.[exercise],
+    today: todayISO(),
+  };
+}
+
+/** Analysis of one exercise over all saved workouts (plus the draft when `withDraft`). */
+function analyse(exercise, withDraft = false) {
+  const sessions = withDraft && state.draft ? [...state.history.filter((s) => s.id !== state.draft.id), state.draft] : state.history;
+  return Progress.analyseExercise(sessions, exercise, progressCtx());
+}
+
+function trackedExercises() {
+  const names = new Set();
+  for (const s of state.history) for (const set of s.sets) if (Progress.isWorking(set)) names.add(set.exercise);
+  return [...names];
+}
+
+/** Suggest a lighter week after `deloadWeeks` of training without one, or when several lifts are dropping. */
+function deloadAdvice(analyses) {
+  const p = state.settings.progression;
+  const dates = state.history.map((s) => s.date).filter(Boolean).sort();
+  if (!dates.length) return null;
+  const since = state.settings.lastDeload && state.settings.lastDeload > dates[0] ? state.settings.lastDeload : dates[0];
+  const weeks = Math.floor(Progress.daysBetween(since, todayISO()) / 7);
+  const dropping = analyses.filter((a) => a.flags.some((f) => f.kind === 'drop')).length;
+  if (weeks >= p.deloadWeeks) return `You have trained ${weeks} weeks without a lighter week. Plan one soon: same exercises, about half the sets, and stop 3–4 reps short of failure.`;
+  if (dropping >= 2) return `${dropping} exercises are dropping at once. That usually means fatigue, not weakness: a lighter week (about half the sets) often brings strength back.`;
+  return null;
 }
 
 if (!state.exercises) {
@@ -243,7 +370,12 @@ function describeSet(set, withSetNo = true) {
       : set.toFailure
         ? `${set.reps} reps to failure`
         : `${set.reps} reps`;
-  return `${withSetNo ? `Set ${set.setNo} · ` : ''}${reps} · ${fmtKg(set.weightKg)} kg`;
+  const extra = set.warmup ? ' · warm-up' : !set.toFailure && Number.isFinite(set.rir) ? ` · ${rirLabel(set.rir)} in reserve` : '';
+  return `${withSetNo ? `Set ${set.setNo} · ` : ''}${reps} · ${fmtKg(set.weightKg)} kg${extra}`;
+}
+
+function rirLabel(n) {
+  return n >= 3 ? '3+' : String(n);
 }
 
 function groupByExercise(sets) {
@@ -411,6 +543,8 @@ function newForm(exercise) {
     reps: null, // number | 'other' | 'failure' | null
     otherReps: '',
     failureReps: '',
+    rir: null, // 0–3 (3 = 3+), null until tapped
+    warmup: false,
     weight: lastWeight(ex),
     editingId: null,
     addingExercise: false,
@@ -443,10 +577,22 @@ function render() {
     case 'settings':
       html = renderSettings();
       break;
+    case 'progress':
+      html = arg ? renderExerciseProgress(arg) : renderProgress();
+      break;
+    case 'body':
+      html = renderBody();
+      break;
+    case 'photos':
+      html = renderPhotos();
+      break;
     default:
       html = renderHome();
   }
+  // Leaving the photo screens locks the vault, so decrypted photos never sit behind another screen.
+  if (name !== 'photos') lockVault();
   app.innerHTML = html;
+  if (name === 'photos') afterPhotosRender();
   if (name === 'entry') tickTimer();
   if (name !== 'review' && state.ui.submit.status !== 'idle' && state.ui.submit.status !== 'sending') {
     state.ui.submit = { status: 'idle', message: '', session: null };
@@ -474,11 +620,14 @@ function renderHome() {
         <img src="./icons/icon.svg" alt="" width="32" height="32" />
         <h1 class="card-title">Bhimlekha</h1>
       </div>
-      <div class="links">
-        <a class="btn link" href="#history">History</a>
-        <a class="btn link" href="#settings">Settings</a>
-      </div>
+      <a class="btn link" href="#settings">Settings</a>
     </div>
+    <nav class="tabs" aria-label="Sections">
+      <a class="btn" href="#history">History</a>
+      <a class="btn" href="#progress">Progress</a>
+      <a class="btn" href="#body">Body</a>
+    </nav>
+    ${homeBanners()}
     ${
       d
         ? `<div class="banner">
@@ -533,6 +682,49 @@ function renderHome() {
       <button type="button" class="btn primary" data-action="startWorkout">${d ? 'Start a new workout' : 'Start workout'}</button>
       ${d ? '<p class="hint" style="text-align:center">Starting a new workout keeps the current one until you discard it.</p>' : ''}
     </section>`;
+}
+
+/** Weight increases due, the weekly check-in, and photos waiting for a backup. */
+function homeBanners() {
+  const out = [];
+  const due = trackedExercises()
+    .map((n) => analyse(n))
+    .filter((a) => a && a.status.kind === 'increase');
+  if (due.length) {
+    out.push(`<div class="banner">
+      <p class="title">Time to add weight</p>
+      ${due.map((a) => `<p class="small" style="margin:2px 0 0">${esc(a.exercise)}: ${esc(fmtKg(a.status.weight))} → ${esc(fmtKg(a.status.nextWeight))} kg</p>`).join('')}
+    </div>`);
+  }
+  const check = checkinState();
+  if (check.due) {
+    out.push(`<div class="banner">
+      <p class="title">${esc(check.title)}</p>
+      <p class="small muted" style="margin:0">Measurements and photos, same time and conditions as last week.</p>
+      <div class="actions"><a class="btn" href="#body">Open check-in</a></div>
+    </div>`);
+  }
+  const v = state.vaultInfo;
+  if (v.lastPhotoAt && (!v.lastBackupAt || v.lastBackupAt < v.lastPhotoAt)) {
+    out.push(`<div class="banner warn">
+      <p class="title">Photos not backed up yet</p>
+      <p class="small muted" style="margin:0">Save the encrypted backup to the Files app (iCloud Drive) so a lost phone does not lose them.</p>
+      <div class="actions"><a class="btn" href="#photos">Back up now</a></div>
+    </div>`);
+  }
+  return out.join('');
+}
+
+/** Weekly check-in: due on the check-in day until one is logged, and overdue once a week has passed. */
+function checkinState() {
+  const today = todayISO();
+  const checkins = state.measurements.filter((m) => m.kind === 'checkin').map((m) => m.date).sort();
+  const last = checkins[checkins.length - 1] || null;
+  const dayName = WEEKDAYS[Number(state.settings.checkinDay) || 0];
+  if (last === today) return { due: false, last };
+  if (new Date().getDay() === (Number(state.settings.checkinDay) || 0)) return { due: true, last, title: `${dayName} check-in` };
+  if (last && Progress.daysBetween(last, today) > 7) return { due: true, last, title: `Check-in overdue (last: ${formatDate(last)})` };
+  return { due: false, last };
 }
 
 function exerciseOptions(f) {
@@ -591,6 +783,7 @@ function renderEntry() {
         }
         ${target ? `<p class="hint">Plan: ${esc(target)}</p>` : ''}
         ${hint ? `<p class="hint">${esc(hint)}</p>` : ''}
+        ${f.exercise ? entryStatus(f.exercise) : ''}
       </div>
       <fieldset>
         <legend>Set number</legend>
@@ -601,7 +794,7 @@ function renderEntry() {
       </fieldset>
       <fieldset>
         <legend>Reps</legend>
-        <div class="chips">${chips}</div>
+        <div class="chips" id="reps-grid">${chips}</div>
         ${
           f.reps === 'other'
             ? `<div style="margin-top:8px">
@@ -619,10 +812,22 @@ function renderEntry() {
             : ''
         }
       </fieldset>
+      ${
+        f.reps === 'failure'
+          ? ''
+          : `<fieldset>
+        <legend>Reps left in the tank <span class="small muted">(RIR)</span></legend>
+        <div class="chips four" id="rir-chips">${RIR_CHOICES.map(
+          (n) => `<button type="button" class="chip" data-action="rir" data-value="${n}" aria-pressed="${f.rir === n}">${rirLabel(n)}</button>`,
+        ).join('')}</div>
+        <p class="hint">0 = could not do another · 1 = one more · 2 = two more · 3+ = easy.</p>
+      </fieldset>`
+      }
       <div>
         <label for="weight">Weight (kg)</label>
         <input id="weight" class="input" type="number" inputmode="decimal" min="0" step="0.5" placeholder="0 for bodyweight" value="${esc(f.weight)}" data-input="weight" />
       </div>
+      <button type="button" class="chip toggle" data-action="toggleWarmup" aria-pressed="${f.warmup}">Warm-up set${f.warmup ? ' ✓' : ''}</button>
       <button type="button" class="btn primary" data-action="saveSet">${f.editingId ? 'Update set' : 'Save set'}</button>
       ${f.editingId ? '<button type="button" class="btn ghost secondary" data-action="cancelEdit">Cancel edit</button>' : ''}
     </section>
@@ -657,6 +862,14 @@ function renderEntry() {
     </section>
 
     <button type="button" class="btn secondary" data-action="finishWorkout">Finish workout</button>`;
+}
+
+/** Progression status for the exercise on the entry screen, from saved workouts only (what today should aim for). */
+function entryStatus(exercise) {
+  const a = analyse(exercise);
+  if (!a || a.status.kind === 'untracked') return '';
+  const line = Progress.statusLine(a.status, todayISO());
+  return line ? `<p class="status-line ${esc(a.status.kind)}">${esc(line)}</p>` : '';
 }
 
 function renderTimer() {
@@ -716,6 +929,58 @@ function renderSummary(session) {
     </table>`;
 }
 
+const TREND = {
+  up: { icon: '▲', label: 'Improved', cls: 'up' },
+  flat: { icon: '●', label: 'Maintained', cls: 'flat' },
+  down: { icon: '▼', label: 'Dropped', cls: 'down' },
+  first: { icon: '○', label: 'Baseline', cls: 'first' },
+};
+
+/** "How did this workout compare": per exercise trend, numbers in words, progression status and warnings. */
+function renderInsight(session) {
+  const ctx = progressCtx();
+  ctx.today = session.date || todayISO();
+  const others = state.history.filter((s) => s.id !== session.id);
+  const ins = Progress.workoutInsight(session, others, ctx);
+  if (!ins.rows.length) return '';
+  const p = state.settings.progression;
+  const c = ins.counts;
+  const headline = [];
+  if (c.up) headline.push(`${c.up} improved`);
+  if (c.flat) headline.push(`${c.flat} maintained`);
+  if (c.down) headline.push(`${c.down} dropped`);
+  if (c.first) headline.push(`${c.first} new`);
+  const totals = [];
+  if (ins.strengthPct !== null) totals.push(`${Progress.signed(ins.strengthPct)} average change per exercise`);
+  if (ins.volumePct !== null) totals.push(`volume ${Progress.signed(ins.volumePct)} on the same exercises`);
+  return `
+    <div class="insight stack">
+      <h2 class="section-title" style="margin:0">Progress insight</h2>
+      <p class="insight-head">${esc(headline.join(' · '))}${totals.length ? `<br /><span class="small muted">vs last time: ${esc(totals.join(', '))}</span>` : ''}</p>
+      ${ins.rows
+        .map((a) => {
+          const t = TREND[a.trend];
+          const status = a.status.kind === 'untracked' ? '' : Progress.statusLine(a.status, ctx.today);
+          const flags = a.flags
+            .map((f) =>
+              f.kind === 'stall'
+                ? `Stalled: ${f.sessions} sessions at ${fmtKg(a.last.weight)} kg without more reps. Try a longer rest, one extra rep on one set, or a variation.`
+                : `Dropping: est. strength ${Progress.signed(f.pct)} over the last ${f.sessions} sessions. Check sleep, food and recovery.`,
+            )
+            .map((x) => `<p class="flag">⚠️ ${esc(x)}</p>`)
+            .join('');
+          return `
+          <div class="insight-row">
+            <div class="row between"><strong>${esc(a.exercise)}</strong><span class="trend ${t.cls}">${t.icon} ${esc(t.label)}</span></div>
+            <p class="small" style="margin:4px 0 0">${esc(Progress.exerciseSentence(a, p))}</p>
+            ${status ? `<p class="status-line ${esc(a.status.kind)}">${esc(status)}</p>` : ''}
+            ${flags}
+          </div>`;
+        })
+        .join('')}
+    </div>`;
+}
+
 function renderReview() {
   const sub = state.ui.submit;
   const session = state.draft || sub.session;
@@ -735,6 +1000,7 @@ function renderReview() {
         <p class="subtitle">${esc(session.dayType)} day · ${esc(formatDate(session.date))}</p>
       </div>
       ${renderSummary(session)}
+      ${renderInsight(session)}
       ${renderWellbeing(session, busy || done)}
       <div>
         <label for="notes">Notes (optional)</label>
@@ -847,6 +1113,7 @@ function renderHistoryDetail(id) {
       ${wellbeingSummary(s).length ? `<p class="small">${wellbeingSummary(s).map(esc).join(' · ')}</p>` : ''}
       ${s.notes ? `<p class="small"><strong>Notes:</strong> ${esc(s.notes)}</p>` : ''}
     </section>
+    <section class="card">${renderInsight(s) || '<p class="empty">No working sets to compare.</p>'}</section>
     <section class="card">
       <h2 class="section-title">Sets</h2>
       ${[...groups.entries()]
@@ -891,12 +1158,27 @@ function renderSettings() {
         <label for="rest-seconds">Default rest (seconds)</label>
         <input id="rest-seconds" class="input" type="number" inputmode="numeric" min="10" max="900" step="5" value="${esc(s.restSeconds)}" data-change="restSeconds" />
       </div>
-      <div>
-        <label for="reps-chips">Reps buttons</label>
-        <input id="reps-chips" class="input" inputmode="numeric" value="${esc(repsChips().filter((c) => typeof c === 'number').join(', '))}" data-change="repsChips" autocomplete="off" />
-        <p class="hint">Comma-separated. "Other" (any number) and "Failure" are always added after these.</p>
-      </div>
+      <fieldset>
+        <legend>Reps buttons</legend>
+        <div class="pills" id="reps-pills">${repsChips()
+          .filter((c) => typeof c === 'number')
+          .map((n) => `<span class="pill">${n}<button type="button" class="pill-x" data-action="removeRep" data-value="${n}" aria-label="Remove the ${n} reps button">×</button></span>`)
+          .join('')}</div>
+        <div class="input-row" style="margin-top:8px">
+          <label for="rep-new" class="sr-only">New reps button</label>
+          <input id="rep-new" class="input" type="number" inputmode="numeric" min="1" max="999" placeholder="Add a reps button, e.g. 11" value="${esc(ui.newRep)}" data-input="newRep" />
+          <button type="button" class="btn" data-action="addRep">Add</button>
+        </div>
+        <p class="hint">Shown in number order. "Other" (any number) and "Failure" always follow them.</p>
+      </fieldset>
+      <label class="check">
+        <input type="checkbox" data-change="requireRir" ${s.requireRir ? 'checked' : ''} />
+        Ask for reps in reserve (RIR) on every working set
+      </label>
     </section>
+
+    ${renderProgressionSettings()}
+    ${renderBodySettings()}
 
     <section class="card stack">
       <h2 class="section-title" style="margin:0">End-of-workout questions</h2>
@@ -946,6 +1228,11 @@ function renderSettings() {
                 <div class="name">
                   ${esc(name)}
                   ${state.targets[day]?.[name] ? `<span class="small muted">Plan: ${esc(state.targets[day][name])}</span>` : ''}
+                  ${
+                    muscleOf(name) || state.settings.steps?.[name]
+                      ? `<span class="small muted">${esc([muscleOf(name), state.settings.steps?.[name] ? `step ${fmtKg(state.settings.steps[name])} kg` : ''].filter(Boolean).join(' · '))}</span>`
+                      : ''
+                  }
                 </div>
                 <button type="button" class="btn icon ghost" data-action="moveExercise" data-index="${i}" data-dir="-1" aria-label="Move ${esc(name)} up" ${i === 0 ? 'disabled' : ''}>↑</button>
                 <button type="button" class="btn icon ghost" data-action="moveExercise" data-index="${i}" data-dir="1" aria-label="Move ${esc(name)} down" ${i === list.length - 1 ? 'disabled' : ''}>↓</button>
@@ -973,9 +1260,103 @@ function renderSettings() {
       <button type="button" class="btn secondary" data-action="exportData">Export local data (JSON)</button>
       <button type="button" class="btn secondary" data-action="importData">Import from JSON…</button>
       <input id="import-file" type="file" accept="application/json,.json" class="sr-only" data-change="importFile" />
-      <p class="hint">The export includes your script URL and token so a new phone can be set up from it. Keep the file private.</p>
+      <p class="hint">The export includes workouts, measurements, settings, your script URL and token so a new phone can be set up from it. Keep the file private. Photos are not in it: they have their own encrypted backup on the Photos screen.</p>
     </section>
     <p class="version">Bhimlekha v${esc(APP_VERSION)} · भीमलेखा</p>`;
+}
+
+// Every progression assumption, editable. [key, label, hint, step]
+const PROGRESSION_FIELDS = [
+  ['readyRir', 'Reps in reserve needed on every set', 'A set counts as "easy" with at least this many reps left.', 1],
+  ['topTolerance', 'Reps below the top still counted', '1 means 11 of 12 counts as reaching the top.', 1],
+  ['readySessions', 'Sessions in a row at the target', 'How many times the target must be hit before adding weight.', 1],
+  ['readyMinDays', 'Week timer (days)', 'The first and last of those sessions must be at least this far apart.', 1],
+  ['stepUpper', 'Weight step, upper body (kg)', 'Override per exercise in Exercises below.', 0.5],
+  ['stepLower', 'Weight step, lower body (kg)', 'Legs, glutes, calves, lower back.', 0.5],
+  ['maintainBand', 'Maintained band (± %)', 'Changes in estimated max smaller than this count as maintained.', 0.5],
+  ['avgWindow', 'Sessions in the rolling average', 'Each workout is also compared with this many earlier sessions.', 1],
+  ['stallSessions', 'Stall warning after (sessions)', 'Same weight and no extra reps for this many sessions.', 1],
+  ['dropSessions', 'Drop warning after (sessions)', 'Estimated max falling this many sessions in a row.', 1],
+  ['watchDays', 'Watch period after adding weight (days)', 'Checks that reps stay inside the range at the new weight.', 1],
+  ['deloadWeeks', 'Suggest a lighter week every (weeks)', '', 1],
+  ['muscleSetsMin', 'Weekly hard sets per muscle, low end', '', 1],
+  ['muscleSetsMax', 'Weekly hard sets per muscle, high end', '', 1],
+];
+
+function renderProgressionSettings() {
+  const p = state.settings.progression;
+  return `
+    <section class="card stack">
+      <div>
+        <h2 class="section-title" style="margin:0">Progression</h2>
+        <p class="hint">Double progression: keep the weight until every set reaches the top of the plan's rep range with reps in reserve, in enough sessions spread over the week timer, then add a step. Rep ranges come from each exercise's plan (Exercises below).</p>
+      </div>
+      <div class="two">
+        ${PROGRESSION_FIELDS.map(
+          ([key, label, hint, step]) => `<div>
+            <label for="prog-${key}">${esc(label)}</label>
+            <input id="prog-${key}" class="input" type="number" inputmode="decimal" min="0" step="${step}" value="${esc(p[key])}" data-change="progression" data-key="${key}" />
+            ${hint ? `<p class="hint">${esc(hint)}</p>` : ''}
+          </div>`,
+        ).join('')}
+      </div>
+      <button type="button" class="btn secondary" data-action="resetProgression">Restore the defaults</button>
+    </section>`;
+}
+
+function renderBodySettings() {
+  const s = state.settings;
+  const ui = state.ui;
+  const listEditor = (items, removeAction, moveAction) =>
+    `<ul class="list">${items
+      .map(
+        (f, i) => `<li><div class="exercise-row">
+          <div class="name">${esc(f)}</div>
+          <button type="button" class="btn icon ghost" data-action="${moveAction}" data-index="${i}" data-dir="-1" aria-label="Move ${esc(f)} up" ${i === 0 ? 'disabled' : ''}>↑</button>
+          <button type="button" class="btn icon ghost" data-action="${moveAction}" data-index="${i}" data-dir="1" aria-label="Move ${esc(f)} down" ${i === items.length - 1 ? 'disabled' : ''}>↓</button>
+          <button type="button" class="btn icon ghost" data-action="${removeAction}" data-index="${i}" aria-label="Remove ${esc(f)}">🗑</button>
+        </div></li>`,
+      )
+      .join('')}</ul>`;
+  return `
+    <section class="card stack">
+      <h2 class="section-title" style="margin:0">Body & photos</h2>
+      <div>
+        <label for="checkin-day">Check-in day</label>
+        <select id="checkin-day" class="select" data-change="checkinDay">
+          ${WEEKDAYS.map((d, i) => `<option value="${i}" ${Number(s.checkinDay) === i ? 'selected' : ''}>${d}</option>`).join('')}
+        </select>
+      </div>
+      <fieldset>
+        <legend>Measurements</legend>
+        ${listEditor(measureFields(), 'removeField', 'moveField')}
+        <div class="input-row" style="margin-top:8px">
+          <label for="field-new" class="sr-only">New measurement</label>
+          <input id="field-new" class="input" placeholder="e.g. Calf (cm)" value="${esc(ui.newField)}" data-input="newField" autocomplete="off" />
+          <button type="button" class="btn" data-action="addField">Add</button>
+        </div>
+        <p class="hint">Put the unit in brackets. A field with "weight" in its name is the bodyweight. Each one becomes a column in the Sheet's Measurements tab.</p>
+      </fieldset>
+      <fieldset>
+        <legend>Photo poses</legend>
+        ${listEditor(poses(), 'removePose', 'movePose')}
+        <div class="input-row" style="margin-top:8px">
+          <label for="pose-new" class="sr-only">New pose</label>
+          <input id="pose-new" class="input" placeholder="e.g. Front flexed" value="${esc(ui.newPose)}" data-input="newPose" autocomplete="off" />
+          <button type="button" class="btn" data-action="addPose">Add</button>
+        </div>
+      </fieldset>
+      <div class="two">
+        <div>
+          <label for="cam-timer">Camera timer (s)</label>
+          <input id="cam-timer" class="input" type="number" inputmode="numeric" min="0" max="30" value="${esc(s.cameraTimer)}" data-change="cameraTimer" />
+        </div>
+        <div>
+          <label for="auto-lock">Vault auto-lock (min)</label>
+          <input id="auto-lock" class="input" type="number" inputmode="numeric" min="1" max="60" value="${esc(s.autoLockMinutes)}" data-change="autoLockMinutes" />
+        </div>
+      </div>
+    </section>`;
 }
 
 /* -------------------------------------------------------------- rest timer */
@@ -1077,6 +1458,19 @@ const actions = {
     if (f.reps === 'other') document.getElementById('other-reps')?.focus();
   },
 
+  rir(el) {
+    const f = form();
+    const v = Number(el.dataset.value);
+    f.rir = f.rir === v ? null : v;
+    render();
+  },
+
+  toggleWarmup() {
+    const f = form();
+    f.warmup = !f.warmup;
+    render();
+  },
+
   moreSets() {
     const f = form();
     f.visibleSets += 1;
@@ -1125,6 +1519,9 @@ const actions = {
     }
     const weight = f.weight === '' ? NaN : Number(f.weight);
     if (!Number.isFinite(weight) || weight < 0) problems.push('weight');
+    // Reps in reserve: failure means 0; otherwise asked for on working sets when Settings says so.
+    const rir = toFailure ? 0 : f.rir ?? null;
+    if (!problems.length && rir === null && !f.warmup && state.settings.requireRir) problems.push('rir');
     if (problems.length) {
       for (const id of ['exercise', 'weight', 'other-reps']) document.getElementById(id)?.removeAttribute('aria-invalid');
       if (problems.includes('exercise')) document.getElementById('exercise')?.setAttribute('aria-invalid', 'true');
@@ -1135,7 +1532,9 @@ const actions = {
           ? 'Choose an exercise'
           : problems.includes('reps')
             ? 'Pick the reps (or Failure)'
-            : 'Enter the weight (0 for bodyweight)',
+            : problems.includes('weight')
+              ? 'Enter the weight (0 for bodyweight)'
+              : 'How many reps were left in the tank? (RIR)',
         'error',
       );
     }
@@ -1147,6 +1546,8 @@ const actions = {
       setNo: f.setNo,
       reps,
       toFailure,
+      rir: rir === null || rir === undefined ? null : rir,
+      warmup: Boolean(f.warmup),
       weightKg: weight,
       loggedAt: existing ? existing.loggedAt : nowISO(),
     };
@@ -1163,6 +1564,8 @@ const actions = {
       reps: null,
       otherReps: '',
       failureReps: '',
+      rir: null,
+      warmup: false,
       editingId: null,
     };
     if (!existing) startTimer();
@@ -1186,6 +1589,8 @@ const actions = {
       reps: s.toFailure ? 'failure' : chip,
       otherReps: !s.toFailure && chip === 'other' ? String(s.reps) : '',
       failureReps: s.toFailure && s.reps != null ? String(s.reps) : '',
+      rir: Number.isFinite(s.rir) ? s.rir : null,
+      warmup: Boolean(s.warmup),
       weight: fmtKg(s.weightKg),
       editingId: s.id,
       addingExercise: false,
@@ -1297,18 +1702,30 @@ const actions = {
       message: 'The new name is used on every day it appears and in the workouts saved on this phone.',
       fields: [
         { key: 'name', label: 'Name', value: oldName },
-        { key: 'target', label: 'Plan (sets × reps)', value: state.targets[day]?.[oldName] || '', placeholder: 'e.g. 3 × 8-12' },
+        { key: 'target', label: 'Plan (sets × reps range, e.g. 3 × 8-12)', value: state.targets[day]?.[oldName] || '', placeholder: 'e.g. 3 × 8-12' },
+        { key: 'step', label: 'Weight step when progressing (kg, blank = default)', value: state.settings.steps?.[oldName] ?? '', placeholder: 'e.g. 2.5' },
+        { key: 'muscle', label: 'Muscle group', value: muscleOf(oldName), placeholder: MUSCLE_GROUPS.slice(0, 4).join(', ') + '…' },
       ],
       confirmText: 'Save',
     });
     if (!values) return;
     const newName = values.name;
     if (!newName) return toast('The name cannot be empty', 'error');
+    const step = values.step === '' ? null : Number(values.step);
+    if (step !== null && !(step > 0)) return toast('Weight step must be a number above 0', 'error');
     if (newName !== oldName) renameEverywhere(oldName, newName);
     if (!state.targets[day]) state.targets[day] = {};
     if (values.target) state.targets[day][newName] = values.target;
     else delete state.targets[day][newName];
     save(KEYS.targets, state.targets);
+    state.settings.steps = { ...(state.settings.steps || {}) };
+    if (step === null) delete state.settings.steps[newName];
+    else state.settings.steps[newName] = step;
+    state.settings.muscles = { ...(state.settings.muscles || {}) };
+    const muscle = MUSCLE_GROUPS.find((m) => m.toLowerCase() === values.muscle.toLowerCase()) || values.muscle;
+    if (muscle) state.settings.muscles[newName] = muscle;
+    else delete state.settings.muscles[newName];
+    save(KEYS.settings, state.settings);
     toast(newName === oldName ? 'Plan updated' : `Renamed to ${newName}`);
     render();
   },
@@ -1415,6 +1832,54 @@ const actions = {
     document.getElementById('manage-new')?.focus();
   },
 
+  addRep() {
+    const n = Number(state.ui.newRep);
+    if (!Number.isInteger(n) || n < 1 || n > 999) return toast('Enter a whole number of reps', 'error');
+    const list = repsChips().filter((c) => typeof c === 'number');
+    if (list.includes(n)) return toast('That button is already there', 'error');
+    state.settings.repsChips = [...list, n].sort((a, b) => a - b);
+    state.ui.newRep = '';
+    save(KEYS.settings, state.settings);
+    render();
+    document.getElementById('rep-new')?.focus();
+  },
+
+  removeRep(el) {
+    const n = Number(el.dataset.value);
+    const list = repsChips().filter((c) => typeof c === 'number' && c !== n);
+    if (!list.length) return toast('Keep at least one reps button', 'error');
+    state.settings.repsChips = list;
+    save(KEYS.settings, state.settings);
+    render();
+  },
+
+  async resetProgression() {
+    const ok = await openModal({ title: 'Restore the progression defaults?', message: 'Per-exercise weight steps and muscle groups are kept.', confirmText: 'Restore' });
+    if (!ok) return;
+    state.settings.progression = { ...Progress.PROGRESSION_DEFAULTS };
+    save(KEYS.settings, state.settings);
+    render();
+  },
+
+  addField() {
+    addToList('measureFields', measureFields(), state.ui.newField, 'newField', 'field-new');
+  },
+  removeField(el) {
+    removeFromList('measureFields', measureFields(), el, 'Past entries keep their values.');
+  },
+  moveField(el) {
+    moveInList('measureFields', measureFields(), el);
+  },
+  addPose() {
+    addToList('photoPoses', poses(), state.ui.newPose, 'newPose', 'pose-new');
+  },
+  removePose(el) {
+    removeFromList('photoPoses', poses(), el, 'Photos already taken keep their pose name.');
+  },
+  movePose(el) {
+    moveInList('photoPoses', poses(), el);
+  },
+
   exportData() {
     const data = {
       app: 'bhimlekha',
@@ -1427,6 +1892,8 @@ const actions = {
       draft: state.draft,
       outbox: state.outbox,
       history: state.history,
+      measurements: state.measurements,
+      mOutbox: state.mOutbox,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1507,6 +1974,36 @@ const changes = {
     save(KEYS.settings, state.settings);
     render();
   },
+  requireRir(el) {
+    state.settings.requireRir = el.checked;
+    save(KEYS.settings, state.settings);
+  },
+  progression(el) {
+    const key = el.dataset.key;
+    const v = Number(el.value);
+    if (!Number.isFinite(v) || v < 0) {
+      el.value = state.settings.progression[key];
+      return toast('Enter a number of 0 or more', 'error');
+    }
+    state.settings.progression = { ...state.settings.progression, [key]: v };
+    save(KEYS.settings, state.settings);
+  },
+  checkinDay(el) {
+    state.settings.checkinDay = Number(el.value);
+    save(KEYS.settings, state.settings);
+  },
+  cameraTimer(el) {
+    const v = Math.min(30, Math.max(0, Math.round(Number(el.value) || 0)));
+    state.settings.cameraTimer = v;
+    el.value = v;
+    save(KEYS.settings, state.settings);
+  },
+  autoLockMinutes(el) {
+    const v = Math.min(60, Math.max(1, Math.round(Number(el.value) || 3)));
+    state.settings.autoLockMinutes = v;
+    el.value = v;
+    save(KEYS.settings, state.settings);
+  },
   avgHeartRate(el) {
     if (!state.draft) return;
     const v = Number(el.value);
@@ -1546,6 +2043,15 @@ const inputs = {
   newQuestion(el) {
     state.ui.newQuestion = el.value;
   },
+  newRep(el) {
+    state.ui.newRep = el.value;
+  },
+  newField(el) {
+    state.ui.newField = el.value;
+  },
+  newPose(el) {
+    state.ui.newPose = el.value;
+  },
   otherReps(el) {
     form().otherReps = el.value;
   },
@@ -1563,6 +2069,40 @@ const inputs = {
     }
   },
 };
+
+/* Small list editors for settings arrays (measurement fields, photo poses). */
+function addToList(key, current, raw, uiKey, focusId) {
+  const value = String(raw || '').trim();
+  if (!value) return toast('Type a name first', 'error');
+  if (current.includes(value)) return toast('Already in the list', 'error');
+  state.settings[key] = [...current, value];
+  state.ui[uiKey] = '';
+  save(KEYS.settings, state.settings);
+  render();
+  document.getElementById(focusId)?.focus();
+}
+
+async function removeFromList(key, current, el, message) {
+  const i = Number(el.dataset.index);
+  if (!current[i]) return;
+  if (current.length === 1) return toast('Keep at least one', 'error');
+  const ok = await openModal({ title: `Remove "${current[i]}"?`, message, confirmText: 'Remove', danger: true });
+  if (!ok) return;
+  state.settings[key] = current.filter((_, j) => j !== i);
+  save(KEYS.settings, state.settings);
+  render();
+}
+
+function moveInList(key, current, el) {
+  const list = [...current];
+  const i = Number(el.dataset.index);
+  const j = i + Number(el.dataset.dir);
+  if (j < 0 || j >= list.length) return;
+  [list[i], list[j]] = [list[j], list[i]];
+  state.settings[key] = list;
+  save(KEYS.settings, state.settings);
+  render();
+}
 
 function renameEverywhere(oldName, newName) {
   for (const day of Object.keys(state.exercises)) {
@@ -1583,6 +2123,14 @@ function renameEverywhere(oldName, newName) {
   state.outbox.forEach(rename);
   state.history.forEach(rename);
   if (state.ui.form?.exercise === oldName) state.ui.form.exercise = newName;
+  for (const key of ['steps', 'muscles']) {
+    const map = state.settings[key];
+    if (map && map[oldName] !== undefined) {
+      if (map[newName] === undefined) map[newName] = map[oldName];
+      delete map[oldName];
+    }
+  }
+  save(KEYS.settings, state.settings);
   save(KEYS.exercises, state.exercises);
   save(KEYS.targets, state.targets);
   saveDraft();
@@ -1597,7 +2145,7 @@ async function importFromFile(file) {
   } catch {
     return toast('That file is not valid JSON', 'error');
   }
-  const known = ['settings', 'exercises', 'targets', 'cardio', 'draft', 'outbox', 'history'];
+  const known = ['settings', 'exercises', 'targets', 'cardio', 'draft', 'outbox', 'history', 'measurements'];
   if (!data || typeof data !== 'object' || !known.some((k) => k in data)) return toast('Not a Bhimlekha backup', 'error');
   const ok = await openModal({
     title: 'Replace the data on this phone?',
@@ -1608,7 +2156,17 @@ async function importFromFile(file) {
     danger: true,
   });
   if (!ok) return;
-  if (data.settings && typeof data.settings === 'object') state.settings = { ...state.settings, ...data.settings };
+  if (data.settings && typeof data.settings === 'object') {
+    state.settings = {
+      ...state.settings,
+      ...data.settings,
+      progression: { ...Progress.PROGRESSION_DEFAULTS, ...(data.settings.progression || state.settings.progression) },
+    };
+  }
+  if (Array.isArray(data.measurements)) state.measurements = data.measurements;
+  if (Array.isArray(data.mOutbox)) state.mOutbox = data.mOutbox;
+  save(KEYS.measurements, state.measurements);
+  save(KEYS.mOutbox, state.mOutbox);
   if (data.exercises && typeof data.exercises === 'object') state.exercises = data.exercises;
   if (data.targets && typeof data.targets === 'object') state.targets = data.targets;
   if (data.cardio && typeof data.cardio === 'object') state.cardio = data.cardio;
@@ -1747,7 +2305,34 @@ async function submitWorkout() {
   }
 }
 
+/** Send waiting measurements (same idempotent pattern as workouts: the Sheet ignores an Entry ID it already has). */
+async function syncMeasurementOutbox() {
+  let sent = 0;
+  for (const entry of [...state.mOutbox]) {
+    try {
+      await apiPost({ action: 'measure', entry });
+    } catch {
+      break;
+    }
+    state.mOutbox = state.mOutbox.filter((m) => m.id !== entry.id);
+    const local = state.measurements.find((m) => m.id === entry.id);
+    if (local) local.synced = true;
+    save(KEYS.mOutbox, state.mOutbox);
+    save(KEYS.measurements, state.measurements);
+    sent++;
+  }
+  return sent;
+}
+
 async function syncOutbox({ manual = false } = {}) {
+  if (!state.ui.syncing && state.mOutbox.length && haveApi()) {
+    state.ui.syncing = true;
+    try {
+      if (await syncMeasurementOutbox()) render();
+    } finally {
+      state.ui.syncing = false;
+    }
+  }
   if (state.ui.syncing || !state.outbox.length) {
     if (manual && !state.outbox.length) toast('Nothing waiting to sync');
     return;
@@ -1785,22 +2370,51 @@ async function syncHistoryFromSheet() {
   state.ui.historySync = 'Fetching from the Sheet…';
   render();
   try {
-    const data = await apiGet({ action: 'history', days: 120 });
+    const data = await apiGet({ action: 'history', days: 400 });
     const incoming = Array.isArray(data.sessions) ? data.sessions : [];
     const byId = new Map(state.history.map((s) => [s.id, s]));
     for (const raw of incoming) {
       const s = normaliseSession(raw);
       if (!s) continue;
       s.synced = true;
-      byId.set(s.id, s);
+      // A workout already on this phone keeps its local copy, which can hold more detail than the Sheet rows.
+      const local = byId.get(s.id);
+      if (local) local.synced = true;
+      else byId.set(s.id, s);
     }
     state.history = [...byId.values()]
       .sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.finishedAt || '').localeCompare(a.finishedAt || ''))
       .slice(0, HISTORY_LIMIT);
     save(KEYS.history, state.history);
-    state.ui.historySync = `Loaded ${incoming.length} workout${incoming.length === 1 ? '' : 's'} from the last 120 days.`;
+    state.ui.historySync = `Loaded ${incoming.length} workout${incoming.length === 1 ? '' : 's'} from the last 400 days.`;
   } catch (err) {
     state.ui.historySync = describeError(err);
+  } finally {
+    state.ui.syncing = false;
+  }
+  render();
+}
+
+async function syncMeasurementsFromSheet() {
+  if (!haveApi()) return toast('Add the script URL and token in Settings', 'error');
+  if (state.ui.syncing) return;
+  state.ui.syncing = true;
+  render();
+  try {
+    const data = await apiGet({ action: 'measurements' });
+    const incoming = Array.isArray(data.entries) ? data.entries : [];
+    const byId = new Map(state.measurements.map((m) => [m.id, m]));
+    for (const e of incoming) {
+      if (!e || !e.id || !/^\d{4}-\d{2}-\d{2}$/.test(String(e.date))) continue;
+      const values = {};
+      for (const [k, v] of Object.entries(e.values || {})) if (v !== '' && Number.isFinite(Number(v))) values[k] = Number(v);
+      byId.set(String(e.id), { id: String(e.id), date: String(e.date), kind: e.kind === 'weighin' ? 'weighin' : 'checkin', values, notes: String(e.notes || ''), savedAt: e.savedAt || '', synced: true });
+    }
+    state.measurements = [...byId.values()];
+    save(KEYS.measurements, state.measurements);
+    toast(`Loaded ${incoming.length} measurement entr${incoming.length === 1 ? 'y' : 'ies'}`);
+  } catch (err) {
+    toast(describeError(err), 'error');
   } finally {
     state.ui.syncing = false;
   }
@@ -1827,6 +2441,8 @@ function normaliseSession(raw) {
       setNo: Number(s.setNo) || i + 1,
       reps: s.reps === null || s.reps === '' || s.reps === undefined ? null : Number(s.reps),
       toFailure: Boolean(s.toFailure),
+      rir: s.rir === null || s.rir === '' || s.rir === undefined || !Number.isFinite(Number(s.rir)) ? null : Number(s.rir),
+      warmup: Boolean(s.warmup),
       weightKg: Number(s.weightKg) || 0,
       loggedAt: s.loggedAt || raw.startedAt || '',
     })),
@@ -1835,8 +2451,22 @@ function normaliseSession(raw) {
 
 /* ------------------------------------------------------------------- boot */
 
+// The Progress / Body / Photos screens (track.js) bring their own handlers.
+Object.assign(actions, trackActions);
+Object.assign(changes, trackChanges);
+Object.assign(inputs, trackInputs);
+
 function bindEvents() {
   const app = document.getElementById('app');
+  Charts.bind(app);
+  document.getElementById('camera').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-cam]');
+    if (b) camAction(b.dataset.cam);
+  });
+  // Any tap on the photo screen restarts the vault's auto-lock countdown.
+  app.addEventListener('pointerdown', () => {
+    if (route().name === 'photos') touchVault();
+  });
   app.addEventListener('click', (e) => {
     const el = e.target.closest('[data-action]');
     if (!el || el.disabled) return;
@@ -1856,6 +2486,11 @@ function bindEvents() {
   window.addEventListener('hashchange', render);
   window.addEventListener('online', () => syncOutbox());
   document.addEventListener('visibilitychange', () => {
+    // Leaving the app (home screen, app switcher, lock) locks the vault and clears decrypted photos at once.
+    if (document.visibilityState === 'hidden' && (Vault.isUnlocked() || state.ui.vault.items.length)) {
+      lockVault();
+      if (route().name === 'photos') render();
+    }
     if (document.visibilityState === 'visible') {
       syncOutbox();
       if (route().name === 'entry') tickTimer();

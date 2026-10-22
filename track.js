@@ -1,0 +1,1042 @@
+'use strict';
+
+/* Bhimlekha: the Progress, Body and Photos screens. Loaded before app.js; these functions use app.js globals
+   (state, esc, save, render, toast, …) only when called, after app.js has run. Their actions/changes/inputs are
+   merged into app.js's handler tables there. */
+
+const RANGES = [
+  { key: '4w', label: '4 weeks', days: 28 },
+  { key: '12w', label: '12 weeks', days: 84 },
+  { key: 'all', label: 'All', days: null },
+];
+
+const METRICS = [
+  { key: 'e1rm', label: 'Strength', title: 'Estimated strength (1-rep max, average of working sets)', unit: 'kg', digits: 1, get: (s) => s.perf },
+  { key: 'volume', label: 'Volume', title: 'Volume (reps × kg)', unit: 'kg', digits: 0, get: (s) => s.volume },
+  { key: 'reps', label: 'Reps/set', title: 'Average reps per working set', unit: 'reps', digits: 1, get: (s) => s.avgReps },
+  { key: 'weight', label: 'Weight', title: 'Working weight', unit: 'kg', digits: 1, get: (s) => s.weight },
+];
+
+function inRange(date, rangeKey) {
+  const r = RANGES.find((x) => x.key === rangeKey) || RANGES[1];
+  return !r.days || date >= Progress.addDays(todayISO(), -r.days);
+}
+
+function segmented(name, options, value, change) {
+  return `<div class="segments compact" role="radiogroup" aria-label="${esc(name)}">${options
+    .map(
+      (o) => `<label class="seg ${o.key === value ? 'selected' : ''}">
+        <input type="radio" name="${esc(name)}" value="${esc(o.key)}" data-change="${change}" ${o.key === value ? 'checked' : ''} />${esc(o.label)}</label>`,
+    )
+    .join('')}</div>`;
+}
+
+/* ========================================================== Progress */
+
+const STATUS_ORDER = { increase: 0, watch: 1, ready: 2, building: 3, untracked: 4 };
+const STATUS_BADGE = {
+  increase: ['Add weight', 'ok'],
+  ready: ['Ready', 'ok'],
+  watch: ['New weight', 'pending'],
+  building: ['Building', ''],
+  untracked: ['No rep plan', ''],
+};
+
+function renderProgress() {
+  const analyses = trackedExercises()
+    .map((n) => analyse(n))
+    .filter(Boolean)
+    .sort((a, b) => STATUS_ORDER[a.status.kind] - STATUS_ORDER[b.status.kind] || a.exercise.localeCompare(b.exercise));
+  const deload = deloadAdvice(analyses);
+  const p = state.settings.progression;
+  const counts = Progress.weeklyMuscleSets(state.history, muscleOf, todayISO());
+  const assigned = Object.values(state.settings.muscles || {});
+  const muscles = [...new Set([...MUSCLE_GROUPS, ...assigned, ...Object.keys(counts)])].filter((m) => counts[m] || assigned.includes(m));
+  const maxCount = Math.max(p.muscleSetsMax, ...Object.values(counts));
+  return `
+    ${topbar('Progress', { href: 'home', label: 'Home' })}
+    ${
+      deload
+        ? `<div class="banner warn"><p class="title">Lighter week suggested</p><p class="small" style="margin:0">${esc(deload)}</p>
+            <div class="actions"><button type="button" class="btn" data-action="markDeload">I took a lighter week</button></div></div>`
+        : ''
+    }
+    <section class="card">
+      <h2 class="section-title">Exercises</h2>
+      ${
+        analyses.length
+          ? `<ul class="list">${analyses
+              .map((a) => {
+                const [label, cls] = STATUS_BADGE[a.status.kind];
+                const t = TREND[a.trend];
+                return `<li><button type="button" class="list-item" data-action="openExercise" data-name="${esc(a.exercise)}">
+                  <div>
+                    <div class="primary-text">${esc(a.exercise)}</div>
+                    <div class="secondary-text">${esc(a.last.reps.join('-'))} @ ${esc(fmtKg(a.last.weight))} kg · <span class="trend ${t.cls}">${t.icon} ${esc(t.label)}</span>${a.flags.length ? ' · ⚠️' : ''}</div>
+                  </div>
+                  <span class="badge ${cls}">${esc(label)}</span>
+                </button></li>`;
+              })
+              .join('')}</ul>`
+          : '<p class="empty">Submit a workout to start tracking.</p>'
+      }
+    </section>
+    <section class="card stack">
+      <div>
+        <h2 class="section-title" style="margin:0">Hard sets per muscle, last 7 days</h2>
+        <p class="hint">Useful range ${p.muscleSetsMin}–${p.muscleSetsMax} working sets a week (Settings → Progression).</p>
+      </div>
+      ${
+        muscles.length
+          ? `<div class="bars">${muscles
+              .map((m) => {
+                const n = counts[m] || 0;
+                const state_ = n < p.muscleSetsMin ? 'low' : n > p.muscleSetsMax ? 'high' : 'ok';
+                return `<div class="bar-row">
+                  <span class="bar-label">${esc(m)}</span>
+                  <span class="bar-track"><span class="bar-fill ${state_}" style="width:${Math.round((n / maxCount) * 100)}%"></span>
+                    <span class="bar-band" style="left:${(p.muscleSetsMin / maxCount) * 100}%;width:${((p.muscleSetsMax - p.muscleSetsMin) / maxCount) * 100}%"></span></span>
+                  <span class="bar-value">${n}${state_ === 'low' ? ' · low' : state_ === 'high' ? ' · high' : ''}</span>
+                </div>`;
+              })
+              .join('')}</div>`
+          : '<p class="empty">Set muscle groups per exercise in Settings → Exercises.</p>'
+      }
+    </section>`;
+}
+
+function renderExerciseProgress(name) {
+  const a = analyse(name);
+  if (!a) return `${topbar('', { href: 'progress', label: 'Progress' })}<p class="empty">No working sets logged for ${esc(name)} yet.</p>`;
+  const ui = state.ui.progress;
+  const metric = METRICS.find((m) => m.key === ui.metric) || METRICS[0];
+  const snaps = a.snaps.filter((s) => inRange(s.date, ui.range));
+  const p = state.settings.progression;
+  const w = Progress.analyseWindow(snaps, p);
+  const status = a.status.kind === 'untracked' ? '' : Progress.statusLine(a.status, todayISO());
+  return `
+    ${topbar('', { href: 'progress', label: 'Progress' })}
+    <section class="card stack">
+      <div>
+        <h1 class="card-title">${esc(name)}</h1>
+        <p class="subtitle">${a.snaps.length} session${a.snaps.length === 1 ? '' : 's'} logged${planText('', name) ? ` · Plan ${esc(planText(a.last.dayType, name))}` : ''}</p>
+      </div>
+      ${status ? `<p class="status-line ${esc(a.status.kind)}" style="margin:0">${esc(status)}</p>` : ''}
+      ${segmented('metric', METRICS, metric.key, 'progressMetric')}
+      ${segmented('range', RANGES, ui.range, 'progressRange')}
+      ${Charts.line(
+        snaps.map((s) => ({ date: s.date, y: metric.get(s), label: `${s.reps.join('-')} @ ${fmtKg(s.weight)} kg` })),
+        { title: metric.title, unit: metric.unit, digits: metric.digits },
+      )}
+      ${
+        w
+          ? `<div class="analysis">
+              <h2 class="section-title">What the chart says</h2>
+              ${w.quant.length ? `<ul class="quant">${w.quant.map((q) => `<li>${esc(q)}</li>`).join('')}</ul>` : ''}
+              <p>${esc(w.words)}</p>
+            </div>`
+          : '<p class="empty">No sessions in this range.</p>'
+      }
+      ${a.flags.map((f) => `<p class="flag">⚠️ ${esc(f.kind === 'stall' ? `Stalled for ${f.sessions} sessions at ${fmtKg(a.last.weight)} kg.` : `Est. strength ${Progress.signed(f.pct)} over the last ${f.sessions} sessions.`)}</p>`).join('')}
+    </section>
+    <section class="card">
+      <h2 class="section-title">Sessions</h2>
+      <table class="summary">
+        <thead><tr><th>Date</th><th>Sets</th><th class="num">Strength</th><th class="num">Volume</th></tr></thead>
+        <tbody>${[...snaps]
+          .reverse()
+          .map(
+            (s) => `<tr><td>${esc(formatDate(s.date, false))}</td><td>${esc(s.reps.join('-'))} @ ${esc(fmtKg(s.weight))}${s.rirs.some((r) => r !== null) ? `<br /><span class="small muted">RIR ${esc(s.rirs.map((r) => (r === null ? '?' : rirLabel(r))).join('-'))}</span>` : ''}</td>
+              <td class="num">${esc(fmtKg(Math.round(s.perf * 10) / 10))}</td><td class="num">${esc(fmtVolume(s.volume))}</td></tr>`,
+          )
+          .join('')}</tbody>
+      </table>
+    </section>`;
+}
+
+/* ============================================================== Body */
+
+function bodyDraft() {
+  const b = state.ui.body;
+  if (!b.draft) b.draft = { date: todayISO(), values: {}, notes: '' };
+  return b.draft;
+}
+
+function lastValue(field) {
+  const list = [...state.measurements].filter((m) => Number.isFinite(m.values?.[field])).sort((a, b) => b.date.localeCompare(a.date));
+  return list[0] ? list[0].values[field] : null;
+}
+
+/** Points for a field: weekly averages when there are daily weigh-ins for the weight field, else each entry. */
+function bodySeries(field) {
+  const list = state.measurements.filter((m) => Number.isFinite(m.values?.[field]) && inRange(m.date, state.ui.body.range));
+  if (field === weightField() && list.some((m) => m.kind === 'weighin')) {
+    return {
+      label: `${field}, weekly average`,
+      points: Progress.weeklyAverages(list, field).map((w) => ({ date: w.week, y: w.avg, label: `${w.n} weigh-in${w.n === 1 ? '' : 's'}` })),
+    };
+  }
+  return { label: field, points: list.sort((a, b) => a.date.localeCompare(b.date)).map((m) => ({ date: m.date, y: m.values[field] })) };
+}
+
+function renderBody() {
+  const d = bodyDraft();
+  const fields = measureFields();
+  const wf = weightField();
+  const withData = fields.filter((f) => state.measurements.some((m) => Number.isFinite(m.values?.[f])));
+  const ui = state.ui.body;
+  const field = withData.includes(ui.field) ? ui.field : withData[0];
+  const series = field ? bodySeries(field) : null;
+  const windowEntries = state.measurements.filter((m) => inRange(m.date, ui.range));
+  const body = Progress.analyseBody(windowEntries, fields);
+  const check = checkinState();
+  const v = state.vaultInfo;
+  const entries = [...state.measurements].sort((a, b) => b.date.localeCompare(a.date) || (b.savedAt || '').localeCompare(a.savedAt || ''));
+  const unit = (f) => (f.match(/\(([^)]+)\)/) || [])[1] || '';
+  return `
+    ${topbar('Body', { href: 'home', label: 'Home' })}
+    <section class="card stack">
+      <div>
+        <h2 class="section-title" style="margin:0">Weekly check-in</h2>
+        <p class="hint">${esc(WEEKDAYS[Number(state.settings.checkinDay) || 0])}s, same time each week: morning, before food, after the toilet, relaxed (not flexed).${check.last ? ` Last: ${esc(formatDate(check.last))}.` : ''}</p>
+      </div>
+      <div>
+        <label for="m-date">Date</label>
+        <input id="m-date" type="date" class="input" value="${esc(d.date)}" data-change="mDate" />
+      </div>
+      <div class="two">
+        ${fields
+          .map((f, i) => {
+            const last = lastValue(f);
+            return `<div>
+              <label for="m-f${i}">${esc(f)}</label>
+              <input id="m-f${i}" class="input" type="number" inputmode="decimal" step="0.1" min="0" data-field="${esc(f)}" data-input="mValue"
+                value="${esc(d.values[f] ?? '')}" placeholder="${last !== null ? esc('last ' + fmtKg(last)) : ''}" />
+            </div>`;
+          })
+          .join('')}
+      </div>
+      <div>
+        <label for="m-notes">Notes (optional)</label>
+        <textarea id="m-notes" class="textarea" data-input="mNotes" placeholder="Sleep, food, how you feel">${esc(d.notes)}</textarea>
+      </div>
+      <button type="button" class="btn primary" data-action="saveCheckin">Save check-in</button>
+      <a class="btn secondary" href="#photos">🔒 Progress photos${v.lastPhotoAt ? ` · last ${esc(formatDate(v.lastPhotoAt.slice(0, 10)))}` : ''}</a>
+    </section>
+
+    ${
+      wf
+        ? `<section class="card stack">
+      <div>
+        <h2 class="section-title" style="margin:0">Daily weigh-in</h2>
+        <p class="hint">Optional but more accurate: weigh every morning and the chart uses the weekly average, which smooths out water and food swings.</p>
+      </div>
+      <div class="input-row">
+        <label for="weigh-in" class="sr-only">Today's weight</label>
+        <input id="weigh-in" class="input" type="number" inputmode="decimal" step="0.1" min="0" placeholder="Today's weight" value="${esc(ui.weighIn)}" data-input="weighIn" />
+        <button type="button" class="btn" data-action="saveWeighIn">Save</button>
+      </div>
+    </section>`
+        : ''
+    }
+
+    <section class="card stack">
+      <h2 class="section-title" style="margin:0">Trends</h2>
+      ${
+        withData.length
+          ? `${segmented('bodyField', withData.map((f) => ({ key: f, label: f.replace(/\s*\([^)]*\)/, '') })), field, 'bodyField')}
+             ${segmented('bodyRange', RANGES, ui.range, 'bodyRange')}
+             ${Charts.line(series.points, { title: series.label, unit: unit(field), digits: 1 })}
+             <div class="analysis">
+               <h2 class="section-title">What changed</h2>
+               ${
+                 Object.keys(body.fields).length
+                   ? `<ul class="quant">${Object.entries(body.fields)
+                       .map(([f, c]) => `<li>${esc(f.replace(/\s*\([^)]*\)/, ''))}: ${esc(fmtKg(Math.round(c.from * 10) / 10))} → ${esc(fmtKg(Math.round(c.to * 10) / 10))} (${esc(Progress.signed(c.delta, 1, ' ' + unit(f)))}) in ${c.days} days</li>`)
+                       .join('')}</ul>`
+                   : ''
+               }
+               <p>${esc(body.words || (Object.keys(body.fields).length ? 'Log weight and waist to get a reading of fat versus muscle.' : 'Two or more entries in this range are needed to show a change.'))}</p>
+             </div>`
+          : '<p class="empty">Save your first check-in to see trends.</p>'
+      }
+    </section>
+
+    <section class="card">
+      <h2 class="section-title">Entries</h2>
+      ${
+        entries.length
+          ? `<ul class="list">${entries
+              .map(
+                (m) => `<li><div class="exercise-row">
+                  <div class="name"><strong>${esc(formatDate(m.date))}</strong> · ${m.kind === 'weighin' ? 'weigh-in' : 'check-in'}
+                    <span class="small muted">${esc(
+                      Object.entries(m.values || {})
+                        .filter(([, x]) => Number.isFinite(x))
+                        .map(([k, x]) => `${k.replace(/\s*\([^)]*\)/, '')} ${fmtKg(x)}`)
+                        .join(' · '),
+                    )}</span></div>
+                  <span class="badge ${m.synced ? 'ok' : 'pending'}">${m.synced ? '✅' : '⏳'}</span>
+                  <button type="button" class="btn icon ghost" data-action="deleteMeasurement" data-id="${esc(m.id)}" aria-label="Delete entry of ${esc(formatDate(m.date))}">🗑</button>
+                </div></li>`,
+              )
+              .join('')}</ul>`
+          : '<p class="empty">No entries yet.</p>'
+      }
+      <button type="button" class="btn secondary" style="margin-top:12px" data-action="syncMeasurements" ${state.ui.syncing ? 'disabled' : ''}>Sync measurements from Sheet</button>
+    </section>`;
+}
+
+function newMeasurement(kind, date, values, notes = '') {
+  return { id: uuid(), date, kind, values, notes, savedAt: nowISO(), synced: false };
+}
+
+async function queueMeasurement(entry) {
+  state.measurements = [...state.measurements.filter((m) => m.id !== entry.id), entry];
+  state.mOutbox = [...state.mOutbox.filter((m) => m.id !== entry.id), entry];
+  save(KEYS.measurements, state.measurements);
+  save(KEYS.mOutbox, state.mOutbox);
+  render();
+  syncOutbox();
+}
+
+/* ============================================================ Photos */
+
+let idleLock = null;
+let preparingBackup = false;
+
+function lockVault() {
+  const v = state.ui.vault;
+  stopCamera();
+  if (Vault.isUnlocked()) Vault.lock();
+  Vault.revokeAll();
+  v.items = [];
+  v.compare = null;
+  v.viewing = null;
+  v.pass1 = v.pass2 = v.pass3 = '';
+  if (v.status === 'unlocked') v.status = 'locked';
+  clearTimeout(idleLock);
+}
+
+function touchVault() {
+  clearTimeout(idleLock);
+  if (!Vault.isUnlocked()) return;
+  const mins = Math.max(1, Number(state.settings.autoLockMinutes) || 3);
+  idleLock = setTimeout(() => {
+    lockVault();
+    if (route().name === 'photos') render();
+  }, mins * 60000);
+}
+
+/** Async work after the photos screen renders: find out if a vault exists, prepare the backup file. */
+async function afterPhotosRender() {
+  const v = state.ui.vault;
+  loadVisibleImages().catch(() => {});
+  if (v.status === 'unknown') {
+    try {
+      v.status = (await Vault.isSetUp()) ? (Vault.isUnlocked() ? 'unlocked' : 'locked') : 'none';
+    } catch {
+      v.status = 'error';
+    }
+    return render();
+  }
+  if ((v.status === 'locked' || v.status === 'unlocked') && !v.backup && !preparingBackup) {
+    preparingBackup = true;
+    try {
+      v.backup = await Vault.exportBackup();
+    } catch {
+      v.backup = null;
+    } finally {
+      preparingBackup = false;
+    }
+    if (route().name === 'photos') render();
+  }
+}
+
+async function refreshPhotos() {
+  const v = state.ui.vault;
+  Vault.revokeAll();
+  v.items = await Vault.list();
+  v.compare = null;
+  v.backup = null; // the file must be rebuilt to include changes
+}
+
+function renderPhotos() {
+  const v = state.ui.vault;
+  const head = topbar('Photos', { href: 'body', label: 'Body' });
+  if (v.status === 'unknown') return `${head}<p class="empty">Opening the vault…</p>`;
+  if (v.status === 'error') return `${head}<p class="empty">This browser blocked private storage, so the photo vault cannot open here.</p>`;
+  if (v.status === 'none') return `${head}${renderVaultSetup()}`;
+  if (v.status === 'locked') return `${head}${renderVaultLocked()}${renderBackupCard()}`;
+  return `${head}${renderVaultOpen()}${renderBackupCard()}`;
+}
+
+const PRIVACY_NOTE = `Photos are encrypted on this phone with AES-256 using a key made from your passcode. They are never uploaded,
+  never go to GitHub or Google, and do not appear in the Photos app. Without the passcode nobody (not even you) can open them.`;
+
+function renderVaultSetup() {
+  const v = state.ui.vault;
+  return `
+    <section class="card stack">
+      <h2 class="section-title" style="margin:0">Create your photo vault</h2>
+      <p class="small" style="margin:0">${esc(PRIVACY_NOTE)}</p>
+      <div>
+        <label for="vault-p1">Passcode (at least 6 characters)</label>
+        <input id="vault-p1" class="input" type="password" autocomplete="new-password" value="${esc(v.pass1 || '')}" data-input="vaultPass1" />
+      </div>
+      <div>
+        <label for="vault-p2">Repeat passcode</label>
+        <input id="vault-p2" class="input" type="password" autocomplete="new-password" value="${esc(v.pass2 || '')}" data-input="vaultPass2" />
+      </div>
+      <p class="flag">⚠️ A forgotten passcode cannot be reset. Save it in the iPhone Passwords app.</p>
+      <button type="button" class="btn primary" data-action="vaultCreate" ${v.busy ? 'disabled' : ''}>${v.busy ? esc(v.busy) : 'Create vault'}</button>
+    </section>
+    <section class="card stack">
+      <h2 class="section-title" style="margin:0">Have a backup?</h2>
+      <p class="hint" style="margin:0">Restore a .bhimvault file from the Files app. You will need the passcode it was made with.</p>
+      <button type="button" class="btn secondary" data-action="vaultRestorePick">Restore from backup file…</button>
+      <input id="vault-restore" type="file" class="sr-only" data-change="vaultRestoreFile" />
+    </section>`;
+}
+
+function renderVaultLocked() {
+  const v = state.ui.vault;
+  return `
+    <section class="card stack">
+      <h2 class="section-title" style="margin:0">🔒 Vault locked</h2>
+      <div>
+        <label for="vault-pass">Passcode</label>
+        <input id="vault-pass" class="input" type="password" autocomplete="current-password" value="${esc(v.pass1 || '')}" data-input="vaultPass1" />
+      </div>
+      <button type="button" class="btn primary" data-action="vaultUnlock" ${v.busy ? 'disabled' : ''}>${v.busy ? esc(v.busy) : 'Unlock'}</button>
+      <p class="hint" style="margin:0">Locks again when you leave this screen, close the app, or after ${esc(state.settings.autoLockMinutes)} minutes without a tap.</p>
+      <button type="button" class="btn ghost secondary danger" data-action="vaultErase">Forgot passcode? Erase the vault…</button>
+    </section>`;
+}
+
+function photosByDate(items) {
+  const map = new Map();
+  for (const it of items) {
+    if (!map.has(it.date)) map.set(it.date, []);
+    map.get(it.date).push(it);
+  }
+  for (const list of map.values()) list.sort((a, b) => poses().indexOf(a.pose) - poses().indexOf(b.pose));
+  return map;
+}
+
+function weeksLater(a, b) {
+  const days = Progress.daysBetween(a, b);
+  if (days < 0) return `${Math.abs(days)} days earlier`;
+  if (days < 7) return `${days} day${days === 1 ? '' : 's'} later`;
+  const w = Math.round(days / 7);
+  return `${w} week${w === 1 ? '' : 's'} later`;
+}
+
+function renderVaultOpen() {
+  const v = state.ui.vault;
+  const pose = poses().includes(v.pose) ? v.pose : poses()[0];
+  const dates = [...new Set(v.items.filter((i) => i.pose === pose).map((i) => i.date))].sort();
+  const cmp = v.compare || { a: dates[0], b: dates[dates.length - 1] };
+  const pick = (k, val) =>
+    `<select class="select" data-change="compareDate" data-k="${k}" aria-label="${k === 'a' ? 'Before' : 'After'} date">${dates
+      .map((d) => `<option value="${esc(d)}" ${d === val ? 'selected' : ''}>${esc(formatDate(d, d.slice(0, 4) !== todayISO().slice(0, 4)))}</option>`)
+      .join('')}</select>`;
+  const groups = photosByDate(v.items);
+  return `
+    <section class="card stack">
+      <div class="row between">
+        <h2 class="section-title" style="margin:0">Add photos</h2>
+        <button type="button" class="btn small" data-action="vaultLock">🔒 Lock</button>
+      </div>
+      <div>
+        <label for="photo-date">Date</label>
+        <input id="photo-date" type="date" class="input" value="${esc(v.date || todayISO())}" data-change="photoDate" />
+      </div>
+      <button type="button" class="btn primary" data-action="openCamera">📷 ${Number(state.settings.cameraTimer) ? `Camera with ${esc(state.settings.cameraTimer)} s timer` : 'Open camera'}</button>
+      <p class="hint" style="margin:0">Takes ${esc(poses().join(', '))} in order, with last week's photo faintly overlaid so you can match the pose and distance.</p>
+      <button type="button" class="btn secondary" data-action="pickPhoto">Use the iPhone camera instead…</button>
+      <input id="photo-file" type="file" accept="image/*" capture="user" class="sr-only" data-change="photoFile" />
+      ${segmented('pose', poses().map((p) => ({ key: p, label: p })), pose, 'photoPose')}
+      ${v.busy ? `<p class="status" role="status">${esc(v.busy)}</p>` : ''}
+    </section>
+
+    <section class="card stack">
+      <h2 class="section-title" style="margin:0">Compare · ${esc(pose)}</h2>
+      ${
+        dates.length >= 2
+          ? `<div class="two">${pick('a', cmp.a)}${pick('b', cmp.b)}</div>
+             <div class="compare" id="compare" data-a="${esc(v.items.find((i) => i.pose === pose && i.date === cmp.a)?.id || '')}" data-b="${esc(v.items.find((i) => i.pose === pose && i.date === cmp.b)?.id || '')}">
+               <figure><img id="cmp-a" alt="${esc(pose)} on ${esc(formatDate(cmp.a))}" /><figcaption>${esc(formatDate(cmp.a))}</figcaption></figure>
+               <figure><img id="cmp-b" alt="${esc(pose)} on ${esc(formatDate(cmp.b))}" /><figcaption>${esc(formatDate(cmp.b))}${cmp.a && cmp.b ? ` · ${weeksLater(cmp.a, cmp.b)}` : ''}</figcaption></figure>
+             </div>`
+          : `<p class="empty">Two dates with a ${esc(pose)} photo are needed to compare.</p>`
+      }
+    </section>
+
+    <section class="card">
+      <h2 class="section-title">All photos (${v.items.length})</h2>
+      ${
+        groups.size
+          ? [...groups.entries()]
+              .map(
+                ([date, list]) => `<div class="group"><h3>${esc(formatDate(date))}</h3><div class="thumbs">${list
+                  .map(
+                    (it) => `<button type="button" class="thumb" data-action="viewPhoto" data-id="${esc(it.id)}" aria-label="${esc(it.pose)}, ${esc(formatDate(date))}">
+                      <img src="${it.thumbUrl}" alt="" /><span>${esc(it.pose)}</span></button>`,
+                  )
+                  .join('')}</div></div>`,
+              )
+              .join('')
+          : '<p class="empty">No photos yet.</p>'
+      }
+    </section>
+
+    <section class="card stack">
+      <h2 class="section-title" style="margin:0">Passcode</h2>
+      <input class="input" type="password" placeholder="Current passcode" autocomplete="current-password" aria-label="Current passcode" value="${esc(v.pass1 || '')}" data-input="vaultPass1" />
+      <input class="input" type="password" placeholder="New passcode" autocomplete="new-password" aria-label="New passcode" value="${esc(v.pass2 || '')}" data-input="vaultPass2" />
+      <input class="input" type="password" placeholder="Repeat new passcode" autocomplete="new-password" aria-label="Repeat new passcode" value="${esc(v.pass3 || '')}" data-input="vaultPass3" />
+      <button type="button" class="btn secondary" data-action="vaultChangePass">Change passcode</button>
+      <p class="hint" style="margin:0">Old backup files keep the old passcode. Make a new backup after changing it.</p>
+    </section>
+    ${v.viewing ? '<div class="viewer" id="viewer"><img id="viewer-img" alt="" /><div class="viewer-bar"><button type="button" class="btn" data-action="closePhoto">Close</button><button type="button" class="btn danger" data-action="deletePhoto">Delete</button></div></div>' : ''}`;
+}
+
+function renderBackupCard() {
+  const v = state.ui.vault;
+  const info = state.vaultInfo;
+  const behind = info.lastPhotoAt && (!info.lastBackupAt || info.lastBackupAt < info.lastPhotoAt);
+  const size = !v.backup ? '' : v.backup.file.size < 1048576 ? `${Math.max(1, Math.round(v.backup.file.size / 1024))} KB` : `${(v.backup.file.size / 1048576).toFixed(1)} MB`;
+  return `
+    <section class="card stack">
+      <h2 class="section-title" style="margin:0">Backup to iCloud Drive</h2>
+      <p class="small" style="margin:0">${
+        info.lastBackupAt ? `Last backup ${esc(formatDate(info.lastBackupAt.slice(0, 10)))}.` : 'No backup yet.'
+      } ${behind ? '<strong>New photos since then.</strong>' : ''}</p>
+      <p class="hint" style="margin:0">Tap below, then <strong>Save to Files</strong> → iCloud Drive → a "Bhimlekha" folder (iOS remembers the folder next time). The file is encrypted with your passcode.</p>
+      <button type="button" class="btn ${behind ? 'primary' : 'secondary'}" data-action="saveBackup" ${v.backup && v.backup.photos ? '' : 'disabled'}>${
+        v.backup ? (v.backup.photos ? `Save backup to Files (${v.backup.photos} photo${v.backup.photos === 1 ? '' : 's'}, ${size})` : 'Nothing to back up yet') : 'Preparing backup…'
+      }</button>
+      ${
+        v.status === 'unlocked'
+          ? `<button type="button" class="btn secondary" data-action="vaultRestorePick">Restore photos from a backup…</button>
+             <input id="vault-restore" type="file" class="sr-only" data-change="vaultRestoreFile" />`
+          : ''
+      }
+    </section>`;
+}
+
+/** Fill the comparison and viewer images (decrypted on demand, revoked on lock). */
+async function loadVisibleImages() {
+  const v = state.ui.vault;
+  if (!Vault.isUnlocked()) return;
+  const cmp = document.getElementById('compare');
+  if (cmp) {
+    for (const [k, el] of [['a', 'cmp-a'], ['b', 'cmp-b']]) {
+      const id = cmp.dataset[k];
+      const img = document.getElementById(el);
+      if (id && img) img.src = (await Vault.imageUrl(id)) || '';
+    }
+  }
+  if (v.viewing) {
+    const img = document.getElementById('viewer-img');
+    if (img) img.src = (await Vault.imageUrl(v.viewing)) || '';
+  }
+}
+
+function markPhotoAdded() {
+  state.vaultInfo = { ...state.vaultInfo, lastPhotoAt: nowISO() };
+  save(KEYS.vaultInfo, state.vaultInfo);
+}
+
+/* ------------------------------------------------------------ camera */
+
+const cam = { stream: null, facing: 'user', ghost: true, timer: null, poseIndex: 0, shot: null, countdown: null };
+
+function stopCamera() {
+  clearInterval(cam.countdown);
+  cam.countdown = null;
+  if (cam.stream) for (const t of cam.stream.getTracks()) t.stop();
+  cam.stream = null;
+  cam.shot = null;
+  const el = document.getElementById('camera');
+  if (el) {
+    el.hidden = true;
+    el.innerHTML = '';
+  }
+}
+
+async function openCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    toast('In-app camera not available here. Use the iPhone camera button.', 'error');
+    return;
+  }
+  cam.poseIndex = Math.max(0, poses().indexOf(state.ui.vault.pose));
+  cam.timer = Number(state.settings.cameraTimer) || 0;
+  await startStream();
+}
+
+async function startStream() {
+  if (cam.stream) for (const t of cam.stream.getTracks()) t.stop();
+  try {
+    cam.stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: cam.facing, width: { ideal: 1920 }, height: { ideal: 1920 } },
+      audio: false,
+    });
+  } catch {
+    cam.stream = null;
+    toast('Camera permission was refused. Allow it in Settings → Safari → Camera, or use the iPhone camera button.', 'error');
+    return;
+  }
+  await renderCamera();
+}
+
+async function renderCamera() {
+  const el = document.getElementById('camera');
+  const pose = poses()[cam.poseIndex];
+  const date = state.ui.vault.date || todayISO();
+  const prior = state.ui.vault.items.filter((i) => i.pose === pose && i.date < date)[0];
+  el.innerHTML = `
+    <div class="cam-stage ${cam.facing === 'user' ? 'mirror' : ''}">
+      <video id="cam-video" autoplay playsinline muted></video>
+      <img id="cam-ghost" class="ghost" alt="" ${cam.ghost && prior ? '' : 'hidden'} />
+      ${cam.shot ? `<img id="cam-shot" class="shot" alt="Captured ${esc(pose)} photo" />` : ''}
+      <div class="cam-count" id="cam-count" hidden></div>
+    </div>
+    <div class="cam-top"><span class="badge">${esc(pose)} · ${cam.poseIndex + 1}/${poses().length}</span></div>
+    <div class="cam-bar">
+      ${
+        cam.shot
+          ? `<button type="button" class="btn" data-cam="retake">Retake</button>
+             <button type="button" class="btn primary" data-cam="keep">Keep ${esc(pose)}</button>`
+          : `<button type="button" class="btn" data-cam="close">Done</button>
+             <button type="button" class="btn" data-cam="timer">⏱ ${cam.timer ? cam.timer + ' s' : 'Off'}</button>
+             <button type="button" class="btn shutter" data-cam="shoot" aria-label="Take ${esc(pose)} photo"></button>
+             <button type="button" class="btn" data-cam="ghost" aria-pressed="${cam.ghost}">Overlay</button>
+             <button type="button" class="btn" data-cam="flip">Flip</button>`
+      }
+    </div>`;
+  el.hidden = false;
+  const video = document.getElementById('cam-video');
+  video.srcObject = cam.stream;
+  if (cam.shot) document.getElementById('cam-shot').src = cam.shot.url;
+  if (cam.ghost && prior) {
+    const g = document.getElementById('cam-ghost');
+    g.src = (await Vault.imageUrl(prior.id)) || '';
+  }
+}
+
+function captureFrame() {
+  const video = document.getElementById('cam-video');
+  if (!video || !video.videoWidth) return null;
+  const c = document.createElement('canvas');
+  c.width = video.videoWidth;
+  c.height = video.videoHeight;
+  const ctx = c.getContext('2d');
+  if (cam.facing === 'user') {
+    // Save the front camera the way it is previewed (mirrored), so the overlay and comparisons line up.
+    ctx.translate(c.width, 0);
+    ctx.scale(-1, 1);
+  }
+  ctx.drawImage(video, 0, 0);
+  return c;
+}
+
+async function camAction(what) {
+  touchVault();
+  if (what === 'close') {
+    stopCamera();
+    await refreshPhotos();
+    return render();
+  }
+  if (what === 'flip') {
+    cam.facing = cam.facing === 'user' ? 'environment' : 'user';
+    return startStream();
+  }
+  if (what === 'ghost') {
+    cam.ghost = !cam.ghost;
+    return renderCamera();
+  }
+  if (what === 'timer') {
+    const steps = [0, 3, 5, 10, 15];
+    cam.timer = steps[(steps.indexOf(cam.timer) + 1) % steps.length];
+    state.settings.cameraTimer = cam.timer;
+    save(KEYS.settings, state.settings);
+    return renderCamera();
+  }
+  if (what === 'shoot') {
+    if (cam.countdown) return;
+    const fire = () => {
+      const canvas = captureFrame();
+      if (!canvas) return toast('Camera not ready yet', 'error');
+      canvas.toBlob((blob) => {
+        cam.shot = { canvas, url: URL.createObjectURL(blob) };
+        renderCamera();
+      }, 'image/jpeg', 0.9);
+    };
+    if (!cam.timer) return fire();
+    let left = cam.timer;
+    const box = document.getElementById('cam-count');
+    box.hidden = false;
+    box.textContent = left;
+    cam.countdown = setInterval(() => {
+      left -= 1;
+      if (left <= 0) {
+        clearInterval(cam.countdown);
+        cam.countdown = null;
+        box.hidden = true;
+        fire();
+      } else box.textContent = left;
+    }, 1000);
+    return;
+  }
+  if (what === 'retake') {
+    URL.revokeObjectURL(cam.shot.url);
+    cam.shot = null;
+    return renderCamera();
+  }
+  if (what === 'keep') {
+    const pose = poses()[cam.poseIndex];
+    const shot = cam.shot;
+    cam.shot = null;
+    URL.revokeObjectURL(shot.url);
+    try {
+      await Vault.addPhoto(shot.canvas, { date: state.ui.vault.date || todayISO(), pose });
+      markPhotoAdded();
+      toast(`${pose} saved (encrypted)`);
+    } catch (err) {
+      toast(`Could not save: ${err.message || err}`, 'error');
+    }
+    await refreshPhotos();
+    if (cam.poseIndex < poses().length - 1) {
+      cam.poseIndex += 1;
+      return renderCamera();
+    }
+    stopCamera();
+    state.ui.vault.pose = poses()[0];
+    render();
+    toast('All poses saved. Now save the backup to Files.');
+  }
+}
+
+/* ------------------------------------------------------------ handlers */
+
+const trackActions = {
+  openExercise(el) {
+    go('progress', el.dataset.name);
+  },
+
+  markDeload() {
+    state.settings.lastDeload = todayISO();
+    save(KEYS.settings, state.settings);
+    toast('Noted. The 8-week count starts again today.');
+    render();
+  },
+
+  saveCheckin() {
+    const d = bodyDraft();
+    const values = {};
+    for (const [k, v] of Object.entries(d.values)) if (v !== '' && Number.isFinite(Number(v))) values[k] = Number(v);
+    if (!Object.keys(values).length) return toast('Enter at least one measurement', 'error');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d.date)) return toast('Pick a date', 'error');
+    queueMeasurement(newMeasurement('checkin', d.date, values, d.notes.trim()));
+    state.ui.body.draft = null;
+    toast('Check-in saved');
+    render();
+  },
+
+  saveWeighIn() {
+    const wf = weightField();
+    const v = Number(state.ui.body.weighIn);
+    if (!wf || !Number.isFinite(v) || v <= 0) return toast('Enter your weight', 'error');
+    queueMeasurement(newMeasurement('weighin', todayISO(), { [wf]: v }));
+    state.ui.body.weighIn = '';
+    toast('Weight saved');
+    render();
+  },
+
+  async deleteMeasurement(el) {
+    const m = state.measurements.find((x) => x.id === el.dataset.id);
+    if (!m) return;
+    const ok = await openModal({
+      title: 'Delete this entry?',
+      message: m.synced ? 'It is removed from this phone. The row in the Sheet stays; delete it there too if you want it gone.' : 'It has not reached the Sheet yet and will not be sent.',
+      confirmText: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    state.measurements = state.measurements.filter((x) => x.id !== m.id);
+    state.mOutbox = state.mOutbox.filter((x) => x.id !== m.id);
+    save(KEYS.measurements, state.measurements);
+    save(KEYS.mOutbox, state.mOutbox);
+    render();
+  },
+
+  syncMeasurements() {
+    syncMeasurementsFromSheet();
+  },
+
+  async vaultCreate() {
+    const v = state.ui.vault;
+    if ((v.pass1 || '').length < 6) return toast('Use at least 6 characters', 'error');
+    if (v.pass1 !== v.pass2) return toast('The two passcodes differ', 'error');
+    v.busy = 'Creating…';
+    render();
+    try {
+      await Vault.create(v.pass1);
+      v.status = 'unlocked';
+      v.items = [];
+      v.pass1 = v.pass2 = '';
+      touchVault();
+      toast('Vault created');
+    } catch (err) {
+      toast(String(err.message || err), 'error');
+    } finally {
+      v.busy = '';
+    }
+    render();
+  },
+
+  async vaultUnlock() {
+    const v = state.ui.vault;
+    if (!v.pass1) return toast('Enter the passcode', 'error');
+    v.busy = 'Unlocking…';
+    render();
+    let ok = false;
+    try {
+      ok = await Vault.unlock(v.pass1);
+    } catch (err) {
+      toast(String(err.message || err), 'error');
+    }
+    v.pass1 = '';
+    v.busy = '';
+    if (!ok) {
+      toast('Wrong passcode', 'error');
+      return render();
+    }
+    v.status = 'unlocked';
+    await refreshPhotos();
+    touchVault();
+    render();
+  },
+
+  vaultLock() {
+    lockVault();
+    render();
+  },
+
+  async vaultErase() {
+    const ok = await openModal({
+      title: 'Erase the photo vault?',
+      message: 'Every photo on this phone is deleted for good. Backup files in iCloud Drive stay, but still need their passcode.',
+      confirmText: 'Erase',
+      danger: true,
+    });
+    if (!ok) return;
+    await Vault.destroy();
+    state.ui.vault = { ...state.ui.vault, status: 'none', items: [], backup: null };
+    state.vaultInfo = { lastPhotoAt: null, lastBackupAt: null };
+    save(KEYS.vaultInfo, state.vaultInfo);
+    render();
+  },
+
+  async vaultChangePass() {
+    const v = state.ui.vault;
+    if (!v.pass1) return toast('Enter the current passcode', 'error');
+    if ((v.pass2 || '').length < 6) return toast('New passcode: at least 6 characters', 'error');
+    if (v.pass2 !== v.pass3) return toast('The new passcodes differ', 'error');
+    v.busy = 'Re-encrypting photos…';
+    render();
+    const ok = await Vault.changePasscode(v.pass1, v.pass2).catch(() => false);
+    v.busy = '';
+    v.pass1 = v.pass2 = v.pass3 = '';
+    if (!ok) {
+      toast('Current passcode is wrong', 'error');
+      return render();
+    }
+    await refreshPhotos();
+    markPhotoAdded(); // the old backup no longer matches: ask for a new one
+    toast('Passcode changed. Save a new backup.');
+    render();
+  },
+
+  openCamera() {
+    touchVault();
+    openCamera();
+  },
+
+  pickPhoto() {
+    document.getElementById('photo-file')?.click();
+  },
+
+  async viewPhoto(el) {
+    state.ui.vault.viewing = el.dataset.id;
+    render();
+  },
+
+  closePhoto() {
+    state.ui.vault.viewing = null;
+    render();
+  },
+
+  async deletePhoto() {
+    const id = state.ui.vault.viewing;
+    const ok = await openModal({ title: 'Delete this photo?', message: 'It is removed from the vault. Older backup files still contain it.', confirmText: 'Delete', danger: true });
+    if (!ok) return;
+    await Vault.remove(id);
+    state.ui.vault.viewing = null;
+    markPhotoAdded();
+    await refreshPhotos();
+    render();
+  },
+
+  saveBackup() {
+    const b = state.ui.vault.backup;
+    if (!b) return;
+    const done = () => {
+      state.vaultInfo = { ...state.vaultInfo, lastBackupAt: nowISO() };
+      save(KEYS.vaultInfo, state.vaultInfo);
+      render();
+    };
+    // The share sheet must open straight from the tap, so the file is prepared beforehand (afterPhotosRender).
+    if (navigator.canShare && navigator.canShare({ files: [b.file] })) {
+      navigator
+        .share({ files: [b.file], title: 'Bhimlekha photo backup' })
+        .then(() => {
+          done();
+          toast('Backup saved');
+        })
+        .catch((err) => {
+          if (err?.name !== 'AbortError') toast('Could not open the share sheet', 'error');
+        });
+      return;
+    }
+    const url = URL.createObjectURL(b.file);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = b.file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    done();
+    toast('Backup downloaded. Move it to iCloud Drive in Files.');
+  },
+
+  vaultRestorePick() {
+    document.getElementById('vault-restore')?.click();
+  },
+};
+
+const trackChanges = {
+  progressMetric(el) {
+    state.ui.progress.metric = el.value;
+    render();
+  },
+  progressRange(el) {
+    state.ui.progress.range = el.value;
+    render();
+  },
+  bodyField(el) {
+    state.ui.body.field = el.value;
+    render();
+  },
+  bodyRange(el) {
+    state.ui.body.range = el.value;
+    render();
+  },
+  mDate(el) {
+    bodyDraft().date = el.value;
+  },
+  photoDate(el) {
+    state.ui.vault.date = el.value;
+    touchVault();
+  },
+  photoPose(el) {
+    state.ui.vault.pose = el.value;
+    state.ui.vault.compare = null;
+    render();
+  },
+  compareDate(el) {
+    const v = state.ui.vault;
+    const pose = poses().includes(v.pose) ? v.pose : poses()[0];
+    const dates = [...new Set(v.items.filter((i) => i.pose === pose).map((i) => i.date))].sort();
+    v.compare = { a: dates[0], b: dates[dates.length - 1], ...(v.compare || {}), [el.dataset.k]: el.value };
+    render();
+  },
+  async photoFile(el) {
+    const file = el.files && el.files[0];
+    el.value = '';
+    if (!file || !Vault.isUnlocked()) return;
+    const v = state.ui.vault;
+    const pose = poses().includes(v.pose) ? v.pose : poses()[0];
+    v.busy = 'Encrypting…';
+    render();
+    try {
+      await Vault.addPhoto(file, { date: v.date || todayISO(), pose });
+      markPhotoAdded();
+      await refreshPhotos();
+      const next = poses()[poses().indexOf(pose) + 1];
+      if (next) v.pose = next;
+      toast(`${pose} saved (encrypted)`);
+    } catch (err) {
+      toast(`Could not save: ${err.message || err}`, 'error');
+    } finally {
+      v.busy = '';
+    }
+    render();
+  },
+  async vaultRestoreFile(el) {
+    const file = el.files && el.files[0];
+    el.value = '';
+    if (!file) return;
+    const values = await openModal({
+      title: 'Restore photo backup',
+      message: 'Enter the passcode this backup was made with.',
+      fields: [{ key: 'pass', label: 'Backup passcode', value: '' }],
+      confirmText: 'Restore',
+    });
+    if (!values || !values.pass) return;
+    const v = state.ui.vault;
+    v.busy = 'Restoring…';
+    render();
+    try {
+      const res = await Vault.importBackup(file, values.pass);
+      if (!res) toast('Wrong passcode for this backup', 'error');
+      else {
+        v.status = 'unlocked';
+        await refreshPhotos();
+        touchVault();
+        state.vaultInfo = { ...state.vaultInfo, lastPhotoAt: state.vaultInfo.lastPhotoAt || nowISO(), lastBackupAt: nowISO() };
+        save(KEYS.vaultInfo, state.vaultInfo);
+        toast(`Restored ${res.added} of ${res.total} photos`);
+      }
+    } catch (err) {
+      toast(String(err.message || err), 'error');
+    } finally {
+      v.busy = '';
+    }
+    render();
+  },
+};
+
+const trackInputs = {
+  mValue(el) {
+    bodyDraft().values[el.dataset.field] = el.value;
+  },
+  mNotes(el) {
+    bodyDraft().notes = el.value;
+  },
+  weighIn(el) {
+    state.ui.body.weighIn = el.value;
+  },
+  vaultPass1(el) {
+    state.ui.vault.pass1 = el.value;
+  },
+  vaultPass2(el) {
+    state.ui.vault.pass2 = el.value;
+  },
+  vaultPass3(el) {
+    state.ui.vault.pass3 = el.value;
+  },
+};
