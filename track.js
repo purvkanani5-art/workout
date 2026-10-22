@@ -331,6 +331,49 @@ function bodySeries(field) {
   return { label: field, points: list.sort((a, b) => a.date.localeCompare(b.date)).map((m) => ({ date: m.date, y: m.values[field] })) };
 }
 
+/* ------------------------------------------------------- small workout */
+
+function nowTime() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** "Small workout": one tap saves when it happened. Date and time default to now and can be changed. */
+function renderSmallWorkout() {
+  const ui = state.ui.body;
+  const list = [...state.small].sort((a, b) => `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`));
+  return `
+    <section class="card stack">
+      <h2 class="section-title" style="margin:0">Small workout</h2>
+      <div class="two">
+        <div>
+          <label for="small-date">Date</label>
+          <input id="small-date" type="date" class="input" value="${esc(ui.smallDate || todayISO())}" data-change="smallDate" />
+        </div>
+        <div>
+          <label for="small-time">Time</label>
+          <input id="small-time" type="time" class="input" value="${esc(ui.smallTime || nowTime())}" data-change="smallTime" />
+        </div>
+      </div>
+      <button type="button" class="btn primary" data-action="smallCheckIn">Check in</button>
+      ${
+        list.length
+          ? `<ul class="list">${list
+              .slice(0, 5)
+              .map(
+                (s) => `<li><div class="exercise-row">
+                  <div class="name">${esc(formatDate(s.date))} · ${esc(s.time)}</div>
+                  <button type="button" class="btn icon ghost" data-action="editSmall" data-id="${esc(s.id)}" aria-label="Change date or time">✎</button>
+                  <button type="button" class="btn icon ghost" data-action="deleteSmall" data-id="${esc(s.id)}" aria-label="Delete">🗑</button>
+                </div></li>`,
+              )
+              .join('')}</ul>
+             <p class="hint" style="margin:0">${list.length} in total${list.length > 5 ? ' (latest 5 shown)' : ''}.</p>`
+          : ''
+      }
+    </section>`;
+}
+
 function renderBody() {
   const d = bodyDraft();
   const fields = measureFields();
@@ -375,6 +418,8 @@ function renderBody() {
       <button type="button" class="btn primary" data-action="saveCheckin">Save check-in</button>
       <a class="btn secondary" href="#photos">🔒 Progress photos${v.lastPhotoAt ? ` · last ${esc(formatDate(v.lastPhotoAt.slice(0, 10)))}` : ''}</a>
     </section>
+
+    ${renderSmallWorkout()}
 
     ${
       wf
@@ -1089,6 +1134,44 @@ const trackActions = {
     render();
   },
 
+  smallCheckIn() {
+    const ui = state.ui.body;
+    const date = ui.smallDate || todayISO();
+    const time = ui.smallTime || nowTime();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return toast('Pick a date and time', 'error');
+    state.small = [...state.small, { id: uuid(), date, time, savedAt: nowISO() }];
+    save(KEYS.small, state.small);
+    ui.smallDate = ui.smallTime = null; // back to "now" for the next one
+    toast(`Small workout checked in · ${formatDate(date, false)}, ${time}`);
+    render();
+  },
+
+  async editSmall(el) {
+    const s = state.small.find((x) => x.id === el.dataset.id);
+    if (!s) return;
+    const values = await openModal({
+      title: 'Small workout',
+      fields: [
+        { key: 'date', label: 'Date', value: s.date, type: 'date' },
+        { key: 'time', label: 'Time', value: s.time, type: 'time' },
+      ],
+      confirmText: 'Save',
+    });
+    if (!values) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(values.date) || !/^\d{2}:\d{2}$/.test(values.time)) return toast('Pick a date and time', 'error');
+    Object.assign(s, { date: values.date, time: values.time });
+    save(KEYS.small, state.small);
+    render();
+  },
+
+  async deleteSmall(el) {
+    const ok = await openModal({ title: 'Delete this small workout?', confirmText: 'Delete', danger: true });
+    if (!ok) return;
+    state.small = state.small.filter((x) => x.id !== el.dataset.id);
+    save(KEYS.small, state.small);
+    render();
+  },
+
   saveWeighIn() {
     const wf = weightField();
     const v = Number(state.ui.body.weighIn);
@@ -1349,6 +1432,12 @@ const trackChanges = {
   },
   mDate(el) {
     bodyDraft().date = el.value;
+  },
+  smallDate(el) {
+    state.ui.body.smallDate = el.value;
+  },
+  smallTime(el) {
+    state.ui.body.smallTime = el.value;
   },
   photoDate(el) {
     state.ui.vault.date = el.value;

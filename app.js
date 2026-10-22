@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -31,6 +31,7 @@ const KEYS = {
   missed: 'wt.missed', // [{ id, date, dayType, reason, note, savedAt }] scheduled days with no workout
   missedOutbox: 'wt.missedOutbox', // [{ id, entry }] waiting for the Sheet (entry.deleted = remove the row)
   backup: 'wt.backup', // { linked, dirty, sentAt, error }: the settings copy in the Sheet's Settings tab
+  small: 'wt.small', // [{ id, date, time, savedAt }] "Small workout" check-ins: just when, nothing else
 };
 
 // Weekday (0 = Sunday) → day type; '' = rest. The owner trains Monday to Saturday. Editable in Settings.
@@ -219,6 +220,7 @@ const state = {
   missed: load(KEYS.missed, []),
   missedOutbox: load(KEYS.missedOutbox, []),
   backup: load(KEYS.backup, { linked: false, dirty: false, sentAt: null, error: '' }),
+  small: load(KEYS.small, []),
   ui: {
     progress: { metric: 'e1rm', range: '12w' },
     body: { field: null, range: '12w', weighIn: '', draft: null },
@@ -847,7 +849,7 @@ function openModal({ title, message = '', fields = [], confirmText = 'OK', cance
             (f) => `
           <div class="field">
             <label for="modal-${esc(f.key)}">${esc(f.label)}</label>
-            <input id="modal-${esc(f.key)}" class="input" value="${esc(f.value ?? '')}" ${f.placeholder ? `placeholder="${esc(f.placeholder)}"` : ''} autocomplete="off" />
+            <input id="modal-${esc(f.key)}" class="input" type="${esc(f.type || 'text')}" value="${esc(f.value ?? '')}" ${f.placeholder ? `placeholder="${esc(f.placeholder)}"` : ''} autocomplete="off" />
           </div>`,
           )
           .join('')}
@@ -2711,6 +2713,7 @@ const actions = {
       mOutbox: state.mOutbox,
       missed: state.missed,
       missedOutbox: state.missedOutbox,
+      small: state.small,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -3021,6 +3024,8 @@ async function importFromFile(file) {
   if (Array.isArray(data.missedOutbox)) state.missedOutbox = data.missedOutbox;
   save(KEYS.missed, state.missed);
   save(KEYS.missedOutbox, state.missedOutbox);
+  if (Array.isArray(data.small)) state.small = data.small;
+  save(KEYS.small, state.small);
   save(KEYS.measurements, state.measurements);
   save(KEYS.mOutbox, state.mOutbox);
   if (data.exercises && typeof data.exercises === 'object') state.exercises = data.exercises;
