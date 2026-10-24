@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '2.0.1';
+const APP_VERSION = '2.0.2';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -1259,7 +1259,19 @@ function render() {
   }
   // Leaving the photo screens locks the vault, so decrypted photos never sit behind another screen.
   if (name !== 'photos') lockVault();
+  // The logging panel redraws on every tap; keep its scroll position so it does not jump back to the top.
+  const sheetScroll = app.querySelector('.logsheet')?.scrollTop || 0;
   app.innerHTML = html + tabBar(tabOf(name));
+  const sheet = app.querySelector('.logsheet');
+  if (sheet) sheet.scrollTop = sheetScroll;
+  clearInterval(clockHandle);
+  if (name === 'entry') {
+    clockHandle = setInterval(() => {
+      const el = document.getElementById('wk-clock');
+      if (el && state.draft) el.textContent = fmtClock(entryElapsed());
+      else clearInterval(clockHandle);
+    }, 1000);
+  }
   if (name === 'settings') {
     // One settings section per page: the others stay in the page (their handlers are shared) but hidden.
     for (const s of app.querySelectorAll('section[data-sec]')) s.hidden = s.dataset.sec !== arg;
@@ -1272,15 +1284,15 @@ function render() {
   }
 }
 
+/** Page header (v2.0): an optional back link, then the large title. */
 function topbar(title, back = null, links = []) {
-  return `
-    <div class="topbar">
-      <div class="row">
-        ${back ? `<a class="btn link" href="#${esc(back.href)}">‹ ${esc(back.label)}</a>` : ''}
-        ${title ? `<h1 class="card-title">${esc(title)}</h1>` : ''}
-      </div>
-      <div class="links">${links.map((l) => `<a class="btn link" href="#${esc(l.href)}">${esc(l.label)}</a>`).join('')}</div>
-    </div>`;
+  const row = back || links.length
+    ? `<div class="topbar">
+        ${back ? `<a class="btn link" href="#${esc(back.href)}">‹ ${esc(back.label)}</a>` : '<span></span>'}
+        <div class="links">${links.map((l) => `<a class="btn link" href="#${esc(l.href)}">${esc(l.label)}</a>`).join('')}</div>
+      </div>`
+    : '';
+  return `${row}${title ? `<h1 class="large">${esc(title)}</h1>` : ''}`;
 }
 
 /* ------------------------------------------------- v2.0: app shell, Today, Workout, More */
@@ -1767,127 +1779,190 @@ function exerciseOptions(f) {
     <option value="__new__">+ Add new exercise…</option>`;
 }
 
+/** Exercises shown on the workout screen: the day's plan in order, then anything else logged today. */
+function entryExercises() {
+  const d = state.draft;
+  const plan = state.exercises[d.dayType] || [];
+  const extra = [...new Set(d.sets.map((s) => s.exercise))].filter((n) => !plan.includes(n));
+  return [...plan, ...extra];
+}
+
+/** Planned working sets for an exercise ("3 × 8-12" → 3), else the sets logged (at least 1). */
+function plannedSets(name) {
+  const p = Progress.parsePlan(planText(state.draft.dayType, name));
+  const done = state.draft.sets.filter((s) => s.exercise === name && !s.warmup).length;
+  return Math.max(p ? p.sets : 0, done, 1);
+}
+
+function workingSetsDone(name) {
+  return state.draft.sets.filter((s) => s.exercise === name && !s.warmup).length;
+}
+
+/** One exercise card: name, add-weight badge, a dot per planned set, plan, and today's sets or last time. */
+function exerciseCard(name) {
+  const d = state.draft;
+  const done = workingSetsDone(name);
+  const total = plannedSets(name);
+  const today = d.sets.filter((s) => s.exercise === name);
+  const a = inDeload(d.date) ? null : analyse(name);
+  const badge = a && a.status.kind === 'increase' ? `<span class="badge">+${esc(fmtKg(a.status.nextWeight - a.status.weight))} kg</span>` : '';
+  const dots = Array.from({ length: total }, (_, i) => `<i class="${i < done ? 'on' : ''}"></i>`).join('');
+  const plan = planText(d.dayType, name);
+  const line = today.length ? `Today: ${today.map((s) => describeSet(s, false)).join(', ')}` : lastTimeHint(name);
+  return `<button type="button" class="excard ${done >= total ? 'done' : ''}" data-action="openLog" data-name="${esc(name)}">
+    <span class="name">${esc(name)}${badge}</span>
+    <span class="sets" aria-label="${done} of ${total} sets">${dots}</span>
+    ${plan ? `<span class="plan">Plan ${esc(plan)}</span>` : ''}
+    ${line ? `<span class="last">${esc(line)}</span>` : ''}
+  </button>`;
+}
+
 function renderEntry() {
+  const d = state.draft;
+  const names = entryExercises();
+  const total = names.reduce((t, n) => t + plannedSets(n), 0);
+  const done = d.sets.filter((s) => !s.warmup).length;
+  const inProgress = names.filter((n) => workingSetsDone(n) > 0 && workingSetsDone(n) < plannedSets(n));
+  const next = names.filter((n) => workingSetsDone(n) === 0);
+  const finished = names.filter((n) => workingSetsDone(n) >= plannedSets(n) && workingSetsDone(n) > 0);
+  const cardio = state.cardio[d.dayType];
+  const list = (title, items, empty) =>
+    group(title, `<span class="note">${items.length}</span>`, `<div class="card flush">${items.length ? items.map(exerciseCard).join('') : `<p class="empty pad">${esc(empty)}</p>`}</div>`);
+  return `
+    <div class="wk-head">
+      <div class="top">
+        <div class="t"><b>${esc(d.dayType)}</b><span class="clock"><span id="wk-clock">${esc(fmtClock(entryElapsed()))}</span> · ${done} of ${total} sets${d.date === todayISO() ? '' : ` · ${esc(formatDate(d.date, false))}`}</span></div>
+        <button type="button" class="btn small pill" data-action="finishWorkout">Finish</button>
+      </div>
+      <div class="progress" aria-hidden="true"><div style="width:${Math.min(100, total ? (done / total) * 100 : 0)}%"></div></div>
+    </div>
+    ${recoveryCard('entry')}
+    <p class="sub" style="margin-top:12px">Tap an exercise to log a set.</p>
+    ${inProgress.length ? list('In progress', inProgress, '') : ''}
+    ${list('Up next', next, 'Every exercise has been started.')}
+    ${finished.length ? list('Done', finished, '') : ''}
+    <div class="sgroup"><button type="button" class="btn secondary" data-action="openLog" data-name="">+ Another exercise</button></div>
+    ${cardio ? `<p class="hint" style="text-align:center;margin-top:16px">After lifting: ${esc(cardio)}</p>` : ''}
+    ${state.ui.timer ? renderTimer() : ''}
+    ${state.ui.sheet ? renderSetSheet() : ''}`;
+}
+
+/** Time since the first set (or the start), for the header clock. */
+function entryElapsed() {
+  const d = state.draft;
+  if (!d) return 0;
+  const times = d.sets.map((s) => Date.parse(s.loggedAt)).filter(Number.isFinite);
+  const start = times.length ? Math.min(...times) : Date.parse(d.startedAt);
+  return Number.isFinite(start) ? Math.max(0, (Date.now() - start) / 1000) : 0;
+}
+
+/** The logging panel (slides up from the bottom): the same form as before, with a −/+ weight stepper. */
+function renderSetSheet() {
   const d = state.draft;
   const f = form();
   const target = state.targets[d.dayType]?.[f.exercise];
   const hint = f.exercise ? lastTimeHint(f.exercise) : '';
-  const groups = groupByExercise(d.sets);
-  const chips = repsChips().map((c) => {
-    const label = c === 'other' ? 'Other' : c === 'failure' ? 'Failure' : c;
-    return `<button type="button" class="chip" data-action="reps" data-value="${c}" aria-pressed="${f.reps === c}">${label}</button>`;
-  }).join('');
-  const sets = [];
+  const chips = repsChips()
+    .map((c) => {
+      const label = c === 'other' ? 'Other' : c === 'failure' ? 'Failure' : c;
+      return `<button type="button" class="chip" data-action="reps" data-value="${c}" aria-pressed="${f.reps === c}">${label}</button>`;
+    })
+    .join('');
+  const setsHtml = [];
   for (let i = 1; i <= f.visibleSets; i++) {
-    sets.push(`
+    setsHtml.push(`
       <label class="seg ${f.setNo === i ? 'selected' : ''}">
         <input type="radio" name="setNo" value="${i}" data-change="setNo" ${f.setNo === i ? 'checked' : ''} />
         Set ${i}
       </label>`);
   }
-  const cardio = state.cardio[d.dayType];
-
+  const today = d.sets.filter((s) => s.exercise === f.exercise);
+  const step = Number(state.settings.steps?.[f.exercise]) || 2.5;
   return `
-    ${topbar('', { href: 'home', label: 'Home' })}
-    ${recoveryCard('entry')}
-    <section class="card stack">
-      <div>
-        <h1 class="card-title">Workout entry</h1>
-        <p class="subtitle">${esc(d.dayType)} day · ${d.date === todayISO() ? 'Today' : esc(formatDate(d.date))}</p>
-      </div>
-      <div>
-        <label for="exercise">Exercise</label>
-        <select id="exercise" class="select" data-change="exercise">${exerciseOptions(f)}</select>
+    <div class="logsheet-overlay" data-action="closeSheet" aria-hidden="true"></div>
+    <section class="logsheet" role="dialog" aria-modal="true" aria-label="Log a set">
+      <div class="grab" aria-hidden="true"></div>
+      <div class="stack">
+        <div class="logsheet-head">
+          <label for="exercise" class="sr-only">Exercise</label>
+          <select id="exercise" class="select" data-change="exercise">${exerciseOptions(f)}</select>
+          <button type="button" class="btn link" data-action="closeSheet">Close</button>
+        </div>
         ${
           f.addingExercise
-            ? `<div class="input-row" style="margin-top:8px">
+            ? `<div class="input-row">
                 <input id="new-exercise" class="input" placeholder="New exercise name" value="${esc(state.ui.newExercise)}" data-input="newExercise" autocomplete="off" />
                 <button type="button" class="btn" data-action="addExercise">Add</button>
               </div>`
             : ''
         }
-        ${target ? `<p class="hint">Plan: ${esc(target)}</p>` : ''}
-        ${hint ? `<p class="hint">${esc(hint)}</p>` : ''}
+        ${target || hint ? `<p class="hint" style="margin:0">${esc([target ? `Plan ${target}` : '', hint].filter(Boolean).join(' · '))}</p>` : ''}
         ${f.exercise ? entryStatus(f.exercise) : ''}
-      </div>
-      <fieldset>
-        <legend>Set number</legend>
-        <div class="segments">
-          ${sets.join('')}
-          <button type="button" class="seg plus" data-action="moreSets" aria-label="Add another set number">+</button>
+        <fieldset>
+          <legend>Set number</legend>
+          <div class="segments">
+            ${setsHtml.join('')}
+            <button type="button" class="seg plus" data-action="moreSets" aria-label="Add another set number">+</button>
+          </div>
+        </fieldset>
+        <div id="set-compare" aria-live="polite">${setCompareHtml()}</div>
+        <div>
+          <label for="weight">Weight <span class="small muted">kg · steps of ${esc(fmtKg(step))} · 0 = bodyweight</span></label>
+          <div class="stepper">
+            <button type="button" data-action="weightStep" data-dir="-1" aria-label="${esc(fmtKg(step))} kg less">−</button>
+            <input id="weight" class="input" type="number" inputmode="decimal" min="0" step="0.5" placeholder="kg" value="${esc(f.weight)}" data-input="weight" />
+            <button type="button" data-action="weightStep" data-dir="1" aria-label="${esc(fmtKg(step))} kg more">+</button>
+          </div>
         </div>
-      </fieldset>
-      <fieldset>
-        <legend>Reps</legend>
-        <div class="chips" id="reps-grid">${chips}</div>
-        ${
-          f.reps === 'other'
-            ? `<div style="margin-top:8px">
-                <label for="other-reps" class="sr-only">Reps</label>
-                <input id="other-reps" class="input" type="number" inputmode="numeric" min="1" step="1" placeholder="Reps" value="${esc(f.otherReps)}" data-input="otherReps" />
-              </div>`
-            : ''
-        }
+        <fieldset>
+          <legend>Reps</legend>
+          <div class="chips" id="reps-grid">${chips}</div>
+          ${
+            f.reps === 'other'
+              ? `<div style="margin-top:8px">
+                  <label for="other-reps" class="sr-only">Reps</label>
+                  <input id="other-reps" class="input" type="number" inputmode="numeric" min="1" step="1" placeholder="Reps" value="${esc(f.otherReps)}" data-input="otherReps" />
+                </div>`
+              : ''
+          }
+          ${
+            f.reps === 'failure'
+              ? `<div style="margin-top:8px">
+                  <label for="failure-reps" class="sr-only">Reps done (optional)</label>
+                  <input id="failure-reps" class="input" type="number" inputmode="numeric" min="0" step="1" placeholder="Reps done (optional)" value="${esc(f.failureReps)}" data-input="failureReps" />
+                </div>`
+              : ''
+          }
+        </fieldset>
         ${
           f.reps === 'failure'
-            ? `<div style="margin-top:8px">
-                <label for="failure-reps" class="sr-only">Reps done (optional)</label>
-                <input id="failure-reps" class="input" type="number" inputmode="numeric" min="0" step="1" placeholder="Reps done (optional)" value="${esc(f.failureReps)}" data-input="failureReps" />
-              </div>`
+            ? ''
+            : `<fieldset>
+          <legend>Reps left in the tank <span class="small muted">(RIR)</span></legend>
+          <div class="chips four" id="rir-chips">${RIR_CHOICES.map(
+            (n) => `<button type="button" class="chip" data-action="rir" data-value="${n}" aria-pressed="${f.rir === n}">${rirLabel(n)}</button>`,
+          ).join('')}</div>
+          <p class="hint">0 = could not do another · 1 = one more · 2 = two more · 3+ = easy.</p>
+        </fieldset>`
+        }
+        <button type="button" class="chip toggle" data-action="toggleWarmup" aria-pressed="${f.warmup}">Warm-up set${f.warmup ? ' ✓' : ''}</button>
+        <button type="button" class="btn primary" data-action="saveSet">${f.editingId ? `Update set ${f.setNo}` : `Save set ${f.setNo}`}</button>
+        ${f.editingId ? '<button type="button" class="btn secondary" data-action="cancelEdit">Cancel edit</button>' : ''}
+        ${
+          today.length
+            ? `<div><p class="sublabel">Logged today</p>${today
+                .map(
+                  (s) => `<div class="set-row">
+                    <div class="what">${esc(describeSet(s))}</div>
+                    <button type="button" class="btn icon ghost" data-action="editSet" data-id="${s.id}" aria-label="Edit set ${s.setNo}">✎</button>
+                    <button type="button" class="btn icon ghost" data-action="deleteSet" data-id="${s.id}" aria-label="Delete set ${s.setNo}">🗑</button>
+                  </div>`,
+                )
+                .join('')}</div>`
             : ''
         }
-      </fieldset>
-      ${
-        f.reps === 'failure'
-          ? ''
-          : `<fieldset>
-        <legend>Reps left in the tank <span class="small muted">(RIR)</span></legend>
-        <div class="chips four" id="rir-chips">${RIR_CHOICES.map(
-          (n) => `<button type="button" class="chip" data-action="rir" data-value="${n}" aria-pressed="${f.rir === n}">${rirLabel(n)}</button>`,
-        ).join('')}</div>
-        <p class="hint">0 = could not do another · 1 = one more · 2 = two more · 3+ = easy.</p>
-      </fieldset>`
-      }
-      <div>
-        <label for="weight">Weight (kg)</label>
-        <input id="weight" class="input" type="number" inputmode="decimal" min="0" step="0.5" placeholder="0 for bodyweight" value="${esc(f.weight)}" data-input="weight" />
       </div>
-      <button type="button" class="chip toggle" data-action="toggleWarmup" aria-pressed="${f.warmup}">Warm-up set${f.warmup ? ' ✓' : ''}</button>
-      <div id="set-compare" aria-live="polite">${setCompareHtml()}</div>
-      <button type="button" class="btn primary" data-action="saveSet">${f.editingId ? 'Update set' : 'Save set'}</button>
-      ${f.editingId ? '<button type="button" class="btn ghost secondary" data-action="cancelEdit">Cancel edit</button>' : ''}
-    </section>
-
-    ${state.ui.timer ? renderTimer() : ''}
-
-    <section class="card">
-      <h2 class="section-title">Logged this workout</h2>
-      ${
-        groups.size
-          ? [...groups.entries()]
-              .map(
-                ([name, list]) => `
-            <div class="group">
-              <h3>${esc(name)}</h3>
-              ${list
-                .map(
-                  (s) => `
-                <div class="set-row">
-                  <div class="what">${esc(describeSet(s))}</div>
-                  <button type="button" class="btn icon ghost" data-action="editSet" data-id="${s.id}" aria-label="Edit set ${s.setNo} of ${esc(name)}">✎</button>
-                  <button type="button" class="btn icon ghost" data-action="deleteSet" data-id="${s.id}" aria-label="Delete set ${s.setNo} of ${esc(name)}">🗑</button>
-                </div>`,
-                )
-                .join('')}
-            </div>`,
-              )
-              .join('')
-          : '<p class="empty">No sets yet. Save your first set above.</p>'
-      }
-      ${cardio ? `<p class="hint">After lifting: ${esc(cardio)}</p>` : ''}
-    </section>
-
-    <button type="button" class="btn secondary" data-action="finishWorkout">Finish workout</button>`;
+    </section>`;
 }
 
 /** Reps currently entered in the form: a chip, the Other box, or the Failure count (null when not known yet). */
@@ -1966,7 +2041,7 @@ function renderTimer() {
   const t = state.ui.timer;
   const remaining = (t.endsAt - Date.now()) / 1000;
   return `
-    <div class="timer ${remaining <= 0 ? 'done' : ''}" id="timer" role="timer" aria-label="Rest timer">
+    <div class="timer floating ${remaining <= 0 ? 'done' : ''}" id="timer" role="timer" aria-label="Rest timer">
       <div>
         <div class="small muted">Rest</div>
         <div class="time" id="timer-value">${remaining <= 0 ? 'Go' : fmtClock(remaining)}</div>
@@ -2100,17 +2175,16 @@ function renderReview() {
   }[sub.status];
   const finished = session.finishedAt ? new Date(session.finishedAt) : null;
   const missing = done || busy ? [] : reviewMissing(session);
+  const insight = renderInsight(session);
   return `
-    ${topbar('', done || busy ? null : { href: 'home', label: 'Home' })}
+    <h1 class="large">${done ? 'Workout saved' : 'Workout finished'}</h1>
+    <p class="sub">${esc(session.dayType)} · ${esc(formatDate(session.date))}${
+      finished ? ` · clock stopped at ${esc(`${String(finished.getHours()).padStart(2, '0')}:${String(finished.getMinutes()).padStart(2, '0')}`)}` : ''
+    }</p>
+    ${group('Summary', '', `<section class="card stack">${renderSummary(session)}</section>`)}
+    ${insight ? `<section class="sgroup"><section class="card stack">${insight}</section></section>` : ''}
+    <section class="sgroup">
     <section class="card stack">
-      <div>
-        <h1 class="card-title">Review &amp; submit</h1>
-        <p class="subtitle">${esc(session.dayType)} day · ${esc(formatDate(session.date))}${
-          finished ? ` · finished ${esc(`${String(finished.getHours()).padStart(2, '0')}:${String(finished.getMinutes()).padStart(2, '0')}`)}, clock stopped` : ''
-        }</p>
-      </div>
-      ${renderSummary(session)}
-      ${renderInsight(session)}
       ${renderWellbeing(session, busy || done)}
       <div>
         <label for="notes">Notes (optional)</label>
@@ -2124,6 +2198,7 @@ function renderReview() {
           : `<button type="button" class="btn primary" data-action="submitWorkout" ${busy ? 'disabled' : ''}>${busy ? 'Sending…' : 'Submit workout'}</button>
              <button type="button" class="btn secondary" data-action="reopenWorkout" ${busy ? 'disabled' : ''}>Reopen workout to log more sets</button>`
       }
+    </section>
     </section>`;
 }
 
@@ -2200,7 +2275,7 @@ function renderHistory() {
     (b.date || '').localeCompare(a.date || ''),
   );
   return `
-    ${topbar('History', { href: 'home', label: 'Home' })}
+    ${topbar('History', { href: 'more', label: 'More' })}
     <section class="card">
       ${
         rows.length
@@ -2728,6 +2803,7 @@ function renderRecoveryScoreSettings() {
 /* -------------------------------------------------------------- rest timer */
 
 let timerHandle = null;
+let clockHandle = null; // the workout screen's running clock
 
 function startTimer() {
   const total = Math.max(5, Number(state.settings.restSeconds) || 90);
@@ -2807,6 +2883,7 @@ const actions = {
     };
     state.ui.form = null;
     state.ui.timer = null;
+    state.ui.sheet = false;
     saveDraft();
     go('entry');
   },
@@ -2935,6 +3012,7 @@ const actions = {
       editingId: null,
     };
     if (!existing) startTimer();
+    state.ui.sheet = false; // back to the list, with the rest timer running
     toast(existing ? `Set ${set.setNo} updated` : `Set ${set.setNo} saved`);
     render();
   },
@@ -2961,8 +3039,8 @@ const actions = {
       editingId: s.id,
       addingExercise: false,
     };
+    state.ui.sheet = true;
     render();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
   },
 
   async deleteSet(el) {
@@ -2984,8 +3062,35 @@ const actions = {
     render();
   },
 
+  /** Open the logging panel for an exercise ('' = choose or add one). Editing a set keeps its values. */
+  openLog(el) {
+    const name = el.dataset.name || '';
+    const f = state.ui.form;
+    if (!f || f.editingId || f.exercise !== name || !name) state.ui.form = newForm(name);
+    state.ui.sheet = true;
+    render();
+  },
+
+  closeSheet() {
+    state.ui.sheet = false;
+    if (state.ui.form?.editingId) state.ui.form = newForm(state.ui.form.exercise);
+    render();
+  },
+
+  /** −/+ on the weight: the exercise's own step (Settings → Exercises) or 2.5 kg; never below 0. */
+  weightStep(el) {
+    const f = form();
+    const step = Number(state.settings.steps?.[f.exercise]) || 2.5;
+    const now = Number(f.weight) || 0;
+    f.weight = fmtKg(Math.max(0, Math.round((now + Number(el.dataset.dir) * step) * 100) / 100));
+    const input = document.getElementById('weight');
+    if (input) input.value = f.weight;
+    refreshSetCompare();
+  },
+
   finishWorkout() {
     if (!state.draft.sets.length) return toast('Log at least one set first', 'error');
+    state.ui.sheet = false;
     // The workout closes here: the clock stops now, not when the review is filled in and sent (v1.7).
     state.draft.finishedAt = nowISO();
     state.ui.form = null;

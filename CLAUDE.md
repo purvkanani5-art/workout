@@ -392,3 +392,14 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     wheel, +/−), drag pans when zoomed, swipe changes view when not; a tap updates the panel in place (no re-render
     mid-gesture). New screen groups use class `sgroup` (`.group` already styles the logged-sets list). Version 2.0.1
     (owner: "full upgrade").
+26. **v2.0.2: inner screens in the prototype design** (owner: "only the outer layer was upgraded"). Workout screen:
+    sticky header (day, running clock from the first set, "x of y sets" + progress bar, Finish), exercises as cards in
+    In progress / Up next / Done (dots = planned working sets from the plan text), "+ Another exercise"; tapping a
+    card opens the **logging panel** (`.logsheet`, bottom sheet) with the same form as before (set numbers, compare
+    line, −/+ weight stepper using the exercise's step or 2.5 kg, reps/Other/Failure, RIR, warm-up, edit/delete of
+    today's sets). Save closes the panel and starts the **floating** rest timer. The panel keeps its scroll position
+    across re-renders and sits below dialogs (z 46/47 < `.modal` 48) so "Delete this set?" answers on top. Class
+    and handler names are checked against the old ones (clashes found and avoided: `.group`, `.sheet`, `.badge`,
+    action `openExercise` → the panel's action is `openLog`). `topbar()` now draws the back link + large title, so
+    History, Progress, Photos and exercise pages share the new header; Review is "Workout finished" with Summary,
+    Progress insight and How was it? cards; settings sections hide their own title (the page title shows it).

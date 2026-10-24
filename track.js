@@ -53,7 +53,7 @@ function renderProgress() {
   const muscles = [...new Set([...MUSCLE_GROUPS, ...assigned, ...Object.keys(counts)])].filter((m) => counts[m] || assigned.includes(m));
   const maxCount = Math.max(p.muscleSetsMax, ...Object.values(counts));
   return `
-    ${topbar('Progress', { href: 'home', label: 'Home' })}
+    ${topbar('Progress')}
     ${recoveryCard('progress')}
     ${renderWeekSummaries()}
     ${renderWeeklyStrength()}
@@ -80,7 +80,7 @@ function renderProgress() {
     <section class="card stack">
       <div>
         <h2 class="section-title" style="margin:0">Hard sets per muscle, last 7 days</h2>
-        <p class="hint">Useful range ${p.muscleSetsMin}–${p.muscleSetsMax} working sets a week (Settings → Progression).</p>
+        <p class="hint">Useful range ${p.muscleSetsMin}–${p.muscleSetsMax} working sets a week (More → Progression).</p>
       </div>
       ${
         muscles.length

@@ -1690,7 +1690,6 @@ img.logo.lg { width: 64px; height: 64px; border-radius: 15px; }
 .freq { font-size: 12px; font-weight: 700; color: var(--sel-text); background: var(--sel-bg); border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
 .count { background: var(--saffron); color: var(--toast-text); font-size: 12px; font-weight: 700; border-radius: 999px; min-width: 22px; height: 22px; display: inline-grid; place-items: center; padding: 0 6px; }
 .attention .banner:last-child { margin-bottom: 0; }
-.btn.small { min-height: 36px; padding: 0 14px; font-size: 14px; }
 .btn.pill { background: var(--chip-bg); border: 1px solid var(--chip-border); border-radius: 999px; color: var(--text); }
 .big-name { font-size: 24px; font-weight: 750; }
 .row-btns { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
@@ -1799,3 +1798,53 @@ img.logo.lg { width: 64px; height: 64px; border-radius: 15px; }
 .mrow .bar i { display: block; height: 100%; background: var(--c); border-radius: 2px; }
 .mrow .n { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 14px; }
 @media (prefers-reduced-motion: reduce) { #mfig .m, .stage-hint { transition: none; } }
+
+/* =================== v2.0.1: workout screen (prototype layout) =================== */
+.wk-head { position: sticky; top: env(safe-area-inset-top); z-index: 20; margin: -16px -16px 0; padding: 12px 16px; background: var(--bar);
+  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); border-bottom: 1px solid var(--border); }
+.wk-head .top { display: flex; align-items: center; gap: 12px; }
+.wk-head .t { flex: 1; min-width: 0; }
+.wk-head .t b { display: block; font-size: 22px; font-weight: 750; }
+.wk-head .clock { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 14px; }
+.progress { height: 6px; background: var(--chip-bg); border-radius: 3px; margin-top: 10px; overflow: hidden; }
+.progress div { height: 100%; background: var(--saffron); border-radius: 3px; transition: width .3s; }
+.excard { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; width: 100%; text-align: left; background: none; border: 0; padding: 12px 14px; cursor: pointer; position: relative; font: inherit; color: var(--text); min-height: 64px; }
+.excard + .excard::before { content: ''; position: absolute; top: 0; left: 14px; right: 0; height: 1px; background: var(--border); }
+.excard .name { font-weight: 650; font-size: 16px; }
+.excard .plan { font-size: 13px; color: var(--muted); grid-column: 1; }
+.excard .sets { grid-row: 1 / span 2; grid-column: 2; display: flex; gap: 5px; align-items: center; flex-wrap: wrap; max-width: 110px; justify-content: flex-end; }
+.excard .sets i { width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--chip-border); display: block; }
+.excard .sets i.on { background: var(--saffron); border-color: var(--saffron); }
+.excard .last { grid-column: 1 / -1; font-size: 13px; color: var(--muted); }
+.excard.done .name::after { content: '  ✓'; color: var(--ok); }
+.excard .badge { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: var(--sel-bg); color: var(--sel-text); margin-left: 6px; vertical-align: 2px; }
+.empty.pad { padding: 14px; margin: 0; }
+.sublabel { font-size: 13px; font-weight: 700; color: var(--muted); margin: 10px 0 4px; text-transform: uppercase; letter-spacing: .04em; }
+
+/* The logging panel */
+.logsheet-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.38); z-index: 46; } /* below dialogs (.modal 48) so "Delete this set?" shows on top */
+.logsheet { position: fixed; left: 50%; bottom: 0; transform: translateX(-50%); width: min(520px, 100%); max-height: 90vh; max-height: 90dvh; overflow: auto;
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain; z-index: 47; background: var(--card); border-radius: 24px 24px 0 0;
+  padding: 8px 16px calc(20px + env(safe-area-inset-bottom)); box-shadow: 0 -10px 30px rgba(0,0,0,.18); animation: sheetUp .25s cubic-bezier(.2,.8,.2,1); }
+@keyframes sheetUp { from { transform: translate(-50%, 40%); opacity: .4; } to { transform: translate(-50%, 0); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .logsheet { animation: none; } }
+.grab { width: 40px; height: 5px; border-radius: 3px; background: var(--chip-border); margin: 4px auto 12px; }
+.logsheet-head { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+.logsheet .set-row { border-top: 1px solid var(--border); }
+.stepper { display: grid; grid-template-columns: 60px 1fr 60px; gap: 8px; align-items: center; background: var(--chip-bg); border-radius: 18px; padding: 6px; }
+.stepper button { height: 54px; border-radius: 14px; border: 1px solid var(--chip-border); background: var(--input-bg); font: inherit; font-size: 26px; font-weight: 600; cursor: pointer; color: var(--text); }
+.stepper .input { text-align: center; font-size: 26px; font-weight: 750; min-height: 54px; font-variant-numeric: tabular-nums; }
+.timer.floating { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(80px + env(safe-area-inset-bottom)); width: min(488px, calc(100% - 32px)); z-index: 35; margin: 0;
+  background: var(--ink); color: var(--ivory); border: 0; border-radius: 18px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+.timer.floating .muted { color: var(--ivory); opacity: .7; }
+.timer.floating .btn { background: rgba(246, 238, 227, 0.12); color: var(--ivory); border-color: transparent; }
+.timer.floating.done { background: var(--saffron); color: var(--toast-text); }
+.timer.floating.done .btn, .timer.floating.done .muted { color: var(--toast-text); }
+.toast { z-index: 90; }
+
+/* Inner pages: settings sections without a second title (the page title says it) */
+.settings-page section[data-sec] > h2.section-title:first-child,
+.settings-page section[data-sec] > div:first-child > h2.section-title { display: none; }
+.settings-page section[data-sec] { margin-top: 16px; }
+
+h1.large + .card, h1.large + section.card, .topbar + h1.large + .card { margin-top: 12px; }
