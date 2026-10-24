@@ -47,6 +47,23 @@ There are no secrets in the repo. The script URL and token live only in the app'
 
 ## Using it
 
+**v2.0 layout:** a tab bar at the bottom: **Today · Workout · Muscles · Progress · Body · More**.
+- **Today**: *Log today* (morning check, weight, small workout: one tap each), Recovery, today's Training with
+  a *Start* button, Nutrition & body, and *Needs attention* (missed days, check-in due, photos, new calorie target…).
+- **Workout**: start any day, recent workouts; while a workout is open the tab goes straight back to it.
+- **Muscles**: the body map (front, back, left, right; tap a muscle; pinch, double-tap or +/− to zoom; swipe to
+  turn). *My workout* colours muscles by hard sets in the last 7 days or one day (main muscle = 1 set, helping =
+  ½); *All exercises* colours them by how many of your plan's exercises work them and lists every exercise in
+  the database for a tapped muscle, marking the ones in your plan.
+- **More**: settings in sections (Schedule, Exercises & plans, Progression, Logging, Calories, Recovery score,
+  Google Sheet, Backup…), history and photos.
+
+**Exercise database (Sheet tab "Exercises")**: `Exercise | Equipment | Main muscles | Helping muscles | Notes`.
+The app writes its starting list (158 exercises, at least 4 per muscle across barbell, dumbbell, cable, machine
+and bodyweight) into an empty tab once, then reads the tab (every 6 hours, or *Reload from the Sheet* on Muscles).
+Add or change rows freely: write muscles by the names the app shows (e.g. `Anterior delts, Triceps`), separated by
+commas. The script never writes over rows that are there. Needs the v2.0 Code.gs.
+
 - **Home → Start workout**: pick the day, check the date, Start.
 - **Workout entry**: choose the exercise, the set number is pre-selected, tap the reps, the weight is pre-filled
   from last time, **Save set**. A rest timer starts. "Plan: 3 × 6-8" is the target from your programme and

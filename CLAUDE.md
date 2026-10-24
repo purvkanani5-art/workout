@@ -370,3 +370,25 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     only its cells. Parts 0–100: sleep (hours vs target, −25/h short; averaged with sleep score), HRV and RHR as
     20 points per SD from the last `baselineDays` (needs `minBaseline` days; SD floor 5% of mean), soreness linear;
     weighted and rescaled over what is present. Bands green ≥ 70, amber ≥ 40, red. Advice only.
+
+## Owner's decisions (2026-10-24, v2.0.1: app layout, muscle map, exercise database)
+
+24. **Exercise database in the Sheet** (tab **Exercises**: Exercise | Equipment | Main muscles | Helping muscles |
+    Notes). `muscles.js` holds the 33 muscle groups with **gym names** (owner: not kids' words, not textbook Latin:
+    Anterior/Lateral/Rear delts, Upper/Mid/Lower pecs, Biceps long/short head, Brachialis, Brachioradialis, Forearm
+    flexors/extensors, Glute max, Glute medius, Adductors, Gastrocnemius inner/outer head, Soleus, Tibialis…; no commas
+    in names because commas separate them in the Sheet), the four figure views (self-drawn SVG; right = mirrored
+    left) and the 158-exercise seed (≥ 4 main exercises per muscle, every exercise of the owner's plan included).
+    POST `action=exercises` writes the seed only into an empty tab; GET `action=exercises` reads it; the app caches
+    rows in `wt.exdb` and reads every 6 h (or *Reload from the Sheet*). Matching ignores case, punctuation and plural
+    s; an exercise not in the database is counted through its old coarse group (`muscleOf`) and listed as unmatched.
+    Counting: main muscle 1 set, helping ½, warm-ups skipped.
+25. **v2.0 layout** (from the approved prototype): bottom tab bar Today / Workout / Muscles / Progress / Body / More.
+    Today = Log today (morning check, weight, small workout) → Recovery → Training (Start today's day) → Nutrition &
+    body → Needs attention. Workout tab = start any day + recent; an open workout redirects there. More = grouped
+    links; `#settings/<section>` shows one settings section (all sections are rendered, the others `hidden`, so their
+    handlers are untouched; `#settings` alone → More). Muscles tab: My workout (last 7 days / one day) and All
+    exercises (plan coverage + every database exercise per muscle); zoom = SVG viewBox up to 4× (pinch, double-tap,
+    wheel, +/−), drag pans when zoomed, swipe changes view when not; a tap updates the panel in place (no re-render
+    mid-gesture). New screen groups use class `sgroup` (`.group` already styles the logged-sets list). Version 2.0.1
+    (owner: "full upgrade").

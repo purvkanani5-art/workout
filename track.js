@@ -468,9 +468,12 @@ function renderBody() {
   const v = state.vaultInfo;
   const entries = [...state.measurements].sort((a, b) => b.date.localeCompare(a.date) || (b.savedAt || '').localeCompare(a.savedAt || ''));
   const unit = (f) => (f.match(/\(([^)]+)\)/) || [])[1] || '';
+  const log = dailyLog();
   return `
-    ${topbar('Body', { href: 'home', label: 'Home' })}
-    <section class="card stack">
+    <h1 class="large">Body</h1>
+    <p class="sub">Log daily, measure weekly</p>
+    ${group('Log today', `<span class="freq">Daily · ${log.done} of ${log.total} done</span>`, log.html)}
+    <section class="card stack" style="margin-top:24px">
       <div>
         <h2 class="section-title" style="margin:0">Weekly check-in</h2>
         <p class="hint">${esc(WEEKDAYS[Number(state.settings.checkinDay) || 0])}s, same time each week: morning, before food, after the toilet, relaxed (not flexed).${check.last ? ` Last: ${esc(formatDate(check.last))}.` : ''}</p>
@@ -503,21 +506,6 @@ function renderBody() {
 
     ${renderSmallWorkout()}
 
-    ${
-      wf
-        ? `<section class="card stack">
-      <div>
-        <h2 class="section-title" style="margin:0">Daily weigh-in</h2>
-        <p class="hint">Optional but more accurate: weigh every morning and the chart uses the weekly average, which smooths out water and food swings.</p>
-      </div>
-      <div class="input-row">
-        <label for="weigh-in" class="sr-only">Today's weight</label>
-        <input id="weigh-in" class="input" type="number" inputmode="decimal" step="0.1" min="0" placeholder="Today's weight" value="${esc(ui.weighIn)}" data-input="weighIn" />
-        <button type="button" class="btn" data-action="saveWeighIn">Save</button>
-      </div>
-    </section>`
-        : ''
-    }
 
     <section class="card stack">
       <h2 class="section-title" style="margin:0">Trends</h2>
@@ -1199,7 +1187,420 @@ function faceRun(pending) {
 
 /* ------------------------------------------------------------ handlers */
 
+/* ============================================================ Muscles (v2.0) */
+// Two views: "My workout" colours each muscle by the hard sets it got (last 7 days or one day); "All exercises"
+// colours it by how many of the plan's exercises work it, and lists every database exercise for it. The figure's
+// zoom is the SVG viewBox (200 × 460 = whole body, up to 4×). Tapping a muscle updates the panel in place, so a
+// gesture is never cut short by a re-render.
+
+const MFULL = { x: 0, y: 0, w: 200, h: 460 };
+const MMAX_ZOOM = 4;
+
+function musUi() {
+  return state.ui.muscles;
+}
+
+/** Every exercise in the owner's plan (all days). */
+function planNames() {
+  return [...new Set(Object.values(state.exercises || {}).flat())];
+}
+
+function musSessions() {
+  const u = musUi();
+  const today = todayISO();
+  const all = [...state.history, ...(state.draft ? [state.draft] : [])];
+  if (u.period === 'day') return all.filter((s) => s.date === (u.day || today));
+  const from = Progress.addDays(today, -6);
+  return all.filter((s) => s.date >= from && s.date <= today);
+}
+
+function musData() {
+  const { db, fromSheet } = exerciseDb();
+  const u = musUi();
+  if (u.mode === 'all') {
+    const cov = Muscles.planCoverage(db, planNames(), muscleOf);
+    return { db, fromSheet, mode: 'all', value: cov.score, cov, scale: 'plan' };
+  }
+  const t = Muscles.tally(db, musSessions(), muscleOf);
+  return { db, fromSheet, mode: 'mine', value: t.sets, t, scale: u.period === 'day' ? 'day' : 'week' };
+}
+
+const fmtSets = (n) => `${Number.isInteger(n) ? n : n.toFixed(1)} set${n === 1 ? '' : 's'}`;
+
+function figureSvg(view, d) {
+  const layers = Muscles.FIG[view === 'right' ? 'left' : view];
+  const mir = 'transform="matrix(-1 0 0 1 200 0)"';
+  const picked = musUi().picked;
+  const one = ([type, key, path], extra = '') =>
+    type === 'm'
+      ? `<path class="m${key === picked ? ' on' : ''}" d="${path}" data-m="${key}" style="fill:var(--m${Muscles.level(d.value[key], d.scale)})" ${extra}/>`
+      : `<path class="${type}" d="${path}" ${extra}/>`;
+  let inner = layers.map((l) => one(l) + (l[3] ? one(l, mir) : '')).join('');
+  if (view === 'right') inner = `<g ${mir}>${inner}</g>`;
+  return `<g class="fig-in">${inner}</g>`;
+}
+
+function pickedHtml(d) {
+  const u = musUi();
+  const key = u.picked;
+  if (!key) return '<b>Tap a muscle</b><span class="hint">Its name, sets and the exercises that train it show here.</span>';
+  const m = Muscles.BY_KEY[key];
+  const plan = new Set(planNames().map(Muscles.norm));
+  const inPlan = (name) => plan.has(Muscles.norm(name));
+  const { main, helps } = Muscles.exercisesFor(d.db, key);
+  if (d.mode === 'mine') {
+    const n = d.value[key];
+    const lv = Muscles.level(n, d.scale);
+    const when = u.period === 'day' ? `on ${formatDate(u.day || todayISO(), false)}` : 'in the last 7 days';
+    const verdict = (d.scale === 'week' ? ['not trained', 'too little', 'some work, below the 10-set target', 'on target', 'a lot'] : ['not trained', 'light', 'moderate', 'solid', 'heavy'])[lv];
+    const done = [...d.t.by[key].entries()].sort((a, b) => b[1].main - a[1].main || b[1].sets - a[1].sets);
+    const chips = done.length
+      ? done.map(([name, v]) => `<span class="${v.main ? 'main' : ''}">${esc(name)} · ${esc(fmtSets(v.sets))}${v.main ? '' : ' (helps)'}</span>`).join('')
+      : main
+          .slice(0, 5)
+          .map((e) => `<span class="${inPlan(e.name) ? 'main' : ''}">Try: ${esc(e.name)}${e.equipment ? ` · ${esc(e.equipment)}` : ''}${inPlan(e.name) ? ' (in your plan)' : ''}</span>`)
+          .join('');
+    return `<b>${esc(m.name)}</b><span class="hint">${esc(fmtSets(n))} ${esc(when)} · ${esc(verdict)}</span><div class="exs">${chips}</div>`;
+  }
+  const mine = d.cov.mine[key];
+  const row = (e) =>
+    `<li><span class="ename">${esc(e.name)}</span>${e.equipment ? `<span class="eq">${esc(e.equipment)}</span>` : ''}${inPlan(e.name) ? '<span class="badge">In your plan</span>' : ''}</li>`;
+  return `<b>${esc(m.name)}</b>
+    <span class="hint">${esc(m.area)} · your plan: ${
+      mine.main.length || mine.helps.length
+        ? esc([mine.main.length ? `${mine.main.length} main (${mine.main.join(', ')})` : '', mine.helps.length ? `${mine.helps.length} helping` : ''].filter(Boolean).join(', '))
+        : 'nothing works it yet'
+    }</span>
+    ${main.length ? `<p class="sublabel">Main exercises (${main.length})</p><ul class="exlist">${main.map(row).join('')}</ul>` : '<p class="hint">No exercise in the database has it as a main muscle.</p>'}
+    ${helps.length ? `<details class="exmore"><summary>Also helped by ${helps.length} exercise${helps.length === 1 ? '' : 's'}</summary><ul class="exlist">${helps.map(row).join('')}</ul></details>` : ''}`;
+}
+
+function muscleListsHtml(d) {
+  const u = musUi();
+  const rows = Muscles.MUSCLES.map((m) => ({ m, n: d.value[m.key], lv: Muscles.level(d.value[m.key], d.scale) }));
+  const max = Math.max(...rows.map((r) => r.n), 1);
+  const rowHtml = ({ m, n, lv }, sub) =>
+    `<button type="button" class="mrow" data-action="musPick" data-key="${m.key}" style="--c:var(--m${lv})"><span class="sw"></span><span class="mtx"><b>${esc(m.name)}</b><span>${esc(sub)}</span></span><span class="n">${
+      d.mode === 'mine' ? esc(fmtSets(n)) : ''
+    }</span><span class="bar"><i style="width:${(n / max) * 100}%"></i></span></button>`;
+  let groups;
+  if (d.mode === 'mine' && d.scale === 'week') {
+    groups = [
+      ['Needs more work', 'under 5 sets', rows.filter((r) => r.lv <= 1).sort((a, b) => a.n - b.n)],
+      ['Some work', '5–9 sets', rows.filter((r) => r.lv === 2).sort((a, b) => b.n - a.n)],
+      ['On target', '10 sets or more', rows.filter((r) => r.lv >= 3).sort((a, b) => b.n - a.n)],
+    ];
+  } else if (d.mode === 'mine') {
+    const day = formatDate(u.day || todayISO(), false);
+    groups = [
+      [`Trained on ${day}`, '', rows.filter((r) => r.n > 0).sort((a, b) => b.n - a.n)],
+      [`Not trained on ${day}`, '', rows.filter((r) => r.n === 0)],
+    ];
+  } else {
+    const areas = [...new Set(Muscles.MUSCLES.map((m) => m.area))];
+    groups = areas.map((a) => [a, '', rows.filter((r) => r.m.area === a)]);
+  }
+  const html = groups
+    .filter(([, , list]) => list.length)
+    .map(([title, note, list]) =>
+      group(title, `<span class="note">${esc(note || `${list.length} muscle${list.length === 1 ? '' : 's'}`)}</span>`, `<div class="card flush">${list
+        .map((r) => {
+          if (d.mode === 'mine') return rowHtml(r, r.m.area);
+          const c = d.cov.mine[r.m.key];
+          const total = Muscles.exercisesFor(d.db, r.m.key).main.length;
+          return rowHtml(r, `${total} exercises · your plan: ${c.main.length ? `${c.main.length} main` : c.helps.length ? 'helping only' : 'none'}`);
+        })
+        .join('')}</div>`),
+    )
+    .join('');
+  const unmatched = d.mode === 'mine' ? d.t.unmatched : [];
+  return (
+    html +
+    (unmatched.length
+      ? `<p class="hint">Not in the exercise database, counted by their muscle group from More → Exercises: ${esc(unmatched.join(', '))}. Add them to the Sheet's Exercises tab for an exact count.</p>`
+      : '')
+  );
+}
+
+function renderMuscles() {
+  const u = musUi();
+  const d = musData();
+  const today = todayISO();
+  if (!u.day) u.day = today;
+  const days = Array.from({ length: 7 }, (_, i) => Progress.addDays(today, i - 6));
+  const views = [['front', 'Front'], ['back', 'Back'], ['left', 'Left side'], ['right', 'Right side']];
+  const ex = state.exdb;
+  return `
+    <h1 class="large">Muscles</h1>
+    <p class="sub">${d.mode === 'mine' ? 'Hard sets per muscle from your workouts · warm-ups not counted' : 'Every exercise in the database, and how your plan covers each muscle'}</p>
+    <div class="seg2" role="tablist" aria-label="Show">
+      <button type="button" role="tab" data-action="musMode" data-mode="mine" aria-selected="${d.mode === 'mine'}">My workout</button>
+      <button type="button" role="tab" data-action="musMode" data-mode="all" aria-selected="${d.mode === 'all'}">All exercises</button>
+    </div>
+    ${
+      d.mode === 'mine'
+        ? `<div class="seg2 slim" role="tablist" aria-label="Period">
+            <button type="button" role="tab" data-action="musPeriod" data-period="week" aria-selected="${u.period !== 'day'}">Last 7 days</button>
+            <button type="button" role="tab" data-action="musPeriod" data-period="day" aria-selected="${u.period === 'day'}">One day</button>
+          </div>
+          ${
+            u.period === 'day'
+              ? `<div class="days7">${days
+                  .map(
+                    (x) => `<button type="button" data-action="musDay" data-day="${x}" aria-pressed="${x === u.day}"><span>${esc(WEEKDAYS[new Date(Date.parse(x)).getUTCDay()].slice(0, 3))}</span><b>${Number(x.slice(8))}</b></button>`,
+                  )
+                  .join('')}</div>`
+              : ''
+          }`
+        : ''
+    }
+    <div class="card flush mcard">
+      <div class="views4" role="tablist" aria-label="View">${views
+        .map(([v, l]) => `<button type="button" role="tab" data-action="musView" data-view="${v}" aria-selected="${u.view === v}">${l}</button>`)
+        .join('')}</div>
+      <div class="mstage" id="mstage">
+        <svg id="mfig" viewBox="0 0 200 460" role="img" aria-label="Body, muscles coloured. Tap a muscle, or use the lists below.">${figureSvg(u.view, d)}</svg>
+        <div class="stage-hint" id="mhint">Tap a muscle · pinch or double-tap to zoom</div>
+        <div class="mlabel" id="mlabel" hidden></div>
+        <div class="zoomctl">
+          <button type="button" data-action="musZoom" data-zoom="in" aria-label="Zoom in">+</button>
+          <button type="button" data-action="musZoom" data-zoom="out" aria-label="Zoom out">−</button>
+          <button type="button" data-action="musZoom" data-zoom="reset" aria-label="Show the whole body" id="mzoom-reset" hidden>1×</button>
+        </div>
+      </div>
+      <div class="picked" id="mpicked">${pickedHtml(d)}</div>
+      <div class="scale">${Muscles.LEVELS[d.scale].map(([, label], i) => `<div style="--c:var(--m${i})">${esc(label)}</div>`).join('')}</div>
+    </div>
+    ${muscleListsHtml(d)}
+    ${group(
+      'Exercise database',
+      '',
+      `<div class="card stack">
+        <p class="hint" style="margin:0">${d.db.list.length} exercises · ${
+          d.fromSheet ? `from your Sheet's Exercises tab${ex?.fetchedAt ? `, read ${esc(formatDate(new Date(ex.fetchedAt).toISOString().slice(0, 10), false))}` : ''}` : 'the built-in list (it is copied to your Sheet once it is connected)'
+        }. Add or change exercises in the Sheet: main and helping muscles by the names shown here, separated by commas.</p>
+        ${d.db.unknown.length ? `<p class="small warn-text" style="margin:0">⚠️ Muscle names the app does not know (fix them in the Sheet): ${esc(d.db.unknown.join(', '))}</p>` : ''}
+        <button type="button" class="btn secondary" data-action="musReload" ${haveApi() ? '' : 'disabled'}>Reload from the Sheet</button>
+      </div>`,
+    )}`;
+}
+
+/* ---------- figure: zoom, tap, swipe ---------- */
+
+function musViewBox() {
+  const vb = musUi().vb;
+  return vb ? { ...vb } : { ...MFULL };
+}
+
+function musApplyZoom(vb) {
+  vb.w = Math.min(MFULL.w, Math.max(MFULL.w / MMAX_ZOOM, vb.w));
+  vb.h = vb.w * (MFULL.h / MFULL.w);
+  vb.x = Math.min(MFULL.w - vb.w, Math.max(0, vb.x));
+  vb.y = Math.min(MFULL.h - vb.h, Math.max(0, vb.y));
+  const zoomed = vb.w < MFULL.w - 0.5;
+  musUi().vb = zoomed ? vb : null;
+  const fig = document.getElementById('mfig');
+  if (!fig) return;
+  const box = zoomed ? vb : MFULL; // exactly the whole body when not zoomed
+  fig.setAttribute('viewBox', `${box.x} ${box.y} ${box.w} ${box.h}`);
+  document.getElementById('mstage').classList.toggle('zoomed', zoomed);
+  document.getElementById('mzoom-reset').hidden = !zoomed;
+  musPlaceLabel(null);
+}
+
+/** Screen point → drawing coordinates (preserveAspectRatio letterboxes the drawing in the stage). */
+function musToSvg(cx, cy) {
+  const vb = musViewBox();
+  const r = document.getElementById('mfig').getBoundingClientRect();
+  const s = Math.min(r.width / vb.w, r.height / vb.h);
+  return { x: vb.x + (cx - (r.left + (r.width - vb.w * s) / 2)) / s, y: vb.y + (cy - (r.top + (r.height - vb.h * s) / 2)) / s, s };
+}
+
+function musZoomAt(factor, cx, cy) {
+  const vb = musViewBox();
+  const p = musToSvg(cx, cy);
+  const w = Math.min(MFULL.w, Math.max(MFULL.w / MMAX_ZOOM, vb.w / factor));
+  const k = w / vb.w;
+  musApplyZoom({ x: p.x - (p.x - vb.x) * k, y: p.y - (p.y - vb.y) * k, w, h: w * (MFULL.h / MFULL.w) });
+}
+
+function musZoomCentre(factor) {
+  const r = document.getElementById('mfig').getBoundingClientRect();
+  musZoomAt(factor, r.left + r.width / 2, r.top + r.height / 2);
+}
+
+/** The name label over the picked muscle (or where it was tapped); hidden when this view does not show it. */
+function musPlaceLabel(tap) {
+  const lbl = document.getElementById('mlabel');
+  const stage = document.getElementById('mstage');
+  if (!lbl || !stage) return;
+  const key = musUi().picked;
+  const el = key && stage.querySelector(`[data-m="${key}"]`);
+  if (!el) {
+    lbl.hidden = true;
+    return;
+  }
+  const st = stage.getBoundingClientRect();
+  let x;
+  let y;
+  if (tap) {
+    x = tap.x - st.left;
+    y = tap.y - st.top;
+  } else {
+    const r = el.getBoundingClientRect();
+    x = r.left + r.width / 2 - st.left;
+    y = r.top + r.height / 2 - st.top;
+  }
+  lbl.textContent = Muscles.BY_KEY[key].name;
+  lbl.hidden = !(y > 0 && y < st.height);
+  const half = lbl.offsetWidth / 2 + 6;
+  lbl.style.left = `${Math.min(st.width - half, Math.max(half, x))}px`;
+  lbl.style.top = `${y}px`;
+}
+
+/** Pick (or clear) a muscle without re-rendering the screen. */
+function musPick(key, tap) {
+  const u = musUi();
+  u.picked = key;
+  const stage = document.getElementById('mstage');
+  if (!stage) return;
+  for (const p of stage.querySelectorAll('#mfig .m')) p.classList.toggle('on', p.dataset.m === key);
+  document.getElementById('mpicked').innerHTML = pickedHtml(musData());
+  musPlaceLabel(tap);
+}
+
+function musSetView(v) {
+  const u = musUi();
+  u.view = v;
+  u.vb = null;
+  render();
+}
+
+let musGesture = null;
+let musLastTap = 0;
+function afterMusclesRender() {
+  const stage = document.getElementById('mstage');
+  if (!stage) return;
+  musApplyZoom(musViewBox());
+  const pts = new Map();
+  stage.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('.zoomctl')) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try {
+      stage.setPointerCapture(e.pointerId);
+    } catch {}
+    if (pts.size === 1) musGesture = { kind: 'tap', x0: e.clientX, y0: e.clientY, last: { x: e.clientX, y: e.clientY }, target: e.target };
+    else if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      musGesture = { kind: 'pinch', dist: Math.hypot(a.x - b.x, a.y - b.y) };
+    }
+  });
+  stage.addEventListener('pointermove', (e) => {
+    if (!pts.has(e.pointerId) || !musGesture) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const g = musGesture;
+    if (g.kind === 'pinch' && pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      if (g.dist > 0) musZoomAt(dist / g.dist, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      g.dist = dist;
+      return;
+    }
+    if (pts.size !== 1) return;
+    if (g.kind === 'tap' && Math.hypot(e.clientX - g.x0, e.clientY - g.y0) > 6) g.kind = musUi().vb ? 'pan' : 'swipe';
+    if (g.kind === 'pan') {
+      const vb = musViewBox();
+      const s = musToSvg(0, 0).s;
+      vb.x -= (e.clientX - g.last.x) / s;
+      vb.y -= (e.clientY - g.last.y) / s;
+      musApplyZoom(vb);
+    }
+    g.last = { x: e.clientX, y: e.clientY };
+  });
+  const end = (e) => {
+    if (!pts.has(e.pointerId)) return;
+    pts.delete(e.pointerId);
+    const g = musGesture;
+    if (!g) return;
+    if (g.kind === 'pinch') {
+      musGesture = pts.size ? { kind: 'done' } : null;
+      return;
+    }
+    if (pts.size) return;
+    musGesture = null;
+    const dx = e.clientX - g.x0;
+    const dy = e.clientY - g.y0;
+    if (g.kind === 'swipe' && Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
+      const order = ['front', 'left', 'back', 'right'];
+      const i = order.indexOf(musUi().view);
+      musSetView(order[(i + (dx < 0 ? 1 : 3)) % 4]);
+      return;
+    }
+    if (g.kind !== 'tap' || e.type === 'pointercancel') return;
+    const now = performance.now();
+    if (now - musLastTap < 300) {
+      musLastTap = 0;
+      if (musUi().vb) musApplyZoom({ ...MFULL });
+      else musZoomAt(2.5, e.clientX, e.clientY);
+      return;
+    }
+    musLastTap = now;
+    const m = g.target.closest && g.target.closest('#mfig .m');
+    const hint = document.getElementById('mhint');
+    if (hint) hint.style.opacity = '0';
+    musPick(m ? m.dataset.m : null, m ? { x: e.clientX, y: e.clientY } : null);
+  };
+  stage.addEventListener('pointerup', end);
+  stage.addEventListener('pointercancel', end);
+  stage.addEventListener(
+    'wheel',
+    (e) => {
+      e.preventDefault();
+      musZoomAt(Math.exp(-e.deltaY * 0.0025), e.clientX, e.clientY);
+    },
+    { passive: false },
+  );
+  for (const ev of ['gesturestart', 'gesturechange']) stage.addEventListener(ev, (e) => e.preventDefault());
+}
+
 const trackActions = {
+  musMode(el) {
+    musUi().mode = el.dataset.mode === 'all' ? 'all' : 'mine';
+    render();
+  },
+  musPeriod(el) {
+    musUi().period = el.dataset.period === 'day' ? 'day' : 'week';
+    render();
+  },
+  musDay(el) {
+    musUi().day = el.dataset.day;
+    render();
+  },
+  musView(el) {
+    musSetView(el.dataset.view);
+  },
+  // A muscle tapped in a list: show it on the figure (turning to a view that has it) and in the panel.
+  musPick(el) {
+    const u = musUi();
+    const k = el.dataset.key;
+    u.picked = k;
+    if (!Muscles.FIG[u.view === 'right' ? 'left' : u.view].some((l) => l[1] === k)) {
+      u.view = Muscles.VIEW_OF[k] || 'front';
+      u.vb = null;
+    }
+    render();
+    document.getElementById('mstage')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  },
+  musZoom(el) {
+    const z = el.dataset.zoom;
+    if (z === 'in') musZoomCentre(1.6);
+    else if (z === 'out') musZoomCentre(1 / 1.6);
+    else musApplyZoom({ ...MFULL });
+  },
+  musReload() {
+    toast('Reading the Sheet…');
+    refreshExercises(true).then((got) => toast(got ? 'Exercise database updated from the Sheet' : 'Could not read the Sheet: check the signal and the Apps Script version', got ? 'ok' : 'error'));
+  },
   openExercise(el) {
     go('progress', el.dataset.name);
   },

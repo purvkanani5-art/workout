@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '2.0.1';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -37,6 +37,7 @@ const KEYS = {
   recovery: 'wt.recovery', // [{ date, sleepHours, sleepScore, rhr, hrv, soreness, score }] one per day (v1.7)
   recoveryOutbox: 'wt.recoveryOutbox', // [{ date, … }] the owner's morning answers waiting for the Recovery tab
   recoveryFetchedAt: 'wt.recoveryFetchedAt', // last time the Shortcut's numbers were fetched from the Sheet
+  exdb: 'wt.exdb', // { rows, fetchedAt }: the Sheet's Exercises tab, cached for the muscle map (v2.0)
 };
 
 // Weekday (0 = Sunday) → day type; '' = rest. The owner trains Monday to Saturday. Editable in Settings.
@@ -233,7 +234,9 @@ const state = {
   smallOutbox: load(KEYS.smallOutbox, null), // null = never set up: v1.5.1 entries get queued once (below)
   recovery: load(KEYS.recovery, []),
   recoveryOutbox: load(KEYS.recoveryOutbox, []),
+  exdb: load(KEYS.exdb, null),
   ui: {
+    muscles: { mode: 'mine', period: 'week', day: null, view: 'front', picked: null, vb: null }, // Muscles tab
     morning: { soreness: null, sleepScore: '' }, // Home's morning check, before it is saved
     progress: { metric: 'e1rm', range: '12w' },
     body: { field: null, range: '12w', weighIn: '', draft: null },
@@ -508,6 +511,47 @@ async function fetchRecovery({ force = false } = {}) {
   } catch {
     return false; // offline or an older Apps Script: the morning card still works with what it has
   }
+}
+
+/* ------------------------------------------------- exercise database (v2.0, Exercises tab) */
+
+let exdbCache = null;
+/** The exercise database: the Sheet's rows when they have been read, else the built-in starting list. */
+function exerciseDb() {
+  const rows = state.exdb && Array.isArray(state.exdb.rows) && state.exdb.rows.length ? state.exdb.rows : null;
+  if (!exdbCache || exdbCache.rows !== rows) {
+    exdbCache = { rows, db: Muscles.buildDb(rows || Muscles.seedRows()), fromSheet: Boolean(rows) };
+  }
+  return exdbCache;
+}
+
+/** Read the Exercises tab (at most every 6 hours unless forced). An empty tab gets the starting list written once;
+    the script never writes over rows that are there, so the owner's edits stay. */
+async function fetchExercises({ force = false } = {}) {
+  if (!haveApi()) return false;
+  const ex = state.exdb || {};
+  if (!force && ex.fetchedAt && Date.now() - ex.fetchedAt < 6 * 3600000) return false;
+  try {
+    let rows = (await apiGet({ action: 'exercises' })).rows;
+    if (!Array.isArray(rows)) rows = [];
+    if (!rows.length) {
+      await apiPost({ action: 'exercises', rows: Muscles.seedRows() });
+      const again = (await apiGet({ action: 'exercises' })).rows;
+      rows = Array.isArray(again) && again.length ? again : Muscles.seedRows();
+    }
+    state.exdb = { rows, fetchedAt: Date.now() };
+    save(KEYS.exdb, state.exdb);
+    return true;
+  } catch {
+    return false; // offline, or an Apps Script older than v2.0: the built-in list is used meanwhile
+  }
+}
+
+function refreshExercises(force = false) {
+  return fetchExercises({ force }).then((got) => {
+    if (got && route().name === 'muscles') render();
+    return got;
+  });
 }
 
 /* ------------------------------------------------- body fat and calories (v1.7) */
@@ -1182,9 +1226,25 @@ function render() {
     case 'history':
       html = arg ? renderHistoryDetail(arg) : renderHistory();
       break;
-    case 'settings':
-      html = renderSettings();
+    case 'workout':
+      // The Workout tab goes straight back to an open workout.
+      if (state.draft) return go(state.draft.finishedAt ? 'review' : 'entry');
+      html = renderWorkoutHome();
       break;
+    case 'muscles':
+      html = renderMuscles();
+      break;
+    case 'more':
+      html = renderMore();
+      break;
+    case 'settings': {
+      const sec = SETTINGS_SECTIONS[arg] ? arg : null;
+      if (!sec) return go('more');
+      html = `<div class="topbar"><a class="btn link" href="#more">‹ More</a></div>
+        <h1 class="large">${esc(SETTINGS_SECTIONS[sec][0])}</h1>
+        <div class="settings-page">${renderSettings()}</div>`;
+      break;
+    }
     case 'progress':
       html = arg ? renderExerciseProgress(arg) : renderProgress();
       break;
@@ -1199,8 +1259,13 @@ function render() {
   }
   // Leaving the photo screens locks the vault, so decrypted photos never sit behind another screen.
   if (name !== 'photos') lockVault();
-  app.innerHTML = html;
+  app.innerHTML = html + tabBar(tabOf(name));
+  if (name === 'settings') {
+    // One settings section per page: the others stay in the page (their handlers are shared) but hidden.
+    for (const s of app.querySelectorAll('section[data-sec]')) s.hidden = s.dataset.sec !== arg;
+  }
   if (name === 'photos') afterPhotosRender();
+  if (name === 'muscles') afterMusclesRender();
   if (name === 'entry') tickTimer();
   if (name !== 'review' && state.ui.submit.status !== 'idle' && state.ui.submit.status !== 'sending') {
     state.ui.submit = { status: 'idle', message: '', session: null };
@@ -1218,57 +1283,178 @@ function topbar(title, back = null, links = []) {
     </div>`;
 }
 
+/* ------------------------------------------------- v2.0: app shell, Today, Workout, More */
+
+/** A named group: heading (+ something on the right) over its content. */
+function group(title, right, body) {
+  return `<section class="sgroup">
+    <div class="ghead"><h2>${esc(title)}</h2>${right || ''}</div>
+    ${body}
+  </section>`;
+}
+
+/** The bottom tab bar (all screens). `tab` is the one shown as current. */
+function tabBar(tab) {
+  const d = state.draft;
+  const live = d && !d.finishedAt && d.sets.length ? `<span class="live">${d.sets.length}</span>` : '';
+  const T = [
+    ['home', 'Today', '<path d="M12 3v2M12 19v2M4.2 7.5l1.7 1M18.1 15.5l1.7 1M3 12h2M19 12h2M4.2 16.5l1.7-1M18.1 8.5l1.7-1"/><circle cx="12" cy="12" r="4"/>'],
+    ['workout', 'Workout', '<rect x="2.5" y="8.5" width="3" height="7" rx="1"/><rect x="18.5" y="8.5" width="3" height="7" rx="1"/><rect x="5.5" y="6.5" width="3" height="11" rx="1"/><rect x="15.5" y="6.5" width="3" height="11" rx="1"/><path d="M8.5 12h7"/>'],
+    ['muscles', 'Muscles', '<path d="M7 4.5c1.5 2 3.2 2.5 5 2.5s3.5-.5 5-2.5"/><path d="M5 9c2 1.2 3.5 1.5 4.5 1.5M19 9c-2 1.2-3.5 1.5-4.5 1.5"/><path d="M9.5 10.5c-.5 2-.3 4 .5 5.5l-1 5M14.5 10.5c.5 2 .3 4-.5 5.5l1 5M10 16h4"/>'],
+    ['progress', 'Progress', '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>'],
+    ['body', 'Body', '<circle cx="12" cy="4.5" r="2.2"/><path d="M6 9l6 1 6-1M12 10v5M9 21l3-6 3 6"/>'],
+    ['more', 'More', '<path d="M4 6h16M4 12h16M4 18h16"/>'],
+  ];
+  return `<nav class="tabbar" aria-label="Sections">${T.map(
+    ([key, label, icon]) => `<a class="tab" href="#${key}" ${tab === key ? 'aria-current="page"' : ''}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icon}</svg>${label}${key === 'workout' ? live : ''}</a>`,
+  ).join('')}</nav>`;
+}
+
+/** Which tab a route belongs to. */
+function tabOf(name) {
+  if (name === 'entry' || name === 'review' || name === 'workout') return 'workout';
+  if (name === 'history' || name === 'settings' || name === 'more' || name === 'photos') return 'more';
+  return ['progress', 'body', 'muscles'].includes(name) ? name : 'home';
+}
+
+const TICK = '<span class="tickmark" aria-label="done">✓</span>';
+
+/** "Log today": morning check, weight and small workout, one tap each (Today and Body). */
+function dailyLog() {
+  const today = todayISO();
+  const e = recoveryEntry(today) || {};
+  const morningDone = Number.isFinite(e.soreness) && !state.ui.morning.editing;
+  const wf = weightField();
+  const weighIn = wf ? state.measurements.filter((m) => m.date === today && Number.isFinite(m.values?.[wf])).pop() : null;
+  const small = state.small.filter((s) => s.date === today).sort((a, b) => a.time.localeCompare(b.time));
+  const done = [morningDone, Boolean(weighIn), small.length > 0].filter(Boolean).length;
+  const last = wf ? lastValue(wf) : null;
+  const html = `<div class="card flush">
+      <div class="drow">${appIcon('heart', 'pink')}
+        <div class="tx"><b>Morning check ${morningDone ? TICK : ''}</b><span>${
+          morningDone ? esc(`Soreness ${e.soreness}/10${Number.isFinite(e.sleepScore) ? ` · sleep score ${e.sleepScore}` : ''}`) : 'Soreness and the Watch sleep score'
+        }</span></div>
+        ${morningDone ? '<button type="button" class="btn small pill" data-action="morningEdit">Edit</button>' : ''}
+      </div>
+      ${morningDone ? '' : `<div class="dform">${morningForm()}</div>`}
+      ${
+        wf
+          ? `<div class="drow">${appIcon('scale', 'teal')}
+        <div class="tx"><b>Weight ${weighIn ? TICK : ''}</b><span>${
+          weighIn ? esc(`${fmtKg(weighIn.values[wf])} kg saved`) : last !== null ? esc(`Last ${fmtKg(last)} kg`) : 'Morning, before food'
+        }</span></div>
+        ${
+          weighIn
+            ? ''
+            : `<span class="inline"><label for="weigh-in" class="sr-only">Today's weight</label><input id="weigh-in" class="input mini" type="number" inputmode="decimal" step="0.1" min="0" placeholder="kg" value="${esc(state.ui.body.weighIn)}" data-input="weighIn" /><button type="button" class="btn small pill" data-action="saveWeighIn">Save</button></span>`
+        }
+      </div>`
+          : ''
+      }
+      <div class="drow">${appIcon('bolt', 'yellow')}
+        <div class="tx"><b>Small workout ${small.length ? TICK : ''}</b><span>${
+          small.length ? esc(`${small.length} today · last ${small[small.length - 1].time}`) : 'Push-ups, a walk… one tap logs the time'
+        }</span></div>
+        <button type="button" class="btn small pill" data-action="smallNow">+ Log</button>
+      </div>
+    </div>`;
+  return { html, done, total: wf ? 3 : 2 };
+}
+
+/** Today's training: the workout in progress, done today, today's plan, or a rest day. */
+function trainingCard() {
+  const today = todayISO();
+  const d = state.draft;
+  if (d) {
+    return `<div class="card stack">
+      <div><b class="big-name">${esc(d.dayType)}</b><p class="hint">${
+        d.finishedAt ? 'Finished, not sent yet: add how it went, heart rate and calories.' : `${d.sets.length} set${d.sets.length === 1 ? '' : 's'} logged · ${esc(formatDate(d.date))}`
+      }</p></div>
+      <div class="row-btns"><button type="button" class="btn primary" data-action="resume">${d.finishedAt ? 'Finish up' : 'Resume workout'}</button>
+      <button type="button" class="btn danger" data-action="discardDraft">Discard</button></div>
+    </div>`;
+  }
+  const doneToday = state.history.filter((s) => s.date === today);
+  if (doneToday.length) {
+    const s = doneToday[0];
+    return `<div class="card"><div class="done-today"><div class="tick">✓</div><div><b>${esc(s.dayType)} done</b><p class="hint">${esc(
+      [`${s.sets.length} sets`, s.score ? `rated ${s.score}/10` : '', s.synced ? 'in the Sheet' : 'waiting to sync'].filter(Boolean).join(' · '),
+    )}</p></div></div><a class="btn link small" href="#workout">Start another workout ›</a></div>`;
+  }
+  const planned = scheduledDay(today);
+  if (!planned) {
+    return `<div class="card stack"><p style="margin:0"><b>Rest day</b> on your schedule.</p><a class="btn secondary" href="#workout">Start a workout anyway</a></div>`;
+  }
+  const list = dayExercises(planned);
+  const last = state.history.filter((s) => s.dayType === planned && s.date < today).map((s) => s.date).sort().pop();
+  return `<div class="card stack">
+    <div><b class="big-name">${esc(planned)}</b><p class="hint">${list.length} exercise${list.length === 1 ? '' : 's'}${last ? ` · last done ${esc(formatDate(last, false))}` : ''}</p></div>
+    <div class="plan-lines">${list
+      .slice(0, 3)
+      .map((n) => `<div class="plan-line"><i></i><span>${esc(n)}</span><span class="n">${esc(planText(planned, n) || '')}</span></div>`)
+      .join('')}${list.length > 3 ? `<p class="hint">+ ${list.length - 3} more${state.cardio[planned] ? ` · then ${esc(state.cardio[planned])}` : ''}</p>` : ''}</div>
+    ${nextWorkoutHtml(planned)}
+    <button type="button" class="btn primary" data-action="startToday">Start ${esc(planned)}</button>
+    <a class="btn link small" href="#workout">Another day ›</a>
+  </div>`;
+}
+
+/** Calorie target, weight trend and body fat in one card. */
+function nutritionCard() {
+  const { calc, bf, weight } = calorieState();
+  const lock = state.settings.calorieLock;
+  const rows = [];
+  if (calc.target || lock) {
+    rows.push(['Calorie target', `${(lock?.target ?? calc.target).toLocaleString('en-IN')}`, 'kcal a day · enter in MyFitnessPal', lock ? `set ${formatDate(lock.date, false)}` : '', '']);
+  }
+  if (weight) rows.push(['Weight', `${fmtKg(weight.kg)} kg`, weight.n >= 3 ? `average of ${weight.n} weigh-ins` : `on ${formatDate(weight.date, false)}`, '', '']);
+  if (bf) rows.push(['Body fat', `${fmtKg(bf.bf)}%`, `US Navy · ${formatDate(bf.date, false)}`, '', '']);
+  if (!rows.length) return '<div class="card"><p class="hint" style="margin:0">Weigh in and add your height in More → Calories &amp; body fat to see your calorie target here.</p></div>';
+  return `<div class="card kvs">${rows
+    .map(([k, v, h, d]) => `<div class="kv"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div><div class="h">${esc(h)}</div><div class="d">${esc(d)}</div></div>`)
+    .join('')}</div>`;
+}
+
 function renderHome() {
+  const today = todayISO();
+  const log = dailyLog();
+  const e = recoveryEntry(today) || {};
+  const morningDone = Number.isFinite(e.soreness) && !state.ui.morning.editing;
+  const attention = homeBanners();
+  const waiting = state.outbox.length;
+  if (waiting) {
+    attention.unshift(`<div class="banner warn">
+      <p class="title">${waiting} workout${waiting === 1 ? '' : 's'} waiting to sync</p>
+      <p class="small muted" style="margin:0">${haveApi() ? 'Will retry when the app opens or comes back online.' : 'Add the script URL and token in More → Google Sheet first.'}</p>
+      <div class="actions"><button type="button" class="btn" data-action="retryNow" ${state.ui.syncing ? 'disabled' : ''}>${state.ui.syncing ? 'Syncing…' : 'Retry now'}</button></div>
+    </div>`);
+  }
+  return `
+    <div class="brandrow">
+      <img class="logo" src="./icons/icon.svg" alt="" width="44" height="44" />
+      <div><div class="brandname">Bhimlekha</div><h1 class="large">Today</h1></div>
+    </div>
+    <p class="sub">${esc(WEEKDAYS[new Date().getDay()])}, ${esc(formatDate(today))}</p>
+    ${group('Log today', `<span class="freq">Daily · ${log.done} of ${log.total} done</span>`, log.html)}
+    ${morningDone ? group('Recovery', '', morningCard()) : ''}
+    ${group('Training', '', trainingCard())}
+    ${group('Nutrition & body', '<a class="btn link small" href="#body">Body ›</a>', nutritionCard())}
+    ${attention.length ? group('Needs attention', `<span class="count">${attention.length}</span>`, `<div class="attention">${attention.join('')}</div>`) : ''}`;
+}
+
+/** Workout tab when nothing is running: start any day, then recent workouts. */
+function renderWorkoutHome() {
   const d = state.draft;
   const st = state.ui.start;
-  const waiting = state.outbox.length;
   const planned = /^\d{4}-\d{2}-\d{2}$/.test(st.date) ? scheduledDay(st.date) : '';
   if (!state.ui.startPicked && planned && DAY_TYPES.includes(planned)) st.dayType = planned;
+  const recent = sortedHistory().slice(0, 5);
   return `
-    <div class="topbar">
-      <div class="brand">
-        <img src="./icons/icon.svg" alt="" width="32" height="32" />
-        <h1 class="card-title">Bhimlekha</h1>
-      </div>
-      <a class="btn link" href="#settings">Settings</a>
-    </div>
-    <nav class="tabs" aria-label="Sections">
-      <a class="btn" href="#history">History</a>
-      <a class="btn" href="#progress">Progress</a>
-      <a class="btn" href="#body">Body</a>
-    </nav>
-    ${homeBanners()}
-    ${
-      d
-        ? `<div class="banner ${d.finishedAt ? 'warn' : ''}">
-            <p class="title">${
-              d.finishedAt
-                ? `Workout finished — ${esc(d.dayType)} · not sent yet`
-                : `Resume workout — ${esc(d.dayType)} · ${d.sets.length} set${d.sets.length === 1 ? '' : 's'} logged`
-            }</p>
-            <p class="small muted" style="margin:0">${esc(formatDate(d.date))}${d.finishedAt ? ' · add how it went, heart rate and calories, then submit' : ''}</p>
-            <div class="actions">
-              <button type="button" class="btn" data-action="resume">${d.finishedAt ? 'Finish up' : 'Resume'}</button>
-              <button type="button" class="btn danger" data-action="discardDraft">Discard</button>
-            </div>
-          </div>`
-        : ''
-    }
-    ${
-      waiting
-        ? `<div class="banner warn">
-            <p class="title">${waiting} workout${waiting === 1 ? '' : 's'} waiting to sync</p>
-            <p class="small muted" style="margin:0">${
-              haveApi() ? 'Will retry when the app opens or comes back online.' : 'Add the script URL and token in Settings first.'
-            }</p>
-            <div class="actions">
-              <button type="button" class="btn" data-action="retryNow" ${state.ui.syncing ? 'disabled' : ''}>${state.ui.syncing ? 'Syncing…' : 'Retry now'}</button>
-            </div>
-          </div>`
-        : ''
-    }
-    <section class="card stack">
-      <h2 class="section-title" style="margin:0">Start workout</h2>
+    <h1 class="large">Workout</h1>
+    <p class="sub">${d ? 'A workout is open' : 'Nothing running'}</p>
+    ${d ? group('Open workout', '', trainingCard()) : ''}
+    ${group('Start a workout', '', `<section class="card stack">
       ${nextWorkoutHtml(planned)}
       <fieldset>
         <legend>Day</legend>
@@ -1296,7 +1482,98 @@ function renderHome() {
       </div>
       <button type="button" class="btn primary" data-action="startWorkout">${d ? 'Start a new workout' : 'Start workout'}</button>
       ${d ? '<p class="hint" style="text-align:center">Starting a new workout keeps the current one until you discard it.</p>' : ''}
-    </section>`;
+    </section>`)}
+    ${group(
+      'Recent',
+      '<a class="btn link small" href="#history">All ›</a>',
+      recent.length
+        ? `<div class="card flush">${recent
+            .map(
+              (s) => `<button type="button" class="lrow" data-action="openSession" data-id="${esc(s.id)}">${appIcon('check', s.synced ? 'green' : 'grey')}
+                <span class="tx"><b>${esc(s.dayType)} · ${esc(formatDate(s.date, false))}</b><span>${esc(
+                  [`${s.sets.length} sets`, fmtVolume(sessionVolume(s)), s.score ? `${s.score}/10` : '', s.synced ? 'in the Sheet' : 'waiting to sync'].filter(Boolean).join(' · '),
+                )}</span></span>${CHEV}</button>`,
+            )
+            .join('')}</div>`
+        : '<div class="card"><p class="hint" style="margin:0">Your workouts show here.</p></div>',
+    )}`;
+}
+
+/* iOS-Settings-style icons: a coloured rounded square with a white glyph. */
+const GLYPHS = {
+  calendar: '<rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/>',
+  dumbbell: '<rect x="2" y="9" width="3" height="6" rx="1"/><rect x="19" y="9" width="3" height="6" rx="1"/><rect x="5" y="7" width="3" height="10" rx="1"/><rect x="16" y="7" width="3" height="10" rx="1"/><path d="M8 12h8"/>',
+  trend: '<path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/>',
+  timer: '<circle cx="12" cy="13" r="8"/><path d="M12 13V9M10 2h4M12 2v3"/>',
+  flame: '<path d="M12 21c4 0 7-2.8 7-7 0-3.5-2.5-6-4-8 0 2.5-1.5 4-3 4 0-3-1.5-5.5-4-7 .3 3-3 5.5-3 10 0 4.2 3 8 7 8z"/>',
+  heart: '<path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10z"/><path d="M6 12h3l1.5-2.5 2 5 1.5-2.5h4" stroke-width="1.6"/>',
+  ruler: '<rect x="2.5" y="8" width="19" height="8" rx="1.5"/><path d="M6 8v3M9.5 8v4.5M13 8v3M16.5 8v4.5M20 8v3"/>',
+  camera: '<path d="M4 8h3l1.6-2.5h6.8L17 8h3a1.5 1.5 0 0 1 1.5 1.5v8.5A1.5 1.5 0 0 1 20 19.5H4A1.5 1.5 0 0 1 2.5 18V9.5A1.5 1.5 0 0 1 4 8z"/><circle cx="12" cy="13.5" r="3.5"/>',
+  sheet: '<rect x="4.5" y="3" width="15" height="18" rx="2"/><path d="M4.5 9h15M4.5 14.5h15M10 9v12"/>',
+  download: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v2.5h16V17"/>',
+  cloud: '<path d="M7 18h10.5a4 4 0 0 0 .5-8 6 6 0 0 0-11.5 1.5A3.3 3.3 0 0 0 7 18z"/><path d="M12 11v5M9.5 13.5L12 11l2.5 2.5"/>',
+  history: '<path d="M3.5 12a8.5 8.5 0 1 0 2.5-6"/><path d="M3 4v4h4"/><path d="M12 8v4.5l3 2"/>',
+  bolt: '<path d="M13 2L4.5 13.5H11L10 22l8.5-11.5H12z"/>',
+  lock: '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
+  check: '<path d="M8 3.5h8M7 6h10v14H7z"/><path d="M9.5 13l2 2 3.5-4"/>',
+  scale: '<rect x="3.5" y="3.5" width="17" height="17" rx="4"/><path d="M8 9a5.5 5.5 0 0 1 8 0"/><path d="M12 9.5l1.5-2"/>',
+  chat: '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/>',
+  leaf: '<path d="M5 19c0-8 5-13 14-14-1 9-6 14-14 14z"/><path d="M5 19l7-7"/>',
+  body: '<circle cx="12" cy="4.5" r="2.2"/><path d="M6 9l6 1 6-1M12 10v5M9 21l3-6 3 6"/>',
+};
+const ICON_BG = {
+  red: 'linear-gradient(#ff6961,#e5463e)', ink: 'linear-gradient(#4a3f38,#17120f)', green: 'linear-gradient(#58d27b,#2f8a55)', grey: 'linear-gradient(#a1a1a6,#6e6e73)',
+  saffron: 'linear-gradient(#ffa95a,#f07f1e)', pink: 'linear-gradient(#ff7a95,#e5395f)', teal: 'linear-gradient(#5ccfe6,#1e94c4)', purple: 'linear-gradient(#b48cff,#7a4ee0)',
+  gsheet: 'linear-gradient(#3fbf68,#188038)', blue: 'linear-gradient(#5c9bff,#2f63e0)', sky: 'linear-gradient(#7fc8ff,#3a8fe0)', indigo: 'linear-gradient(#7d7aff,#4b45d6)',
+  orange: 'linear-gradient(#ff9f45,#e8611a)', yellow: 'linear-gradient(#ffd84d,#f2a516)',
+};
+function appIcon(glyph, bg) {
+  return `<span class="appicon" style="background:${ICON_BG[bg]}"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${GLYPHS[glyph]}</svg></span>`;
+}
+const CHEV = '<svg class="chev" width="9" height="15" viewBox="0 0 10 16" aria-hidden="true"><path d="M2 2l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
+
+// Settings sections opened from More: [data-sec name, title, icon, colour, one-line summary].
+const SETTINGS_SECTIONS = {
+  schedule: ['Schedule', 'calendar', 'red'], exercises: ['Exercises & plans', 'dumbbell', 'ink'], progression: ['Progression', 'trend', 'green'],
+  logging: ['Logging & rest timer', 'timer', 'grey'], questions: ['End-of-workout questions', 'chat', 'indigo'], recovery: ['Lighter weeks', 'leaf', 'green'],
+  calories: ['Calories & body fat', 'flame', 'saffron'], recoveryScore: ['Recovery score & Shortcut', 'heart', 'pink'], body: ['Measurements & photos', 'ruler', 'teal'],
+  sheet: ['Google Sheet', 'sheet', 'gsheet'], copy: ['Settings copy', 'cloud', 'sky'], backup: ['Backup', 'download', 'blue'],
+};
+
+function renderMore() {
+  const s = state.settings;
+  const row = (href, glyph, bg, title, sub) =>
+    `<a class="lrow" href="#${href}">${appIcon(glyph, bg)}<span class="tx"><b>${esc(title)}</b>${sub ? `<span>${esc(sub)}</span>` : ''}</span>${CHEV}</a>`;
+  const sec = (key, sub) => row(`settings/${key}`, SETTINGS_SECTIONS[key][1], SETTINGS_SECTIONS[key][2], SETTINGS_SECTIONS[key][0], sub);
+  const missedOpen = state.missed.filter((m) => !m.reason).length;
+  const sched = s.schedule || DEFAULT_SCHEDULE;
+  return `
+    <h1 class="large">More</h1>
+    <p class="sub">Settings, history and your data</p>
+    ${group('Training', '', `<div class="card flush">
+      ${sec('schedule', [1, 2, 3, 4, 5, 6, 0].map((i) => sched[i] ? `${WEEKDAYS[i].slice(0, 3)} ${sched[i]}` : '').filter(Boolean).slice(0, 2).join(' · ') + ' …')}
+      ${sec('exercises', `${manageDays().length} days · ${allKnownExercises().length} exercises`)}
+      ${sec('progression', 'When to add weight, warnings')}
+      ${sec('logging', `Reps buttons · rest ${s.restSeconds} s · RIR ${s.requireRir ? 'on' : 'off'}`)}
+      ${sec('questions', `${questions().length} questions after each workout`)}
+      ${sec('recovery', 'Lighter week alerts')}
+    </div>`)}
+    ${group('Body & health', '', `<div class="card flush">
+      ${sec('calories', s.calorieLock ? `${s.calorieLock.target.toLocaleString('en-IN')} kcal a day` : 'Height, goal, rate')}
+      ${sec('recoveryScore', 'Weights, baseline, morning Shortcut')}
+      ${sec('body', `${measureFields().length} measurements · ${poses().length} poses`)}
+      ${row('photos', 'lock', 'purple', 'Progress photos', 'Encrypted on this phone')}
+    </div>`)}
+    ${group('History', '', `<div class="card flush">
+      ${row('history', 'history', 'indigo', 'Workouts and missed days', `${state.history.length} workouts${missedOpen ? ` · ${missedOpen} missed without a reason` : ''}`)}
+      ${row('body', 'bolt', 'yellow', 'Small workouts and measurements', `${state.small.length} small workouts · ${state.measurements.length} entries`)}
+    </div>`)}
+    ${group('Your data', '', `<div class="card flush">
+      ${sec('sheet', haveApi() ? 'Connected' : 'Not connected yet')}
+      ${sec('copy', state.backup.linked ? 'Saved in the Sheet' : 'Not linked yet')}
+      ${sec('backup', 'Export or import a JSON file')}
+    </div>`)}
+    <div class="about"><img class="logo lg" src="./icons/icon.svg" alt="" width="64" height="64" /><b>Bhimlekha</b><span class="hint">भीमलेखा · Bhima's record · v${esc(APP_VERSION)}</span></div>`;
 }
 
 /** "Today · Tuesday: Pull A", when it was last done, and muscle groups left untrained too long. */
@@ -1366,7 +1643,7 @@ function morningCard() {
   ].filter(Boolean);
   const watchLine = fromWatch.length
     ? `⌚ From your Watch: ${fromWatch.join(' · ')}`
-    : '⌚ Waiting for the morning Shortcut (sleep, resting HR, HRV). Settings → Recovery score shows how to set it up.';
+    : '⌚ Waiting for the morning Shortcut (sleep, resting HR, HRV). More → Recovery score shows how to set it up.';
   const answered = Number.isFinite(e.soreness) && !ui.editing;
   if (answered) {
     const r = recoveryResult(today);
@@ -1379,9 +1656,24 @@ function morningCard() {
       <div class="actions"><button type="button" class="btn link" data-action="morningEdit">Change answers</button></div>
     </div>`;
   }
+  return `<div class="banner"><p class="title">Morning check</p>${morningForm()}</div>`;
+}
+
+/** The morning questions: soreness (required) and the Watch sleep score, with the Shortcut's numbers above. */
+function morningForm() {
+  const today = todayISO();
+  const e = recoveryEntry(today) || {};
+  const ui = state.ui.morning;
+  const fromWatch = [
+    Number.isFinite(e.sleepHours) ? `${e.sleepHours.toFixed(1)} h sleep` : '',
+    Number.isFinite(e.rhr) ? `resting HR ${Math.round(e.rhr)}` : '',
+    Number.isFinite(e.hrv) ? `HRV ${Math.round(e.hrv)} ms` : '',
+  ].filter(Boolean);
+  const watchLine = fromWatch.length
+    ? `⌚ From your Watch: ${fromWatch.join(' · ')}`
+    : '⌚ Waiting for the morning Shortcut (sleep, resting HR, HRV). More → Recovery score shows how to set it up.';
   const sore = ui.soreness ?? (Number.isFinite(e.soreness) ? e.soreness : null);
-  return `<div class="banner">
-      <p class="title">Morning check</p>
+  return `
       <p class="small muted" style="margin:0">${esc(watchLine)}</p>
       <div class="matrix-row" style="margin-top:8px">
         <div class="q">Soreness <span class="small muted">1 = none · 10 = very sore</span></div>
@@ -1393,8 +1685,7 @@ function morningCard() {
         <label for="sleep-score">Sleep score from the Watch (optional, 0–100)</label>
         <input id="sleep-score" class="input" type="number" inputmode="numeric" min="0" max="100" placeholder="e.g. 82" value="${esc(ui.sleepScore || (Number.isFinite(e.sleepScore) ? e.sleepScore : ''))}" data-input="morningSleepScore" />
       </div>
-      <div class="actions"><button type="button" class="btn" data-action="morningSave">Save</button></div>
-    </div>`;
+      <div class="actions"><button type="button" class="btn" data-action="morningSave">Save</button></div>`;
 }
 
 /** A new calorie target to enter in MyFitnessPal, until the owner confirms it is entered. */
@@ -1408,9 +1699,9 @@ function calorieBanner() {
     </div>`;
 }
 
+/** Everything on Today that needs attention, as a list of banners (empty ones left out). */
 function homeBanners() {
   const out = [];
-  out.push(morningCard());
   out.push(calorieBanner());
   out.push(missedCard());
   out.push(weekSummaryHome());
@@ -1445,7 +1736,7 @@ function homeBanners() {
       <div class="actions"><a class="btn" href="#photos">Open Photos</a></div>
     </div>`);
   }
-  return out.join('');
+  return out.filter(Boolean);
 }
 
 /** Weekly check-in: due on the check-in day until one is logged, and overdue once a week has passed. */
@@ -1986,8 +2277,7 @@ function renderSettings() {
   const day = manageDays().includes(ui.manageDay) ? ui.manageDay : manageDays()[0];
   const list = state.exercises[day] || [];
   return `
-    ${topbar('Settings', { href: 'home', label: 'Home' })}
-    <section class="card stack">
+    <section class="card stack" data-sec="sheet">
       <h2 class="section-title" style="margin:0">Google Sheet</h2>
       <div>
         <label for="script-url">Apps Script web app URL</label>
@@ -2004,7 +2294,7 @@ function renderSettings() {
       ${ui.ping ? `<div class="status ${ui.ping.ok === null ? '' : ui.ping.ok ? 'ok' : 'rejected'}" role="status">${esc(ui.ping.message)}</div>` : ''}
     </section>
 
-    <section class="card stack">
+    <section class="card stack" data-sec="logging">
       <h2 class="section-title" style="margin:0">Logging</h2>
       <div>
         <label for="rest-seconds">Default rest (seconds)</label>
@@ -2036,7 +2326,7 @@ function renderSettings() {
     ${renderCalorieSettings()}
     ${renderRecoveryScoreSettings()}
 
-    <section class="card stack">
+    <section class="card stack" data-sec="questions">
       <h2 class="section-title" style="margin:0">End-of-workout questions</h2>
       <p class="hint" style="margin:0">Optional, each rated 1–5 on the Review screen. "How was the workout" (1–10), heart rate and calories are always asked and required.</p>
       ${
@@ -2064,7 +2354,7 @@ function renderSettings() {
       </div>
     </section>
 
-    <section class="card stack">
+    <section class="card stack" data-sec="exercises">
       <h2 class="section-title" style="margin:0">Exercises</h2>
       <div>
         <label for="manage-day">Day</label>
@@ -2113,14 +2403,14 @@ function renderSettings() {
 
     ${renderSettingsCopy()}
 
-    <section class="card stack">
+    <section class="card stack" data-sec="backup">
       <h2 class="section-title" style="margin:0">Backup</h2>
       <button type="button" class="btn secondary" data-action="exportData">Export local data (JSON)</button>
       <button type="button" class="btn secondary" data-action="importData">Import from JSON…</button>
       <input id="import-file" type="file" accept="application/json,.json" class="sr-only" data-change="importFile" />
       <p class="hint">The export includes workouts, measurements, settings, your script URL and token so a new phone can be set up from it. Keep the file private. Photos are not in it: they have their own encrypted backup on the Photos screen.</p>
-    </section>
-    <p class="version">Bhimlekha v${esc(APP_VERSION)} · भीमलेखा</p>`;
+      <p class="version">Bhimlekha v${esc(APP_VERSION)} · भीमलेखा</p>
+    </section>`;
 }
 
 /** Weekly schedule (drives "today's workout" and missed days) and the reasons offered for a missed day. */
@@ -2129,7 +2419,7 @@ function renderScheduleSettings() {
   const days = [1, 2, 3, 4, 5, 6, 0];
   const options = [...new Set([...manageDays().filter((d) => d !== 'Custom'), ...Object.values(sched).filter(Boolean)])];
   return `
-    <section class="card stack">
+    <section class="card stack" data-sec="schedule">
       <div>
         <h2 class="section-title" style="margin:0">Schedule & missed workouts</h2>
         <p class="hint">Home suggests the day's workout. A scheduled day that passes with no workout is marked missed (you don't make it up; the next day's workout follows), asks for a reason, and goes to the Sheet's Missed tab.</p>
@@ -2180,7 +2470,7 @@ function renderSettingsCopy() {
   const b = state.backup;
   const status = settingsCopyStatus();
   return `
-    <section class="card stack">
+    <section class="card stack" data-sec="copy">
       <div>
         <h2 class="section-title" style="margin:0">Settings copy in the Sheet</h2>
         <p class="hint">Exercises, plans, schedule, buttons, questions, progression, recovery and lighter weeks are saved to the Sheet's Settings tab after every change, so a new phone gets them back. The Sheet URL and token are not in it; photos never are.</p>
@@ -2221,7 +2511,7 @@ const PROGRESSION_FIELDS = [
 function renderProgressionSettings() {
   const p = state.settings.progression;
   return `
-    <section class="card stack">
+    <section class="card stack" data-sec="progression">
       <div>
         <h2 class="section-title" style="margin:0">Progression</h2>
         <p class="hint">Double progression: keep the weight until every set reaches the top of the plan's rep range with reps in reserve, in enough sessions spread over the week timer, then add a step. Rep ranges come from each exercise's plan (Exercises below).</p>
@@ -2254,7 +2544,7 @@ function renderRecoverySettings() {
       <input id="rec-${key}" class="input" type="number" inputmode="decimal" min="0" step="${step}" value="${esc(r[key])}" data-change="recoveryNum" data-key="${key}" />
     </div>`;
   return `
-    <section class="card stack">
+    <section class="card stack" data-sec="recovery">
       <div>
         <h2 class="section-title" style="margin:0">Recovery (lighter week)</h2>
         <p class="hint">The alert fires when any switched-on trigger is met. Workouts during a lighter week are left out of progress, so they never set off warnings.</p>
@@ -2288,7 +2578,7 @@ function renderBodySettings() {
       )
       .join('')}</ul>`;
   return `
-    <section class="card stack">
+    <section class="card stack" data-sec="body">
       <h2 class="section-title" style="margin:0">Body & photos</h2>
       <div>
         <label for="checkin-day">Check-in day</label>
@@ -2350,7 +2640,7 @@ function renderCalorieSettings() {
   const p = state.settings.profile || {};
   const c = state.settings.calories;
   return `
-    <section class="card stack">
+    <section class="card stack" data-sec="calories">
       <h2 class="section-title" style="margin:0">Calories &amp; body fat</h2>
       <p class="hint" style="margin:0">Body fat: US Navy tape method from the check-in (men: neck and abdomen at the navel; women: neck, waist and hips). Calories: Katch-McArdle with a recent body fat reading, else Mifflin-St Jeor.</p>
       <div class="two">
@@ -2406,7 +2696,7 @@ const RECOVERY_SCORE_FIELDS = [
 function renderRecoveryScoreSettings() {
   const r = state.settings.recoveryScore;
   return `
-    <section class="card stack">
+    <section class="card stack" data-sec="recoveryScore">
       <h2 class="section-title" style="margin:0">Recovery score</h2>
       <p class="hint" style="margin:0">Each morning: sleep, HRV and resting HR come from an iPhone Shortcut; soreness and the Watch sleep score you tap on Home. HRV and resting HR are judged against your own last ${esc(r.baselineDays)} days, not fixed numbers. Advice only: nothing is locked.</p>
       <div class="two">
@@ -2702,6 +2992,27 @@ const actions = {
     state.ui.timer = null;
     saveDraft();
     go('review');
+  },
+
+  /** Today's "Start <day>": the scheduled day for today, no questions asked. */
+  startToday() {
+    const today = todayISO();
+    const planned = scheduledDay(today);
+    if (!planned) return go('workout');
+    const known = DAY_TYPES.includes(planned);
+    state.ui.start = { dayType: known ? planned : 'Custom', custom: known ? '' : planned, date: today };
+    state.ui.startPicked = true;
+    return actions.startWorkout();
+  },
+
+  /** "+ Log" on a small workout: now, no note (both can be changed on Body). */
+  smallNow() {
+    const entry = { id: uuid(), date: todayISO(), time: nowTime(), note: '', savedAt: nowISO() };
+    state.small = [...state.small, entry];
+    save(KEYS.small, state.small);
+    queueSmall(entry);
+    toast(`Small workout logged · ${entry.time}`);
+    render();
   },
 
   async resetCalories() {
@@ -3924,6 +4235,7 @@ function bindEvents() {
       if (detectMissed() && route().name === 'home') render(); // a new day may have passed
       syncOutbox();
       refreshRecovery();
+      refreshExercises();
       if (route().name === 'entry') tickTimer();
     }
   });
@@ -3950,3 +4262,4 @@ render();
 registerServiceWorker();
 syncOutbox();
 refreshRecovery();
+refreshExercises();

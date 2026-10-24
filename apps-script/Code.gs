@@ -19,6 +19,8 @@
  *   POST {scriptUrl}                       body: { token, action: "recovery", entry: {...} }       (the app)
  *   POST {scriptUrl}                       body: { token, action: "recovery", sleep, rhr, hrv }    (iPhone Shortcut)
  *   GET  {scriptUrl}?action=recovery&token=…&days=60
+ *   POST {scriptUrl}                       body: { token, action: "exercises", rows: [...] }  (seed, empty tab only)
+ *   GET  {scriptUrl}?action=exercises&token=…
  *
  * Log: one row per set. Writing is idempotent by Session ID: submitting the same session twice adds
  * nothing and returns { ok: true, duplicate: true, rows: 0 }.
@@ -67,6 +69,10 @@ var R_SHEET_NAME = 'Recovery';
 // score, soreness and the recovery score it works out. Each writer only fills the cells it sends.
 var R_HEADERS = ['Date', 'Sleep (h)', 'Sleep score', 'Resting HR (bpm)', 'HRV (ms)', 'Soreness (1-10)', 'Recovery score', 'Updated at', 'Source'];
 var R_FIELDS = { sleepHours: 2, sleepScore: 3, rhr: 4, hrv: 5, soreness: 6, score: 7 };
+var E_SHEET_NAME = 'Exercises';
+// The exercise database for the muscle map: one row per exercise. Muscles are written by their gym names, separated
+// by commas. The app writes its starting list once (only into an empty tab); after that the owner edits it here.
+var E_HEADERS = ['Exercise', 'Equipment', 'Main muscles', 'Helping muscles', 'Notes'];
 // Column numbers (1-based) used below. Notes to Satisfaction are per-session and filled on a session's first row
 // only; RIR (reps in reserve, 3 = "3 or more") and Warm-up are per set and were added after the first version.
 var COL = {
@@ -86,6 +92,7 @@ function setup() {
   Logger.log('Sheet "%s" is ready.', getSmallSheet_().getName());
   Logger.log('Sheet "%s" is ready.', getSettingsSheet_().getName());
   Logger.log('Sheet "%s" is ready.', getRecoverySheet_().getName());
+  Logger.log('Sheet "%s" is ready.', getExerciseSheet_().getName());
   var token = PropertiesService.getScriptProperties().getProperty('TOKEN');
   if (token) {
     Logger.log('TOKEN is set. Deploy → New deployment → Web app (Execute as Me, Anyone) and copy the /exec URL.');
@@ -150,6 +157,7 @@ function doGet(e) {
     if (p.action === 'small') return json_({ ok: true, entries: smallList_() });
     if (p.action === 'settings') return json_(readSettings_());
     if (p.action === 'recovery') return json_({ ok: true, entries: recoveryList_(Number(p.days) || 60) });
+    if (p.action === 'exercises') return json_({ ok: true, rows: exerciseRows_() });
     return json_({ ok: false, error: 'unknown action' });
   } catch (err) {
     return json_({ ok: false, error: String((err && err.message) || err) });
@@ -171,6 +179,7 @@ function doPost(e) {
   if (body.action === 'settings') return writeSettings_(body.data, body.savedAt);
   // The iPhone Shortcut sends a flat body ({ token, action, sleep, rhr, hrv }); the app sends { entry: {...} }.
   if (body.action === 'recovery') return recovery_(body.entry || body, body.entry ? 'app' : 'shortcut');
+  if (body.action === 'exercises') return seedExercises_(body.rows);
   if (body.action !== 'submit') return json_({ ok: false, error: 'unknown action' });
 
   var session = body.session;
@@ -688,6 +697,57 @@ function recoveryList_(days) {
       return { date: d, sleepHours: cell(r[1]), sleepScore: cell(r[2]), rhr: cell(r[3]), hrv: cell(r[4]), soreness: cell(r[5]), score: cell(r[6]) };
     })
     .filter(function (e) { return /^\d{4}-\d{2}-\d{2}$/.test(e.date) && e.date >= cutoffText; });
+}
+
+/* ---------------------------------------------------------------- Exercises */
+
+function getExerciseSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(E_SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(E_SHEET_NAME);
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, E_HEADERS.length).setValues([E_HEADERS]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+/** Write the app's starting exercise list, but only into an empty tab: the owner's edits are never overwritten. */
+function seedExercises_(rows) {
+  if (!Array.isArray(rows) || !rows.length) return json_({ ok: false, error: 'no rows' });
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var sheet = getExerciseSheet_();
+    if (sheet.getLastRow() >= 2) return json_({ ok: true, written: 0, existing: sheet.getLastRow() - 1 });
+    var values = rows
+      .filter(function (r) { return r && String(r.name || '').trim(); })
+      .map(function (r) {
+        return [String(r.name).trim(), String(r.equipment || ''), String(r.main || ''), String(r.helps || ''), String(r.notes || '')];
+      });
+    if (!values.length) return json_({ ok: false, error: 'no rows' });
+    sheet.getRange(2, 1, values.length, E_HEADERS.length).setValues(values);
+    return json_({ ok: true, written: values.length });
+  } catch (err) {
+    return json_({ ok: false, error: String((err && err.message) || err) });
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (ignore) {}
+  }
+}
+
+function exerciseRows_() {
+  var sheet = getExerciseSheet_();
+  var last = sheet.getLastRow();
+  if (last < 2) return [];
+  return sheet
+    .getRange(2, 1, last - 1, E_HEADERS.length)
+    .getValues()
+    .filter(function (r) { return String(r[0] || '').trim(); })
+    .map(function (r) {
+      return { name: String(r[0]).trim(), equipment: String(r[1] || ''), main: String(r[2] || ''), helps: String(r[3] || ''), notes: String(r[4] || '') };
+    });
 }
 
 /* ---------------------------------------------------------------- Settings */
