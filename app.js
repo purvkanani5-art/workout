@@ -4,13 +4,14 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '1.6.1';
+const APP_VERSION = '1.7.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
 const DEFAULT_QUESTIONS = ['Energy', 'Strength', 'Focus', 'Pump', 'Enjoyment']; // satisfaction matrix, 1–5 each
 const RIR_CHOICES = [0, 1, 2, 3]; // reps in reserve; 3 means "3 or more"
-const DEFAULT_MEASURE_FIELDS = ['Bodyweight (kg)', 'Waist (cm)', 'Chest (cm)', 'Arm L (cm)', 'Arm R (cm)', 'Thigh L (cm)', 'Thigh R (cm)', 'Hips (cm)', 'Neck (cm)'];
+// Waist = where the waistband sits; Abdomen = at the navel (the US Navy body fat formula for men uses the abdomen).
+const DEFAULT_MEASURE_FIELDS = ['Bodyweight (kg)', 'Waist (cm)', 'Abdomen (cm)', 'Chest (cm)', 'Arm L (cm)', 'Arm R (cm)', 'Thigh L (cm)', 'Thigh R (cm)', 'Hips (cm)', 'Neck (cm)'];
 const DEFAULT_POSES = ['Front', 'Side', 'Back'];
 const MUSCLE_GROUPS = ['Chest', 'Shoulders', 'Triceps', 'Back', 'Rear delts', 'Biceps', 'Quads', 'Hamstrings', 'Glutes', 'Calves', 'Core', 'Lower back'];
 const LOWER_MUSCLES = ['Quads', 'Hamstrings', 'Glutes', 'Calves', 'Lower back'];
@@ -33,6 +34,9 @@ const KEYS = {
   backup: 'wt.backup', // { linked, dirty, sentAt, error }: the settings copy in the Sheet's Settings tab
   small: 'wt.small', // [{ id, date, time, note, savedAt }] "Small workout" check-ins
   smallOutbox: 'wt.smallOutbox', // [{ id, entry }] waiting for the Sheet's Small workouts tab (entry.deleted = remove)
+  recovery: 'wt.recovery', // [{ date, sleepHours, sleepScore, rhr, hrv, soreness, score }] one per day (v1.7)
+  recoveryOutbox: 'wt.recoveryOutbox', // [{ date, … }] the owner's morning answers waiting for the Recovery tab
+  recoveryFetchedAt: 'wt.recoveryFetchedAt', // last time the Shortcut's numbers were fetched from the Sheet
 };
 
 // Weekday (0 = Sunday) → day type; '' = rest. The owner trains Monday to Saturday. Editable in Settings.
@@ -201,7 +205,11 @@ const state = {
     lastDeload: null, // YYYY-MM-DD of the last lighter week (v1.1; kept as a fallback for `deloads`)
     deloads: [], // [{ start, end }] lighter weeks; their workouts are left out of the progress maths
     snoozeUntil: null, // "Not now" on the recovery alert hides it until this date
+    profile: { sex: 'male', dob: '', heightCm: null }, // for body fat and calories (v1.7)
+    calorieLock: null, // { target, weightKg, date, bfDate, reason, prev, seen } the number to enter in MyFitnessPal
     ...savedSettings,
+    calories: { ...Body.CALORIE_DEFAULTS, ...(savedSettings.calories || {}) },
+    recoveryScore: { ...Body.RECOVERY_SCORE_DEFAULTS, ...(savedSettings.recoveryScore || {}) },
     progression: { ...Progress.PROGRESSION_DEFAULTS, ...(savedSettings.progression || {}) },
     recovery: {
       ...Progress.RECOVERY_DEFAULTS,
@@ -223,7 +231,10 @@ const state = {
   backup: load(KEYS.backup, { linked: false, dirty: false, sentAt: null, error: '' }),
   small: load(KEYS.small, []),
   smallOutbox: load(KEYS.smallOutbox, null), // null = never set up: v1.5.1 entries get queued once (below)
+  recovery: load(KEYS.recovery, []),
+  recoveryOutbox: load(KEYS.recoveryOutbox, []),
   ui: {
+    morning: { soreness: null, sleepScore: '' }, // Home's morning check, before it is saved
     progress: { metric: 'e1rm', range: '12w' },
     body: { field: null, range: '12w', weighIn: '', draft: null },
     vault: { status: 'unknown', items: [], busy: '', backup: null, compare: null, viewing: null, pose: null, faceId: null, faceStep: '', weekFiles: {}, openWeek: null },
@@ -426,6 +437,131 @@ async function syncSmallFromSheet() {
   } catch {}
 }
 
+/* -------------------------------------------- recovery score (v1.7, Recovery tab) */
+
+const RECOVERY_KEYS = ['sleepHours', 'sleepScore', 'rhr', 'hrv', 'soreness', 'score'];
+
+function recoveryEntry(date) {
+  return state.recovery.find((e) => e.date === date) || null;
+}
+
+/** Merge numbers into one day's entry (only the keys given). */
+function putRecovery(date, values) {
+  const e = recoveryEntry(date) || { date };
+  for (const k of RECOVERY_KEYS) if (values[k] !== undefined) e[k] = values[k];
+  state.recovery = [...state.recovery.filter((x) => x.date !== date), e].sort((a, b) => a.date.localeCompare(b.date)).slice(-120);
+  save(KEYS.recovery, state.recovery);
+  return e;
+}
+
+function recoveryResult(date = todayISO()) {
+  return Body.recoveryScore(state.recovery, date, state.settings.recoveryScore);
+}
+
+/** Queue the app's own fields for the Sheet; one item per date, newest values win. */
+function queueRecovery(date, values) {
+  const old = state.recoveryOutbox.find((x) => x.date === date) || { date };
+  state.recoveryOutbox = [...state.recoveryOutbox.filter((x) => x.date !== date), { ...old, ...values, date }];
+  save(KEYS.recoveryOutbox, state.recoveryOutbox);
+  syncOutbox();
+}
+
+async function syncRecoveryOutbox() {
+  for (const item of [...state.recoveryOutbox]) {
+    try {
+      await apiPost({ action: 'recovery', entry: item });
+    } catch {
+      break; // offline, or an Apps Script older than v1.7: kept for later
+    }
+    state.recoveryOutbox = state.recoveryOutbox.filter((x) => x !== item);
+    save(KEYS.recoveryOutbox, state.recoveryOutbox);
+  }
+}
+
+/** Keep today's score in the Sheet in step once the Shortcut's numbers and the owner's answers are both in. */
+function storeRecoveryScore(date) {
+  const r = recoveryResult(date);
+  const e = recoveryEntry(date);
+  if (!r || r.score === null || !e || e.soreness === undefined || e.soreness === null || e.score === r.score) return;
+  putRecovery(date, { score: r.score });
+  queueRecovery(date, { score: r.score });
+}
+
+/** The Shortcut's sleep, resting HR and HRV from the Sheet (at most every 20 minutes unless forced). Values this
+    phone has not sent yet win over the Sheet's. */
+async function fetchRecovery({ force = false } = {}) {
+  if (!haveApi()) return false;
+  const last = load(KEYS.recoveryFetchedAt, 0);
+  if (!force && Date.now() - last < 20 * 60000) return false;
+  try {
+    const data = await apiGet({ action: 'recovery', days: 60 });
+    save(KEYS.recoveryFetchedAt, Date.now());
+    for (const e of Array.isArray(data.entries) ? data.entries : []) {
+      if (!e || !/^\d{4}-\d{2}-\d{2}$/.test(String(e.date))) continue;
+      const pending = state.recoveryOutbox.find((x) => x.date === e.date) || {};
+      const values = {};
+      for (const k of RECOVERY_KEYS) if (e[k] !== null && e[k] !== undefined && pending[k] === undefined) values[k] = Number(e[k]);
+      putRecovery(e.date, values);
+    }
+    storeRecoveryScore(todayISO());
+    return true;
+  } catch {
+    return false; // offline or an older Apps Script: the morning card still works with what it has
+  }
+}
+
+/* ------------------------------------------------- body fat and calories (v1.7) */
+
+function bodyFatSeries() {
+  return Body.bodyFatSeries(state.measurements, state.settings.profile || {}, measureFields(), weightField());
+}
+
+/** Today's numbers: { calc (Body.calorieTarget), bf (latest reading), weight }. */
+function calorieState(today = todayISO()) {
+  const series = bodyFatSeries();
+  const bf = series[series.length - 1] || null;
+  const weight = weightField() ? Body.currentWeight(state.measurements, weightField(), today) : null;
+  const calc = Body.calorieTarget({ profile: state.settings.profile || {}, c: state.settings.calories, weight, bf, sessions: state.history, today });
+  return { calc, bf, weight, series };
+}
+
+/**
+ * Move the target the owner enters in MyFitnessPal when the rules say so (Body.shouldUpdateTarget): the first
+ * time, a new body fat reading, 5 kg of weight change, or a weekly change of 100 kcal or more. `force` = settings
+ * changed, so the new number applies at once. A change shows on Home until the owner confirms it is entered.
+ */
+function updateCalorieTarget({ force = false } = {}) {
+  const today = todayISO();
+  const { calc, bf } = calorieState(today);
+  if (!calc.target) return false;
+  const lock = state.settings.calorieLock;
+  const reason = force && (!lock || lock.target !== calc.target) ? 'settings' : Body.shouldUpdateTarget(lock, calc, bf?.date || null, state.settings.calories, today);
+  if (!reason) return false;
+  state.settings.calorieLock = {
+    target: calc.target,
+    weightKg: calc.weightKg,
+    bf: calc.bf,
+    method: calc.method,
+    date: today,
+    bfDate: bf?.date || null,
+    reason,
+    prev: lock?.target ?? null,
+    seen: Boolean(lock) && lock.target === calc.target, // nothing to re-enter when the number is the same
+  };
+  save(KEYS.settings, state.settings);
+  return true;
+}
+
+const TARGET_REASON = {
+  first: 'first calculation',
+  'body fat': 'new body fat reading',
+  weight: 'bodyweight moved',
+  week: 'weekly recalculation',
+  settings: 'your settings changed',
+};
+
+/* ---------------------------------------------------------------------------- */
+
 /** Exercises planned on a day type (the plan as it is now). */
 function dayExercises(dayType) {
   return state.exercises[dayType] || [];
@@ -515,6 +651,8 @@ function applySettingsSnapshot(data) {
     token: state.settings.token,
     progression: { ...Progress.PROGRESSION_DEFAULTS, ...(s.progression || {}) },
     recovery: { ...Progress.RECOVERY_DEFAULTS, ...(s.recovery || {}) },
+    calories: { ...Body.CALORIE_DEFAULTS, ...(s.calories || {}) },
+    recoveryScore: { ...Body.RECOVERY_SCORE_DEFAULTS, ...(s.recoveryScore || {}) },
     // This phone may not hold the past workouts yet, so it looks for missed days only from today; the
     // earlier ones come from the Sheet's Missed tab.
     scheduleFrom: todayISO(),
@@ -755,6 +893,19 @@ if (!state.cardio) {
   save(KEYS.cardio, state.cardio);
 }
 for (const day of DAY_TYPES) if (day !== 'Custom' && !state.exercises[day]) state.exercises[day] = [];
+
+// v1.7: the US Navy body fat formula needs the abdomen at the navel, measured apart from the waist (where the
+// waistband sits). Added once after Waist to a saved list that has no abdomen field.
+if (!state.settings.abdomenAdded) {
+  const list = [...measureFields()];
+  if (!list.some((f) => /abdomen|navel/i.test(f))) {
+    const at = list.findIndex((f) => /waist/i.test(f));
+    list.splice(at >= 0 ? at + 1 : list.length, 0, 'Abdomen (cm)');
+    state.settings.measureFields = list;
+  }
+  state.settings.abdomenAdded = true;
+  save(KEYS.settings, state.settings);
+}
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -1021,6 +1172,7 @@ function render() {
   switch (name) {
     case 'entry':
       if (!state.draft) return go('home');
+      if (state.draft.finishedAt) return go('review'); // a finished workout is closed: Reopen is on the review
       html = renderEntry();
       break;
     case 'review':
@@ -1088,11 +1240,15 @@ function renderHome() {
     ${homeBanners()}
     ${
       d
-        ? `<div class="banner">
-            <p class="title">Resume workout — ${esc(d.dayType)} · ${d.sets.length} set${d.sets.length === 1 ? '' : 's'} logged</p>
-            <p class="small muted" style="margin:0">${esc(formatDate(d.date))}</p>
+        ? `<div class="banner ${d.finishedAt ? 'warn' : ''}">
+            <p class="title">${
+              d.finishedAt
+                ? `Workout finished — ${esc(d.dayType)} · not sent yet`
+                : `Resume workout — ${esc(d.dayType)} · ${d.sets.length} set${d.sets.length === 1 ? '' : 's'} logged`
+            }</p>
+            <p class="small muted" style="margin:0">${esc(formatDate(d.date))}${d.finishedAt ? ' · add how it went, heart rate and calories, then submit' : ''}</p>
             <div class="actions">
-              <button type="button" class="btn" data-action="resume">Resume</button>
+              <button type="button" class="btn" data-action="resume">${d.finishedAt ? 'Finish up' : 'Resume'}</button>
               <button type="button" class="btn danger" data-action="discardDraft">Discard</button>
             </div>
           </div>`
@@ -1191,8 +1347,71 @@ function missedCard() {
 }
 
 /** Weight increases due, the weekly check-in, and photos waiting for a backup. */
+const RECOVERY_ADVICE = {
+  green: '🟢 Train as planned.',
+  amber: '🟠 Train, but keep the weights and do one set fewer per exercise. Stop each set with a rep or two in reserve.',
+  red: '🔴 Make it a light session (lighter-week rules: about half the sets, 10% less weight) or rest today.',
+};
+
+/** Home's morning check: soreness and the Watch sleep score from the owner, sleep / RHR / HRV from the Shortcut,
+    then the day's recovery score with what to do about it. Advice only: it never locks anything. */
+function morningCard() {
+  const today = todayISO();
+  const e = recoveryEntry(today) || {};
+  const ui = state.ui.morning;
+  const fromWatch = [
+    Number.isFinite(e.sleepHours) ? `${e.sleepHours.toFixed(1)} h sleep` : '',
+    Number.isFinite(e.rhr) ? `resting HR ${Math.round(e.rhr)}` : '',
+    Number.isFinite(e.hrv) ? `HRV ${Math.round(e.hrv)} ms` : '',
+  ].filter(Boolean);
+  const watchLine = fromWatch.length
+    ? `⌚ From your Watch: ${fromWatch.join(' · ')}`
+    : '⌚ Waiting for the morning Shortcut (sleep, resting HR, HRV). Settings → Recovery score shows how to set it up.';
+  const answered = Number.isFinite(e.soreness) && !ui.editing;
+  if (answered) {
+    const r = recoveryResult(today);
+    return `<div class="banner recovery-score ${esc(r?.band || '')}">
+      <p class="title">Recovery ${r && r.score !== null ? `<strong>${r.score}</strong>/100` : ''}</p>
+      ${r?.band ? `<p class="small" style="margin:0">${esc(RECOVERY_ADVICE[r.band])}</p>` : ''}
+      <p class="small muted" style="margin:6px 0 0">${esc((r?.parts || []).map((p) => `${p.label} ${p.score} (${p.detail})`).join(' · '))}</p>
+      ${(r?.notes || []).map((n) => `<p class="small muted" style="margin:2px 0 0">${esc(n)}</p>`).join('')}
+      ${fromWatch.length ? '' : `<p class="small muted" style="margin:2px 0 0">${esc(watchLine)}</p>`}
+      <div class="actions"><button type="button" class="btn link" data-action="morningEdit">Change answers</button></div>
+    </div>`;
+  }
+  const sore = ui.soreness ?? (Number.isFinite(e.soreness) ? e.soreness : null);
+  return `<div class="banner">
+      <p class="title">Morning check</p>
+      <p class="small muted" style="margin:0">${esc(watchLine)}</p>
+      <div class="matrix-row" style="margin-top:8px">
+        <div class="q">Soreness <span class="small muted">1 = none · 10 = very sore</span></div>
+        <div class="chips ten" role="group" aria-label="Soreness">${Array.from({ length: 10 }, (_, i) => i + 1)
+          .map((n) => `<button type="button" class="chip" data-action="morningSoreness" data-value="${n}" aria-pressed="${sore === n}">${n}</button>`)
+          .join('')}</div>
+      </div>
+      <div>
+        <label for="sleep-score">Sleep score from the Watch (optional, 0–100)</label>
+        <input id="sleep-score" class="input" type="number" inputmode="numeric" min="0" max="100" placeholder="e.g. 82" value="${esc(ui.sleepScore || (Number.isFinite(e.sleepScore) ? e.sleepScore : ''))}" data-input="morningSleepScore" />
+      </div>
+      <div class="actions"><button type="button" class="btn" data-action="morningSave">Save</button></div>
+    </div>`;
+}
+
+/** A new calorie target to enter in MyFitnessPal, until the owner confirms it is entered. */
+function calorieBanner() {
+  const lock = state.settings.calorieLock;
+  if (!lock || lock.seen) return '';
+  return `<div class="banner">
+      <p class="title">New calorie target: ${esc(lock.target.toLocaleString('en-IN'))} kcal a day</p>
+      <p class="small muted" style="margin:0">${lock.prev ? `Was ${esc(lock.prev.toLocaleString('en-IN'))}. ` : ''}Reason: ${esc(TARGET_REASON[lock.reason] || lock.reason)}. Enter it in MyFitnessPal (Goals → Calories). Details on Body.</p>
+      <div class="actions"><button type="button" class="btn" data-action="calorieSeen">Done, it is in MyFitnessPal</button></div>
+    </div>`;
+}
+
 function homeBanners() {
   const out = [];
+  out.push(morningCard());
+  out.push(calorieBanner());
   out.push(missedCard());
   out.push(weekSummaryHome());
   const all = trackedExercises()
@@ -1588,12 +1807,16 @@ function renderReview() {
     offline: `⚠️ ${sub.message}`,
     rejected: `⚠️ ${sub.message}`,
   }[sub.status];
+  const finished = session.finishedAt ? new Date(session.finishedAt) : null;
+  const missing = done || busy ? [] : reviewMissing(session);
   return `
-    ${topbar('', done || busy ? null : { href: 'entry', label: 'Back to editing' })}
+    ${topbar('', done || busy ? null : { href: 'home', label: 'Home' })}
     <section class="card stack">
       <div>
         <h1 class="card-title">Review &amp; submit</h1>
-        <p class="subtitle">${esc(session.dayType)} day · ${esc(formatDate(session.date))}</p>
+        <p class="subtitle">${esc(session.dayType)} day · ${esc(formatDate(session.date))}${
+          finished ? ` · finished ${esc(`${String(finished.getHours()).padStart(2, '0')}:${String(finished.getMinutes()).padStart(2, '0')}`)}, clock stopped` : ''
+        }</p>
       </div>
       ${renderSummary(session)}
       ${renderInsight(session)}
@@ -1603,12 +1826,26 @@ function renderReview() {
         <textarea id="notes" class="textarea" placeholder="How did it go?" data-input="notes" ${busy || done ? 'disabled' : ''}>${esc(session.notes || '')}</textarea>
       </div>
       ${statusText ? `<div class="status ${esc(sub.status)}" role="status">${esc(statusText)}</div>` : ''}
+      ${missing.length ? `<p class="hint" style="margin:0">Still needed before it is sent: ${esc(missing.join(', '))}.</p>` : ''}
       ${
         done
           ? '<button type="button" class="btn primary" data-action="submitDone">Done</button>'
-          : `<button type="button" class="btn primary" data-action="submitWorkout" ${busy ? 'disabled' : ''}>${busy ? 'Sending…' : 'Submit workout'}</button>`
+          : `<button type="button" class="btn primary" data-action="submitWorkout" ${busy ? 'disabled' : ''}>${busy ? 'Sending…' : 'Submit workout'}</button>
+             <button type="button" class="btn secondary" data-action="reopenWorkout" ${busy ? 'disabled' : ''}>Reopen workout to log more sets</button>`
       }
     </section>`;
+}
+
+/** What the review still needs (v1.7: how it went, heart rate and calories are required; the watch can be
+    marked as not recorded instead of typing made-up numbers). */
+function reviewMissing(session) {
+  const out = [];
+  if (!(session.score >= 1 && session.score <= 10)) out.push('how the workout was (1–10)');
+  if (!session.noWatch) {
+    if (!(session.avgHeartRate >= 40 && session.avgHeartRate <= 220)) out.push('average heart rate (40–220 bpm)');
+    if (!(session.activeCalories >= 1 && session.activeCalories <= 3000)) out.push('active calories (1–3000 kcal)');
+  }
+  return out;
 }
 
 /** Heart rate, calories, the satisfaction matrix (1–5 per question) and the overall score out of 10. */
@@ -1621,19 +1858,28 @@ function renderWellbeing(session, locked) {
           `<button type="button" class="chip" data-action="${action}" data-q="${esc(name)}" data-value="${n}" aria-pressed="${value === n}" ${locked ? 'disabled' : ''}>${n}</button>`,
       )
       .join('')}</div>`;
+  const watchOff = Boolean(session.noWatch);
   return `
     <div class="stack">
       <h2 class="section-title" style="margin:0">How was it?</h2>
+      <div class="matrix-row">
+        <div class="q"><strong>How was the workout?</strong> <span class="req">required</span> <span class="small muted">1 = awful · 10 = best ever</span></div>
+        ${scale('score', session.score, 10, 'score')}
+      </div>
       <div class="two">
         <div>
-          <label for="avg-hr">Avg heart rate (bpm)</label>
-          <input id="avg-hr" class="input" type="number" inputmode="numeric" min="30" max="250" placeholder="e.g. 128" value="${esc(session.avgHeartRate ?? '')}" data-change="avgHeartRate" ${locked ? 'disabled' : ''} />
+          <label for="avg-hr">Avg heart rate (bpm) ${watchOff ? '' : '<span class="req">required</span>'}</label>
+          <input id="avg-hr" class="input" type="number" inputmode="numeric" min="40" max="220" placeholder="${watchOff ? 'not recorded' : 'e.g. 128'}" value="${esc(session.avgHeartRate ?? '')}" data-change="avgHeartRate" ${locked || watchOff ? 'disabled' : ''} />
         </div>
         <div>
-          <label for="active-kcal">Active calories (kcal)</label>
-          <input id="active-kcal" class="input" type="number" inputmode="numeric" min="0" max="5000" placeholder="e.g. 320" value="${esc(session.activeCalories ?? '')}" data-change="activeCalories" ${locked ? 'disabled' : ''} />
+          <label for="active-kcal">Active calories (kcal) ${watchOff ? '' : '<span class="req">required</span>'}</label>
+          <input id="active-kcal" class="input" type="number" inputmode="numeric" min="1" max="3000" placeholder="${watchOff ? 'not recorded' : 'e.g. 320'}" value="${esc(session.activeCalories ?? '')}" data-change="activeCalories" ${locked || watchOff ? 'disabled' : ''} />
         </div>
       </div>
+      <label class="check">
+        <input type="checkbox" data-action="noWatch" ${watchOff ? 'checked' : ''} ${locked ? 'disabled' : ''} />
+        The watch did not record this workout
+      </label>
       ${questions()
         .map(
           (q) => `
@@ -1643,10 +1889,6 @@ function renderWellbeing(session, locked) {
         </div>`,
         )
         .join('')}
-      <div class="matrix-row">
-        <div class="q">Overall score <span class="small muted">out of 10</span></div>
-        ${scale('score', session.score, 10, 'score')}
-      </div>
     </div>`;
 }
 
@@ -1791,10 +2033,12 @@ function renderSettings() {
     ${renderProgressionSettings()}
     ${renderRecoverySettings()}
     ${renderBodySettings()}
+    ${renderCalorieSettings()}
+    ${renderRecoveryScoreSettings()}
 
     <section class="card stack">
       <h2 class="section-title" style="margin:0">End-of-workout questions</h2>
-      <p class="hint" style="margin:0">Each is rated 1–5 on the Review screen, next to heart rate, calories and the score out of 10.</p>
+      <p class="hint" style="margin:0">Optional, each rated 1–5 on the Review screen. "How was the workout" (1–10), heart rate and calories are always asked and required.</p>
       ${
         questions().length
           ? `<ul class="list" id="question-list">${questions()
@@ -2092,6 +2336,105 @@ function renderBodySettings() {
     </section>`;
 }
 
+const CALORIE_FIELDS = [
+  ['ratePct', 'Rate (% of bodyweight a week)', 0.1, 0, 1.5, 'Loss or gain per week. 0.5–1% keeps strength while losing.'],
+  ['lifeFactor', 'Daily-life factor', 0.05, 1.1, 1.6, 'Resting burn × this = a day without workouts. 1.2 mostly sitting, 1.375 on your feet a lot.'],
+  ['watchDiscountPct', 'Watch calories discount (%)', 5, 0, 60, 'Logged active calories are cut by this much: watches read high.'],
+  ['workoutDays', 'Average workouts over (days)', 1, 7, 42, ''],
+  ['bfMaxAgeDays', 'Use body fat up to (days old)', 1, 7, 60, 'Older than this: Mifflin-St Jeor (age, height, weight) instead of Katch-McArdle.'],
+  ['changeKcal', 'Move the target when it differs by (kcal)', 10, 0, 500, 'Checked once a week, so daily wobbles never change MyFitnessPal.'],
+  ['recalcKg', 'Or at once after a weight change of (kg)', 0.5, 1, 20, 'A new body fat reading also moves it at once.'],
+];
+
+function renderCalorieSettings() {
+  const p = state.settings.profile || {};
+  const c = state.settings.calories;
+  return `
+    <section class="card stack">
+      <h2 class="section-title" style="margin:0">Calories &amp; body fat</h2>
+      <p class="hint" style="margin:0">Body fat: US Navy tape method from the check-in (men: neck and abdomen at the navel; women: neck, waist and hips). Calories: Katch-McArdle with a recent body fat reading, else Mifflin-St Jeor.</p>
+      <div class="two">
+        <div>
+          <label for="pf-sex">Sex (for the formulas)</label>
+          <select id="pf-sex" class="select" data-change="profileSex">
+            <option value="male" ${p.sex !== 'female' ? 'selected' : ''}>Male</option>
+            <option value="female" ${p.sex === 'female' ? 'selected' : ''}>Female</option>
+          </select>
+        </div>
+        <div>
+          <label for="pf-height">Height (cm)</label>
+          <input id="pf-height" class="input" type="number" inputmode="decimal" step="0.5" min="120" max="230" value="${esc(p.heightCm ?? '')}" data-change="profileHeight" />
+        </div>
+      </div>
+      <div>
+        <label for="pf-dob">Date of birth</label>
+        <input id="pf-dob" class="input" type="date" value="${esc(p.dob || '')}" data-change="profileDob" />
+      </div>
+      <div>
+        <label for="cal-goal">Goal</label>
+        <select id="cal-goal" class="select" data-change="calorieGoal">
+          ${['lose', 'maintain', 'gain'].map((g) => `<option value="${g}" ${c.goal === g ? 'selected' : ''}>${g[0].toUpperCase() + g.slice(1)} weight</option>`).join('')}
+        </select>
+      </div>
+      ${CALORIE_FIELDS.map(
+        ([key, label, step, min, max, hint]) => `<div>
+          <label for="cal-${key}">${esc(label)}</label>
+          <input id="cal-${key}" class="input" type="number" inputmode="decimal" step="${step}" min="${min}" max="${max}" value="${esc(c[key])}" data-key="${key}" data-min="${min}" data-max="${max}" data-change="calorieNum" />
+          ${hint ? `<p class="hint">${esc(hint)}</p>` : ''}
+        </div>`,
+      ).join('')}
+      <label class="check">
+        <input type="checkbox" data-change="calorieFloor" ${c.floorBmr !== false ? 'checked' : ''} />
+        Never below my resting burn (else never below 1,200 kcal)
+      </label>
+      <button type="button" class="btn secondary" data-action="resetCalories">Reset to defaults</button>
+    </section>`;
+}
+
+const RECOVERY_SCORE_FIELDS = [
+  ['sleepTargetH', 'Sleep target (hours)', 0.25, 5, 10],
+  ['wSleep', 'Weight: sleep', 5, 0, 100],
+  ['wHrv', 'Weight: HRV', 5, 0, 100],
+  ['wRhr', 'Weight: resting HR', 5, 0, 100],
+  ['wSoreness', 'Weight: soreness', 5, 0, 100],
+  ['green', 'Green from (score)', 1, 1, 100],
+  ['amber', 'Amber from (score)', 1, 0, 99],
+  ['baselineDays', 'Baseline (days)', 1, 7, 90],
+  ['minBaseline', 'Days needed before HRV / RHR count', 1, 3, 30],
+];
+
+function renderRecoveryScoreSettings() {
+  const r = state.settings.recoveryScore;
+  return `
+    <section class="card stack">
+      <h2 class="section-title" style="margin:0">Recovery score</h2>
+      <p class="hint" style="margin:0">Each morning: sleep, HRV and resting HR come from an iPhone Shortcut; soreness and the Watch sleep score you tap on Home. HRV and resting HR are judged against your own last ${esc(r.baselineDays)} days, not fixed numbers. Advice only: nothing is locked.</p>
+      <div class="two">
+        ${RECOVERY_SCORE_FIELDS.map(
+          ([key, label, step, min, max]) => `<div>
+            <label for="rs-${key}">${esc(label)}</label>
+            <input id="rs-${key}" class="input" type="number" inputmode="decimal" step="${step}" min="${min}" max="${max}" value="${esc(r[key])}" data-key="${key}" data-min="${min}" data-max="${max}" data-change="recoveryScoreNum" />
+          </div>`,
+        ).join('')}
+      </div>
+      <button type="button" class="btn secondary" data-action="resetRecoveryScore">Reset to defaults</button>
+      <details class="shortcut-help">
+        <summary><strong>Set up the morning Shortcut (once)</strong></summary>
+        <p class="small">Shortcuts app → <strong>Automation</strong> → <strong>+</strong> → <strong>Time of Day</strong> (e.g. 9:00 AM, Daily) → <strong>Run Immediately</strong> → New Blank Automation. Add these actions in order:</p>
+        <ol class="small">
+          <li><strong>Find Health Samples</strong>: Type <em>Sleep</em>, Start Date <em>is in the last 18 hours</em>, Value <em>is not</em> In Bed, Value <em>is not</em> Awake. (Turn off Limit.)</li>
+          <li><strong>Repeat with Each</strong> item in Health Samples. Inside the repeat: <strong>Text</strong> = <em>Start Date</em> | <em>End Date</em> (tap each date → Date Format: <em>ISO 8601</em>, Include ISO 8601 Time on), with a <code>|</code> between them. Then <strong>Add to Variable</strong> <code>Spans</code>.</li>
+          <li>After the repeat: <strong>Combine Text</strong> <code>Spans</code> with Custom separator <code>;</code></li>
+          <li><strong>Find Health Samples</strong>: Type <em>Resting Heart Rate</em>, Start Date <em>is in the last 1 day</em>, Sort by Start Date Latest First, Limit 1.</li>
+          <li><strong>Find Health Samples</strong>: Type <em>Heart Rate Variability</em>, Start Date <em>is in the last 12 hours</em>. Then <strong>Calculate Statistics</strong>: Average of those samples.</li>
+          <li><strong>Get Contents of URL</strong>: your Apps Script URL (Settings above), Method <em>POST</em>, Request Body <em>JSON</em> with fields:
+            <code>token</code> (Text, your token) · <code>action</code> (Text: <code>recovery</code>) · <code>sleep</code> (Text: Combined Text) · <code>rhr</code> (Number: the Resting Heart Rate sample) · <code>hrv</code> (Number: the Average).</li>
+        </ol>
+        <p class="small">Run it once by hand and allow Health access. The Sheet's <strong>Recovery</strong> tab gets today's row and Home shows "From your Watch". The Watch and the iPhone often both record a night; the overlap is counted once.</p>
+      </details>
+    </section>`;
+}
+
 /* -------------------------------------------------------------- rest timer */
 
 let timerHandle = null;
@@ -2353,7 +2696,84 @@ const actions = {
 
   finishWorkout() {
     if (!state.draft.sets.length) return toast('Log at least one set first', 'error');
+    // The workout closes here: the clock stops now, not when the review is filled in and sent (v1.7).
+    state.draft.finishedAt = nowISO();
+    state.ui.form = null;
+    state.ui.timer = null;
+    saveDraft();
     go('review');
+  },
+
+  async resetCalories() {
+    const ok = await openModal({ title: 'Reset calorie settings?', message: 'Rate, factors and thresholds go back to the defaults. Height, sex and date of birth stay.', confirmText: 'Reset' });
+    if (!ok) return;
+    state.settings.calories = { ...Body.CALORIE_DEFAULTS };
+    calorieSettingsChanged();
+    render();
+  },
+
+  async resetRecoveryScore() {
+    const ok = await openModal({ title: 'Reset recovery score settings?', confirmText: 'Reset' });
+    if (!ok) return;
+    state.settings.recoveryScore = { ...Body.RECOVERY_SCORE_DEFAULTS };
+    save(KEYS.settings, state.settings);
+    storeRecoveryScore(todayISO());
+    render();
+  },
+
+  morningSoreness(el) {
+    const v = Number(el.dataset.value);
+    state.ui.morning.soreness = state.ui.morning.soreness === v ? null : v;
+    render();
+  },
+
+  morningSave() {
+    const ui = state.ui.morning;
+    const today = todayISO();
+    const e = recoveryEntry(today) || {};
+    const soreness = ui.soreness ?? (Number.isFinite(e.soreness) ? e.soreness : null);
+    if (soreness === null) return toast('Tap how sore you are (1–10)', 'error');
+    const raw = String(ui.sleepScore ?? '').trim();
+    const sleepScore = raw === '' ? (Number.isFinite(e.sleepScore) ? e.sleepScore : null) : Number(raw);
+    if (sleepScore !== null && !(sleepScore >= 0 && sleepScore <= 100)) return toast('Sleep score is 0–100', 'error');
+    putRecovery(today, { soreness, sleepScore });
+    const r = recoveryResult(today);
+    if (r && r.score !== null) putRecovery(today, { score: r.score });
+    queueRecovery(today, { soreness, ...(sleepScore !== null ? { sleepScore } : {}), ...(r && r.score !== null ? { score: r.score } : {}) });
+    state.ui.morning = { soreness: null, sleepScore: '' };
+    render();
+    refreshRecovery(true); // the Shortcut may have run since the app opened
+  },
+
+  morningEdit() {
+    state.ui.morning = { soreness: null, sleepScore: '', editing: true };
+    render();
+  },
+
+  calorieSeen() {
+    if (state.settings.calorieLock) state.settings.calorieLock.seen = true;
+    save(KEYS.settings, state.settings);
+    render();
+  },
+
+  async reopenWorkout() {
+    const ok = await openModal({
+      title: 'Reopen this workout?',
+      message: 'You can log more sets. The clock runs again and the finish time is set when you tap Finish workout again.',
+      confirmText: 'Reopen',
+    });
+    if (!ok || !state.draft) return;
+    state.draft.finishedAt = null;
+    saveDraft();
+    go('entry');
+  },
+
+  noWatch(el) {
+    if (!state.draft) return;
+    state.draft.noWatch = !state.draft.noWatch;
+    if (state.draft.noWatch) state.draft.avgHeartRate = state.draft.activeCalories = null;
+    saveDraft();
+    render();
   },
 
   timerMinus() {
@@ -2903,12 +3323,49 @@ const changes = {
     const v = Number(el.value);
     state.draft.avgHeartRate = el.value === '' || !Number.isFinite(v) ? null : Math.round(v);
     saveDraft();
+    render(); // refresh "Still needed"
   },
   activeCalories(el) {
     if (!state.draft) return;
     const v = Number(el.value);
     state.draft.activeCalories = el.value === '' || !Number.isFinite(v) ? null : Math.round(v);
     saveDraft();
+    render();
+  },
+  profileSex(el) {
+    state.settings.profile = { ...(state.settings.profile || {}), sex: el.value === 'female' ? 'female' : 'male' };
+    calorieSettingsChanged();
+  },
+  profileHeight(el) {
+    const v = Number(el.value);
+    state.settings.profile = { ...(state.settings.profile || {}), heightCm: el.value !== '' && v >= 120 && v <= 230 ? v : null };
+    calorieSettingsChanged();
+  },
+  profileDob(el) {
+    state.settings.profile = { ...(state.settings.profile || {}), dob: /^\d{4}-\d{2}-\d{2}$/.test(el.value) ? el.value : '' };
+    calorieSettingsChanged();
+  },
+  calorieGoal(el) {
+    state.settings.calories.goal = ['lose', 'maintain', 'gain'].includes(el.value) ? el.value : 'lose';
+    calorieSettingsChanged();
+  },
+  calorieNum(el) {
+    const v = boundedNumber(el);
+    if (v === null) return;
+    state.settings.calories[el.dataset.key] = v;
+    calorieSettingsChanged();
+  },
+  calorieFloor(el) {
+    state.settings.calories.floorBmr = el.checked;
+    calorieSettingsChanged();
+    render();
+  },
+  recoveryScoreNum(el) {
+    const v = boundedNumber(el);
+    if (v === null) return;
+    state.settings.recoveryScore[el.dataset.key] = v;
+    save(KEYS.settings, state.settings);
+    storeRecoveryScore(todayISO());
   },
   cardioNote(el) {
     const day = state.ui.manageDay;
@@ -2962,6 +3419,9 @@ const inputs = {
     el.removeAttribute('aria-invalid');
     refreshSetCompare();
   },
+  morningSleepScore(el) {
+    state.ui.morning.sleepScore = el.value;
+  },
   notes(el) {
     if (state.draft) {
       state.draft.notes = el.value;
@@ -2969,6 +3429,24 @@ const inputs = {
     }
   },
 };
+
+/** A number input's value within its data-min / data-max, or null (the field is put back) when it is not a number. */
+function boundedNumber(el) {
+  const v = Number(el.value);
+  if (el.value === '' || !Number.isFinite(v)) {
+    toast('Enter a number', 'error');
+    return null;
+  }
+  const out = Math.min(Number(el.dataset.max), Math.max(Number(el.dataset.min), v));
+  el.value = out;
+  return out;
+}
+
+/** Profile or calorie settings changed: the target applies at once (and Home says so if the number moved). */
+function calorieSettingsChanged() {
+  save(KEYS.settings, state.settings);
+  updateCalorieTarget({ force: true });
+}
 
 /* Small list editors for settings arrays (measurement fields, photo poses). */
 function addToList(key, current, raw, uiKey, focusId) {
@@ -3186,13 +3664,16 @@ async function uploadSession(session) {
 async function submitWorkout() {
   const session = state.draft;
   if (!session || !session.sets.length) return toast('Log at least one set first');
-  session.finishedAt = nowISO();
+  const missing = reviewMissing(session);
+  if (missing.length) return toast(`Add ${missing[0]} first`, 'error');
+  session.finishedAt = session.finishedAt || nowISO(); // set when Finish workout was tapped (older drafts: now)
   session.synced = false;
 
   // Outbox first, then history, then clear the draft: nothing is ever lost between these steps.
   state.outbox = [...state.outbox.filter((s) => s.id !== session.id), session];
   save(KEYS.outbox, state.outbox);
   addToHistory(session);
+  updateCalorieTarget(); // workout calories are part of the daily burn
   state.draft = null;
   saveDraft();
   detectMissed(); // a late entry for a day already marked missed takes the mark back
@@ -3253,12 +3734,17 @@ async function syncMissedOutbox() {
 }
 
 async function syncOutbox({ manual = false } = {}) {
-  if (!state.ui.syncing && haveApi() && (state.mOutbox.length || state.missedOutbox.length || state.smallOutbox.length || !state.backup.linked || state.backup.dirty)) {
+  if (
+    !state.ui.syncing &&
+    haveApi() &&
+    (state.mOutbox.length || state.missedOutbox.length || state.smallOutbox.length || state.recoveryOutbox.length || !state.backup.linked || state.backup.dirty)
+  ) {
     state.ui.syncing = true;
     try {
       const m = state.mOutbox.length ? await syncMeasurementOutbox() : 0;
       if (state.missedOutbox.length) await syncMissedOutbox();
       if (state.smallOutbox.length) await syncSmallOutbox();
+      if (state.recoveryOutbox.length) await syncRecoveryOutbox();
       // A copy found in the Sheet but not answered yet waits for Settings → Settings copy (never overwritten here).
       if (!state.backup.linked && !state.backup.remoteAt) await linkSettingsBackup({ ask: false });
       else if (state.backup.dirty) await uploadSettings();
@@ -3437,6 +3923,7 @@ function bindEvents() {
     if (document.visibilityState === 'visible') {
       if (detectMissed() && route().name === 'home') render(); // a new day may have passed
       syncOutbox();
+      refreshRecovery();
       if (route().name === 'entry') tickTimer();
     }
   });
@@ -3449,8 +3936,17 @@ function registerServiceWorker() {
   });
 }
 
+/** Fetch the Shortcut's numbers and redraw Home if they arrived. */
+function refreshRecovery(force = false) {
+  fetchRecovery({ force }).then((got) => {
+    if (got && route().name === 'home') render();
+  });
+}
+
 bindEvents();
 detectMissed();
+updateCalorieTarget();
 render();
 registerServiceWorker();
 syncOutbox();
+refreshRecovery();

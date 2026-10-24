@@ -308,6 +308,78 @@ function renderExerciseProgress(name) {
 
 /* ============================================================== Body */
 
+const BF_KEY = 'Body fat (%, Navy)'; // stored with a check-in for the Sheet; charted as "Body fat"
+const BF_CHART = 'Body fat (%)'; // the Trends chart works it out from the tape measurements each time
+
+/** Where to put the tape, by field name (the owner: abdomen at the navel, waist where the waistband sits). */
+function fieldHint(f) {
+  if (/abdomen|navel/i.test(f)) return 'at the navel';
+  if (/waist/i.test(f)) return 'where the waistband sits';
+  if (/neck/i.test(f)) return 'just below the Adam’s apple';
+  if (/hip/i.test(f)) return 'widest part of the buttocks';
+  return '';
+}
+
+/** Body fat (US Navy) and the calorie target to enter in MyFitnessPal, with the working shown. */
+function renderCalories() {
+  const s = state.settings;
+  const p = s.profile || {};
+  const { calc, bf, weight, series } = calorieState();
+  const lock = s.calorieLock;
+  const map = Body.navyFields(measureFields());
+  const missingFields = Body.navyMissing(p.sex, map);
+  const prev = series.length > 1 ? series[series.length - 2] : null;
+  const c = s.calories;
+  const rows = [];
+  if (calc.target) {
+    rows.push(`Resting burn ${calc.bmr.toLocaleString('en-IN')} kcal (${calc.method}${calc.lbm ? `, lean mass ${fmtKg(calc.lbm)} kg` : `, age ${calc.age}`})`);
+    rows.push(`× ${c.lifeFactor} daily life = ${calc.life.toLocaleString('en-IN')}`);
+    rows.push(`+ workouts ${calc.workout} a day (${calc.workouts} logged in ${c.workoutDays} days, less ${c.watchDiscountPct}% for watch overestimate)`);
+    rows.push(`= burn about ${calc.tdee.toLocaleString('en-IN')} kcal a day`);
+    if (c.goal !== 'maintain') rows.push(`${calc.change > 0 ? '+' : '−'} ${Math.abs(calc.change)} for ${c.goal === 'gain' ? 'gaining' : 'losing'} ${c.ratePct}% of bodyweight a week${calc.floored ? (c.floorBmr === false ? ' (held at 1,200 kcal, the lowest it goes)' : ' (held at your resting burn: switch this off in Settings for a bigger deficit)') : ''}`);
+  }
+  // Actual weekly change vs the plan, from weekly weight averages.
+  const wf = weightField();
+  const avgs = wf ? Progress.weeklyAverages(state.measurements, wf) : [];
+  const rc = Body.rateCheck(avgs, c);
+  let rateLine = '';
+  if (rc) {
+    const diff = rc.pct - rc.plan;
+    rateLine = `Last ${rc.weeks} weeks: ${Progress.signed(rc.kgPerWeek, 2, ' kg')} a week (${Progress.signed(rc.pct, 2, '%')}; plan ${Progress.signed(rc.plan, 2, '%')}). ${
+      Math.abs(diff) < 0.25 ? 'On plan.' : (c.goal === 'gain' ? diff < 0 : diff > 0) ? 'Slower than planned: check what you log in MyFitnessPal is accurate before eating less.' : 'Faster than planned: if strength is dropping, eat a little more.'
+    }`;
+  }
+  return `
+    <section class="card stack">
+      <h2 class="section-title" style="margin:0">Body fat &amp; calories</h2>
+      ${
+        bf
+          ? `<p style="margin:0"><strong class="big">${esc(fmtKg(bf.bf))}%</strong> body fat (US Navy) · ${esc(formatDate(bf.date))}${
+              prev ? ` · <span class="small">${esc(Progress.signed(Math.round((bf.bf - prev.bf) * 10) / 10, 1, '%'))} since ${esc(formatDate(prev.date, false))}</span>` : ''
+            }${bf.lbm ? `<br /><span class="small muted">Lean mass ${esc(fmtKg(bf.lbm))} kg${prev?.lbm ? ` (${esc(Progress.signed(Math.round((bf.lbm - prev.lbm) * 10) / 10, 1, ' kg'))})` : ''}. Accurate to about ±3%: follow the trend, not one reading.</span>` : ''}</p>`
+          : `<p class="small muted" style="margin:0">${
+              !p.heightCm
+                ? 'Add your height in Settings → Calories & body fat to get body fat from the check-in.'
+                : missingFields.length
+                  ? `Body fat needs these check-in fields: ${esc(missingFields.join(', '))}. Add them in Settings → Body & photos.`
+                  : `Body fat appears after a check-in with ${p.sex === 'female' ? 'neck, waist and hips' : 'neck and abdomen'}.`
+            }</p>`
+      }
+      ${
+        calc.target
+          ? `<div class="target">
+               <p class="small muted" style="margin:0">Enter in MyFitnessPal</p>
+               <p style="margin:2px 0"><strong class="big">${esc((lock?.target ?? calc.target).toLocaleString('en-IN'))}</strong> kcal a day</p>
+               ${lock ? `<p class="small muted" style="margin:0">Set ${esc(formatDate(lock.date))} (${esc(TARGET_REASON[lock.reason] || lock.reason)})${lock.target !== calc.target ? ` · today's calculation ${esc(calc.target.toLocaleString('en-IN'))}: it moves after a week if the gap is ${c.changeKcal}+ kcal, at once with a new body fat reading or ${c.recalcKg} kg of weight change` : ''}.</p>` : ''}
+             </div>
+             <ul class="quant">${rows.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
+             <p class="small muted" style="margin:0">Weight used: ${esc(fmtKg(weight.kg))} kg (${weight.n >= 3 ? `average of ${weight.n} weigh-ins this week` : `entry of ${esc(formatDate(weight.date))}`}).</p>`
+          : `<p class="small muted" style="margin:0">For a calorie target, add ${esc(calc.missing.join(', '))}${calc.missing.includes('bodyweight') ? ' (a weigh-in or check-in)' : ' in Settings → Calories & body fat'}.</p>`
+      }
+      ${rateLine ? `<p class="small" style="margin:0">${esc(rateLine)}</p>` : ''}
+    </section>`;
+}
+
 function bodyDraft() {
   const b = state.ui.body;
   if (!b.draft) b.draft = { date: todayISO(), values: {}, notes: '' };
@@ -321,6 +393,9 @@ function lastValue(field) {
 
 /** Points for a field: weekly averages when there are daily weigh-ins for the weight field, else each entry. */
 function bodySeries(field) {
+  if (field === BF_CHART) {
+    return { label: 'Body fat (%), US Navy', points: bodyFatSeries().filter((x) => inRange(x.date, state.ui.body.range)).map((x) => ({ date: x.date, y: x.bf })) };
+  }
   const list = state.measurements.filter((m) => Number.isFinite(m.values?.[field]) && inRange(m.date, state.ui.body.range));
   if (field === weightField() && list.some((m) => m.kind === 'weighin')) {
     return {
@@ -383,6 +458,7 @@ function renderBody() {
   const fields = measureFields();
   const wf = weightField();
   const withData = fields.filter((f) => state.measurements.some((m) => Number.isFinite(m.values?.[f])));
+  if (bodyFatSeries().length) withData.push(BF_CHART);
   const ui = state.ui.body;
   const field = withData.includes(ui.field) ? ui.field : withData[0];
   const series = field ? bodySeries(field) : null;
@@ -408,7 +484,7 @@ function renderBody() {
           .map((f, i) => {
             const last = lastValue(f);
             return `<div>
-              <label for="m-f${i}">${esc(f)}</label>
+              <label for="m-f${i}">${esc(f)}${fieldHint(f) ? ` <span class="small muted">${esc(fieldHint(f))}</span>` : ''}</label>
               <input id="m-f${i}" class="input" type="number" inputmode="decimal" step="0.1" min="0" data-field="${esc(f)}" data-input="mValue"
                 value="${esc(d.values[f] ?? '')}" placeholder="${last !== null ? esc('last ' + fmtKg(last)) : ''}" />
             </div>`;
@@ -422,6 +498,8 @@ function renderBody() {
       <button type="button" class="btn primary" data-action="saveCheckin">Save check-in</button>
       <a class="btn secondary" href="#photos">🔒 Progress photos${v.lastPhotoAt ? ` · last ${esc(formatDate(v.lastPhotoAt.slice(0, 10)))}` : ''}</a>
     </section>
+
+    ${renderCalories()}
 
     ${renderSmallWorkout()}
 
@@ -497,6 +575,7 @@ async function queueMeasurement(entry) {
   state.mOutbox = [...state.mOutbox.filter((m) => m.id !== entry.id), entry];
   save(KEYS.measurements, state.measurements);
   save(KEYS.mOutbox, state.mOutbox);
+  updateCalorieTarget(); // a new weight or body fat reading may move the target
   render();
   syncOutbox();
 }
@@ -1132,9 +1211,13 @@ const trackActions = {
     for (const [k, v] of Object.entries(d.values)) if (v !== '' && Number.isFinite(Number(v))) values[k] = Number(v);
     if (!Object.keys(values).length) return toast('Enter at least one measurement', 'error');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(d.date)) return toast('Pick a date', 'error');
+    // Body fat goes into the entry too, so the Sheet's Measurements tab gets a column for it (the app itself always
+    // works it out again from the tape measurements and the current height).
+    const bf = Body.entryBodyFat(values, state.settings.profile || {}, Body.navyFields(measureFields()));
+    if (bf !== null) values[BF_KEY] = bf;
     queueMeasurement(newMeasurement('checkin', d.date, values, d.notes.trim()));
     state.ui.body.draft = null;
-    toast('Check-in saved');
+    toast(bf !== null ? `Check-in saved · body fat ${fmtKg(bf)}% (US Navy)` : 'Check-in saved');
     render();
   },
 

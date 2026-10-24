@@ -343,3 +343,30 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
       and on a settings restore.
     - **Compare weeks**: two week pickers (default first vs latest), every pose side by side (thumbnails); a
       pose with both photos opens a full-screen slider (after-photo clipped over the before-photo).
+
+## Owner's decisions (2026-10-24, v1.7: closing a workout, calories, body fat, recovery)
+
+20. **Finish closes the workout.** `finishedAt` is set on the Finish tap (the clock stops; Duration = first set →
+    finish, Log column 18 `Duration (min)`); a finished draft redirects Entry → Review; *Reopen* clears it after a
+    confirm. Required before Submit (`reviewMissing`): score 1–10 ("How was the workout?"), avg HR 40–220 and active
+    kcal 1–3000, unless "The watch did not record this workout" (`session.noWatch`). The 1–5 matrix stays optional.
+21. **No food logging** (MyFitnessPal does that). `body.js` (pure, Node-testable, wrapped in an IIFE because
+    progress.js shares the global scope) holds the maths. Profile `settings.profile {sex, dob, heightCm}`;
+    `settings.calories` (defaults `Body.CALORIE_DEFAULTS`). BMR: Katch-McArdle with body fat ≤ `bfMaxAgeDays` old,
+    else Mifflin-St Jeor; TDEE = BMR × `lifeFactor` + logged workout kcal/day over `workoutDays` less
+    `watchDiscountPct`; target = TDEE ∓ `ratePct`% bodyweight × 7700 / 7, floored at BMR (`floorBmr`, else 1,200).
+    Weight = mean of ≥ 3 entries in 7 days, else the latest. The MyFitnessPal number is `settings.calorieLock`; it
+    moves (`Body.shouldUpdateTarget`) on the first calculation, a newer body fat date, ≥ `recalcKg` (5) weight change,
+    or after ≥ 7 days when it differs by ≥ `changeKcal` (100); settings changes apply at once. A move shows a Home
+    banner until "Done, it is in MyFitnessPal".
+22. **Body fat**: US Navy, metric. Owner's definitions: **Abdomen = at the navel** (used for men), **Waist = where the
+    waistband sits** (used for women with hips). Fields found by name (`Body.navyFields`); "Abdomen (cm)" was added
+    once after Waist (`settings.abdomenAdded`). A check-in stores `Body fat (%, Navy)` in its values for the Sheet;
+    the app recalculates from the tape numbers for charts.
+23. **Recovery score** (`settings.recoveryScore`, defaults `Body.RECOVERY_SCORE_DEFAULTS`): an iPhone Shortcut
+    automation POSTs a flat body `{token, action:'recovery', sleep:'start|end;…', rhr, hrv}` (Code.gs merges
+    overlapping sleep spans and averages numbers in text); the app adds soreness (1–10, required on the Home
+    morning card) and the optional Watch sleep score. Sheet tab **Recovery**, one row per date, each writer fills
+    only its cells. Parts 0–100: sleep (hours vs target, −25/h short; averaged with sleep score), HRV and RHR as
+    20 points per SD from the last `baselineDays` (needs `minBaseline` days; SD floor 5% of mean), soreness linear;
+    weighted and rescaled over what is present. Bands green ≥ 70, amber ≥ 40, red. Advice only.

@@ -51,8 +51,10 @@ There are no secrets in the repo. The script URL and token live only in the app'
 - **Workout entry**: choose the exercise, the set number is pre-selected, tap the reps, the weight is pre-filled
   from last time, **Save set**. A rest timer starts. "Plan: 3 × 6-8" is the target from your programme and
   "Last: 12 Oct · 40 kg × 10, 40 × 10" is what you did last time.
-- **Finish workout → Submit workout**. Rows appear in the Sheet within a second or two. With no signal the
-  workout is queued and sent the next time the app opens online.
+- **Finish workout** closes the workout and stops the clock. The Review screen then needs **how the workout
+  was (1–10)**, **average heart rate** and **active calories** from the Watch (or tick "The watch did not record
+  this workout") before **Submit workout**. *Reopen workout* goes back to logging sets. Rows appear in the Sheet
+  within a second or two. With no signal the workout is queued and sent the next time the app opens online.
 - **History** lists past workouts. On a new phone, **Sync history from Sheet** rebuilds the list from the
   last 400 days of rows.
 - **Settings → Export** saves a JSON backup (including URL and token); **Import** restores it.
@@ -73,6 +75,44 @@ There are no secrets in the repo. The script URL and token live only in the app'
   the numbers and a plain-words reading of them, plus hard sets per muscle group over the last 7 days.
 - Every threshold above is editable in **Settings → Progression**; weight steps and muscle groups per
   exercise in **Settings → Exercises** (pencil).
+
+### Calories, body fat and recovery (v1.7)
+
+- **Settings → Calories & body fat**: sex, height and date of birth once; goal (lose / maintain / gain) and a
+  weekly rate (0.75% of bodyweight by default). Every number is editable.
+- **Body fat** (US Navy tape method) comes from each check-in: men need **Neck** and **Abdomen at the navel**;
+  women neck, waist and hips. **Waist** is measured where the waistband sits and is not used by the formula.
+  Body fat and lean mass show on Body, chart under Trends, and go to the Measurements tab as `Body fat (%, Navy)`.
+- **Calorie target** for MyFitnessPal (food stays there): resting burn by **Katch-McArdle** when there is a body
+  fat reading from the last 21 days, else **Mifflin-St Jeor**; × 1.2 for daily life; + your logged workout
+  calories (averaged over 14 days, less 25% because watches read high); − the weekly rate (7,700 kcal per kg);
+  never below the resting burn unless you switch that off. The target only **moves** after a new body fat
+  reading, a 5 kg weight change, or once a week when the new number differs by 100 kcal or more. Home then
+  says "New calorie target" until you tap *Done, it is in MyFitnessPal*. Body also compares your actual weekly
+  change with the plan.
+- **Recovery score** on Home each morning: sleep, resting heart rate and HRV come automatically from an iPhone
+  Shortcut (below); you tap soreness (1–10) and may type the Watch's sleep score. HRV and resting HR are judged
+  against your own last 28 days (they count after 5 days). Green = train as planned, amber = keep the weights
+  and drop a set, red = light session or rest. Advice only. Rows go to the Sheet's **Recovery** tab.
+
+### The morning Shortcut (once, on the iPhone)
+
+Shortcuts → **Automation** → **+** → **Time of Day** (e.g. 9:00, Daily) → **Run Immediately** → New Blank
+Automation, then these actions:
+
+1. **Find Health Samples** where Type is **Sleep** (Sleep Analysis), Start Date is in the last **18 hours**,
+   Value is not **In Bed**, Value is not **Awake**; Limit off.
+2. **Repeat with Each** sample: a **Text** action `Start Date|End Date` (tap each date: Date Format **ISO 8601**,
+   include time), then **Add to Variable** `Spans`.
+3. After the repeat: **Combine Text** `Spans` with the custom separator `;`.
+4. **Find Health Samples**: **Resting Heart Rate**, last 1 day, sorted latest first, limit 1.
+5. **Find Health Samples**: **Heart Rate Variability**, last 12 hours → **Calculate Statistics**: Average.
+6. **Get Contents of URL**: the Apps Script `/exec` URL, Method **POST**, Request Body **JSON**:
+   `token` (your token) · `action` = `recovery` · `sleep` = the Combined Text · `rhr` = the resting heart rate ·
+   `hrv` = the average.
+
+Run it once by hand to allow Health access; the Recovery tab gets today's row. The Watch and the iPhone often
+both record a night: overlapping time is counted once. The same steps are in the app under Settings → Recovery score.
 
 ### Body and photos
 
@@ -119,7 +159,10 @@ wide, and the Network panel's "Offline" setting to test the outbox.
 
 ## Sheet columns
 
-`Timestamp | Date | Session ID | Day | Exercise | Set # | Reps | To failure | Weight (kg) | Volume (kg) | Session notes | Avg HR (bpm) | Active kcal | Score /10 | Satisfaction | RIR | Warm-up`
+`Timestamp | Date | Session ID | Day | Exercise | Set # | Reps | To failure | Weight (kg) | Volume (kg) | Session notes | Avg HR (bpm) | Active kcal | Score /10 | Satisfaction | RIR | Warm-up | Duration (min)`
+
+The **Recovery** tab (v1.7): `Date | Sleep (h) | Sleep score | Resting HR (bpm) | HRV (ms) | Soreness (1-10) | Recovery score | Updated at | Source`,
+one row per day, filled by the Shortcut and the app.
 
 The **Measurements** tab: `Timestamp | Date | Entry ID | Type | Notes` and then one column per measurement
 field (`Bodyweight (kg)`, `Waist (cm)`, …). A field added in Settings gets its column automatically.

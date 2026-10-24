@@ -16,6 +16,9 @@
  *   GET  {scriptUrl}?action=small&token=…
  *   POST {scriptUrl}                       body: { token, action: "settings", data: {...}, savedAt }
  *   GET  {scriptUrl}?action=settings&token=…
+ *   POST {scriptUrl}                       body: { token, action: "recovery", entry: {...} }       (the app)
+ *   POST {scriptUrl}                       body: { token, action: "recovery", sleep, rhr, hrv }    (iPhone Shortcut)
+ *   GET  {scriptUrl}?action=recovery&token=…&days=60
  *
  * Log: one row per set. Writing is idempotent by Session ID: submitting the same session twice adds
  * nothing and returns { ok: true, duplicate: true, rows: 0 }.
@@ -57,12 +60,18 @@ var HEADERS = [
   'Satisfaction',
   'RIR',
   'Warm-up',
+  'Duration (min)',
 ];
+var R_SHEET_NAME = 'Recovery';
+// One row per day. The iPhone Shortcut writes sleep, resting HR and HRV each morning; the app adds the Watch sleep
+// score, soreness and the recovery score it works out. Each writer only fills the cells it sends.
+var R_HEADERS = ['Date', 'Sleep (h)', 'Sleep score', 'Resting HR (bpm)', 'HRV (ms)', 'Soreness (1-10)', 'Recovery score', 'Updated at', 'Source'];
+var R_FIELDS = { sleepHours: 2, sleepScore: 3, rhr: 4, hrv: 5, soreness: 6, score: 7 };
 // Column numbers (1-based) used below. Notes to Satisfaction are per-session and filled on a session's first row
 // only; RIR (reps in reserve, 3 = "3 or more") and Warm-up are per set and were added after the first version.
 var COL = {
   timestamp: 1, date: 2, sessionId: 3, day: 4, exercise: 5, setNo: 6, reps: 7, toFailure: 8, weight: 9, volume: 10,
-  notes: 11, avgHr: 12, kcal: 13, score: 14, satisfaction: 15, rir: 16, warmup: 17,
+  notes: 11, avgHr: 12, kcal: 13, score: 14, satisfaction: 15, rir: 16, warmup: 17, duration: 18,
 };
 
 /**
@@ -76,6 +85,7 @@ function setup() {
   Logger.log('Sheet "%s" is ready.', getMissedSheet_().getName());
   Logger.log('Sheet "%s" is ready.', getSmallSheet_().getName());
   Logger.log('Sheet "%s" is ready.', getSettingsSheet_().getName());
+  Logger.log('Sheet "%s" is ready.', getRecoverySheet_().getName());
   var token = PropertiesService.getScriptProperties().getProperty('TOKEN');
   if (token) {
     Logger.log('TOKEN is set. Deploy → New deployment → Web app (Execute as Me, Anyone) and copy the /exec URL.');
@@ -139,6 +149,7 @@ function doGet(e) {
     if (p.action === 'missed') return json_({ ok: true, entries: missedList_() });
     if (p.action === 'small') return json_({ ok: true, entries: smallList_() });
     if (p.action === 'settings') return json_(readSettings_());
+    if (p.action === 'recovery') return json_({ ok: true, entries: recoveryList_(Number(p.days) || 60) });
     return json_({ ok: false, error: 'unknown action' });
   } catch (err) {
     return json_({ ok: false, error: String((err && err.message) || err) });
@@ -158,6 +169,8 @@ function doPost(e) {
   if (body.action === 'missed') return missed_(body.entry);
   if (body.action === 'small') return small_(body.entry);
   if (body.action === 'settings') return writeSettings_(body.data, body.savedAt);
+  // The iPhone Shortcut sends a flat body ({ token, action, sleep, rhr, hrv }); the app sends { entry: {...} }.
+  if (body.action === 'recovery') return recovery_(body.entry || body, body.entry ? 'app' : 'shortcut');
   if (body.action !== 'submit') return json_({ ok: false, error: 'unknown action' });
 
   var session = body.session;
@@ -223,6 +236,15 @@ function numberOrBlank_(v) {
   return v === null || v === undefined || v === '' || isNaN(n) ? '' : n;
 }
 
+/** Minutes from the first logged set (or the start) to finishedAt, or blank. */
+function durationMinutes_(session) {
+  var times = session.sets.map(function (s) { return Date.parse(s.loggedAt); }).filter(function (t) { return !isNaN(t); });
+  var start = times.length ? Math.min.apply(null, times) : Date.parse(session.startedAt);
+  var end = Date.parse(session.finishedAt);
+  if (isNaN(start) || isNaN(end) || end < start) return '';
+  return Math.round((end - start) / 60000);
+}
+
 /** One row per set, in the column order of HEADERS. Notes, heart rate, calories, score and satisfaction go on
     the first row of the session only. */
 function buildRows_(session) {
@@ -253,6 +275,7 @@ function buildRows_(session) {
       i === 0 ? satisfactionText_(session.satisfaction) : '', // Satisfaction
       numberOrBlank_(s.toFailure ? 0 : s.rir), // RIR (blank when not logged)
       Boolean(s.warmup), // Warm-up
+      i === 0 ? durationMinutes_(session) : '', // Duration (min): first set to the Finish workout tap
     ]);
   }
   return rows;
@@ -548,6 +571,123 @@ function smallList_() {
         note: String(r[3] || ''),
       };
     });
+}
+
+/* ---------------------------------------------------------------- Recovery */
+
+function getRecoverySheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(R_SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(R_SHEET_NAME);
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, R_HEADERS.length).setValues([R_HEADERS]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    sheet.getRange(2, 1, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat('@'); // dates as text
+  }
+  return sheet;
+}
+
+/** The average of every number in a value: the Shortcut may send "52", "52 count/min" or a list of readings. */
+function average_(v) {
+  if (typeof v === 'number') return isFinite(v) ? v : null;
+  var found = String(v === null || v === undefined ? '' : v).match(/-?\d+(?:\.\d+)?/g);
+  if (!found) return null;
+  var sum = 0;
+  for (var i = 0; i < found.length; i++) sum += Number(found[i]);
+  return sum / found.length;
+}
+
+/** Sleep hours from "start|end;start|end" pairs (ISO dates, one per sleep stage), overlaps merged so the Watch and
+    the iPhone recording the same night count once. Same rule as Body.sleepHoursFromSpans in the app. */
+function sleepHours_(text) {
+  var spans = String(text || '')
+    .split(/[;\n]/)
+    .map(function (p) {
+      var parts = p.split('|');
+      return [Date.parse(String(parts[0] || '').trim()), Date.parse(String(parts[1] || '').trim())];
+    })
+    .filter(function (s) { return !isNaN(s[0]) && !isNaN(s[1]) && s[1] > s[0]; })
+    .sort(function (a, b) { return a[0] - b[0]; });
+  if (!spans.length) return null;
+  var total = 0;
+  var cur = null;
+  for (var i = 0; i < spans.length; i++) {
+    if (!cur || spans[i][0] > cur[1]) {
+      if (cur) total += cur[1] - cur[0];
+      cur = [spans[i][0], spans[i][1]];
+    } else cur[1] = Math.max(cur[1], spans[i][1]);
+  }
+  total += cur[1] - cur[0];
+  return Math.round((total / 3600000) * 100) / 100;
+}
+
+/** Add or fill in one day's row. Only the fields sent are written, so the Shortcut and the app never wipe each
+    other's numbers. Date defaults to today (the Shortcut runs in the morning). */
+function recovery_(entry, source) {
+  if (!entry || typeof entry !== 'object') return json_({ ok: false, error: 'bad entry' });
+  var date = String(entry.date || '').slice(0, 10);
+  if (!date) date = isoDate_(new Date());
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return json_({ ok: false, error: 'bad date' });
+  var values = {};
+  if (entry.sleep !== undefined && entry.sleep !== '') {
+    var h = sleepHours_(entry.sleep);
+    if (h !== null) values.sleepHours = h;
+  }
+  for (var key in R_FIELDS) {
+    if (entry[key] === undefined || entry[key] === null || entry[key] === '') continue;
+    var n = average_(entry[key]);
+    if (n !== null) values[key] = Math.round(n * 100) / 100;
+  }
+  if (!Object.keys(values).length) return json_({ ok: false, error: 'nothing to save' });
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var sheet = getRecoverySheet_();
+    var last = sheet.getLastRow();
+    var row = 0;
+    if (last >= 2) {
+      var dates = sheet.getRange(2, 1, last - 1, 1).getValues();
+      var tz = Session.getScriptTimeZone();
+      for (var i = 0; i < dates.length; i++) {
+        var d = dates[i][0] instanceof Date ? Utilities.formatDate(dates[i][0], tz, 'yyyy-MM-dd') : String(dates[i][0]).slice(0, 10);
+        if (d === date) row = i + 2;
+      }
+    }
+    var current = row ? sheet.getRange(row, 1, 1, R_HEADERS.length).getValues()[0] : R_HEADERS.map(function () { return ''; });
+    current[0] = date;
+    for (var k in values) if (values[k] !== null) current[R_FIELDS[k] - 1] = values[k];
+    current[7] = new Date();
+    var sources = String(current[8] || '').split(', ').filter(String);
+    if (sources.indexOf(source) < 0) sources.push(source);
+    current[8] = sources.join(', ');
+    sheet.getRange(row || last + 1, 1, 1, R_HEADERS.length).setValues([current]);
+    return json_({ ok: true, date: date, saved: values });
+  } catch (err) {
+    return json_({ ok: false, error: String((err && err.message) || err) });
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (ignore) {}
+  }
+}
+
+function recoveryList_(days) {
+  var sheet = getRecoverySheet_();
+  var last = sheet.getLastRow();
+  if (last < 2) return [];
+  var cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  var cutoffText = isoDate_(cutoff);
+  var tz = Session.getScriptTimeZone();
+  var cell = function (v) { return v === '' || v === null || v === undefined || isNaN(Number(v)) ? null : Number(v); };
+  return sheet
+    .getRange(2, 1, last - 1, R_HEADERS.length)
+    .getValues()
+    .map(function (r) {
+      var d = r[0] instanceof Date ? Utilities.formatDate(r[0], tz, 'yyyy-MM-dd') : String(r[0] || '').slice(0, 10);
+      return { date: d, sleepHours: cell(r[1]), sleepScore: cell(r[2]), rhr: cell(r[3]), hrv: cell(r[4]), soreness: cell(r[5]), score: cell(r[6]) };
+    })
+    .filter(function (e) { return /^\d{4}-\d{2}-\d{2}$/.test(e.date) && e.date >= cutoffText; });
 }
 
 /* ---------------------------------------------------------------- Settings */
