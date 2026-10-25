@@ -1,6 +1,6 @@
 /* Service worker: cache-first for the app shell so the app opens with no signal.
    Bump CACHE_VERSION on every deploy; old caches are deleted on activate. */
-const CACHE_VERSION = 'wt-v13';
+const CACHE_VERSION = 'wt-v15';
 const SHELL = [
   './',
   './index.html',
@@ -11,6 +11,7 @@ const SHELL = [
   './charts.js',
   './vault.js',
   './track.js',
+  './picker.js',
   './app.js',
   './manifest.webmanifest',
   './icons/icon.svg',

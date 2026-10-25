@@ -1824,7 +1824,8 @@ img.logo.lg { width: 64px; height: 64px; border-radius: 15px; }
 .logsheet-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.38); z-index: 46; } /* below dialogs (.modal 48) so "Delete this set?" shows on top */
 .logsheet { position: fixed; left: 50%; bottom: 0; transform: translateX(-50%); width: min(520px, 100%); max-height: 90vh; max-height: 90dvh; overflow: auto;
   -webkit-overflow-scrolling: touch; overscroll-behavior: contain; z-index: 47; background: var(--card); border-radius: 24px 24px 0 0;
-  padding: 8px 16px calc(20px + env(safe-area-inset-bottom)); box-shadow: 0 -10px 30px rgba(0,0,0,.18); animation: sheetUp .25s cubic-bezier(.2,.8,.2,1); }
+  padding: 8px 16px calc(20px + env(safe-area-inset-bottom)); box-shadow: 0 -10px 30px rgba(0,0,0,.18); }
+.logsheet.enter { animation: sheetUp .25s cubic-bezier(.2,.8,.2,1); } /* only on the render that opens it */
 @keyframes sheetUp { from { transform: translate(-50%, 40%); opacity: .4; } to { transform: translate(-50%, 0); opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .logsheet { animation: none; } }
 .grab { width: 40px; height: 5px; border-radius: 3px; background: var(--chip-border); margin: 4px auto 12px; }
@@ -2076,6 +2077,74 @@ details.customday[open] > summary .chev { transform: rotate(90deg); }
 .cam-bar .btn.shutter { background: #fff; border: 4px solid var(--saffron); box-shadow: 0 0 0 4px rgba(255,255,255,.25); }
 .viewer-bar .btn.danger { color: #ff8a7e; }
 .cam-top .badge { background: rgba(0,0,0,.55); color: #fff; border: 0; font-size: 13px; padding: 5px 12px; }
+
+/* Muscles not covered by the plan: stripes on the figure, a key, the gap card, list tags */
+#mfig .nocov { pointer-events: none; stroke: none; }
+#mfig .hatch { fill: var(--gap-stripe); }
+:root { --gap-stripe: rgba(23, 18, 15, 0.55); }
+@media (prefers-color-scheme: dark) { :root { --gap-stripe: rgba(246, 238, 227, 0.6); } }
+.gapkey { display: inline-block; width: 22px; height: 12px; border-radius: 3px; border: 1px solid var(--border); flex: none;
+  background: repeating-linear-gradient(45deg, var(--gap-stripe) 0 1.5px, var(--m0) 1.5px 4.5px); }
+.nocov-key { display: flex; align-items: center; gap: 8px; padding: 0 16px 14px; font-size: 12px; color: var(--muted); }
+.gapcard { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; position: relative; overflow: hidden; }
+.gapcard::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--warn-border); }
+.gapcard.ok { display: flex; align-items: center; color: var(--ok); font-size: 14px; font-weight: 600; }
+.gapcard.ok::before { background: var(--ok); }
+.gaphead { display: flex; align-items: center; gap: 8px; }
+.gaphead b { font-size: 16px; }
+.pill-btn.gap { border-style: dashed; }
+.pill-btn.gap.helped { border-style: solid; }
+.gapnote { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
+.gapnote .tag { margin-right: 4px; }
+.mrow .mtx b .tag { margin-left: 4px; vertical-align: 1px; font-size: 11px; padding: 2px 7px; }
+.mrow.gap .sw { background: repeating-linear-gradient(45deg, var(--gap-stripe) 0 1.5px, var(--c) 1.5px 4.5px); }
+
+/* v2.2: rest timer "next up" */
+.timer.floating { flex-direction: column; align-items: stretch; gap: 10px; }
+.timer .trow { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.timer .btn.nextup { width: 100%; justify-content: flex-start; gap: 8px; min-height: 44px; border-radius: 12px; font-size: 14px; }
+.timer .btn.nextup span { opacity: .75; font-weight: 500; }
+.timer .btn.nextup b { flex: 1; min-width: 0; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.timer .btn.nextup .chev { color: inherit; }
+
+/* v2.2: exercise search panel (above the logging panel and dialogs while open) */
+.picker-overlay { z-index: 49; }
+.logsheet.picksheet { z-index: 50; max-height: 92vh; max-height: 92dvh; background: var(--bg); }
+.pick-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 2px 10px; }
+.pick-head b { font-size: 20px; font-weight: 750; }
+.pick-search { position: sticky; top: -8px; z-index: 2; display: flex; align-items: center; gap: 0; background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 0 12px; margin-bottom: 10px; }
+.pick-search .ico { color: var(--muted); }
+.pick-search .input { border: 0; background: transparent; min-height: 48px; padding: 0 4px; box-shadow: none; }
+.pick-days { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; margin-bottom: 10px; }
+.pick-days::-webkit-scrollbar { display: none; }
+.pick-days button { flex: none; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--chip-border); background: var(--card); font: inherit; font-size: 14px; font-weight: 600; color: var(--text); cursor: pointer; }
+.pick-days button[aria-checked='true'] { background: var(--sel-bg); border-color: var(--sel-border); color: var(--sel-text); }
+.pick-row .tx span { line-height: 1.35; }
+.pick-new .tx b { color: var(--sel-text); }
+.pill-btn.on, .pill-btn[aria-pressed='true'] { background: var(--sel-bg); border-color: var(--sel-border); color: var(--sel-text); }
+.pill-btn.mpick { display: inline-flex; align-items: center; gap: 6px; }
+.pill-btn.mpick small { font-size: 11px; font-weight: 750; padding: 1px 6px; border-radius: 999px; }
+.pill-btn.mpick.main { background: var(--saffron); border-color: var(--saffron); color: var(--ink); }
+.pill-btn.mpick.main small { background: rgba(23, 18, 15, .15); }
+.pill-btn.mpick.helps { background: var(--sel-bg); border-color: var(--sel-border); border-style: dashed; color: var(--sel-text); }
+.pill-btn.mpick.helps small { background: var(--card); }
+.mk { padding: 0 6px; border-radius: 6px; }
+.mk.main { background: var(--saffron); color: var(--ink); }
+.mk.helps { background: var(--sel-bg); color: var(--sel-text); border: 1px dashed var(--sel-border); }
+.picksheet .sublabel { margin: 12px 0 6px; }
+
+/* Names the database does not know */
+.unk { padding: 12px 14px; position: relative; }
+.unk + .unk { border-top: 1px solid var(--border); }
+.unk > b { display: block; font-weight: 650; }
+.unk .hint { display: block; margin: 2px 0 8px; }
+.btn.addex { width: 100%; margin-top: 12px; min-height: 46px; font-size: 15px; }
+.btn.addex .ico, .btn .ico { margin-right: 2px; }
+.lrow.addlink { border-top: 1px solid var(--border); }
+.lrow.addlink .tx b { color: var(--sel-text); font-weight: 600; }
+
+/* The toast sits above the floating rest timer while it shows */
+body:has(#timer.floating) .toast { bottom: calc(200px + env(safe-area-inset-bottom)); }
 
 /* Empty and loading */
 .empty { font-size: 14px; }

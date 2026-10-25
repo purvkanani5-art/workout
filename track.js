@@ -1281,12 +1281,31 @@ function musSessions() {
 function musData() {
   const { db, fromSheet } = exerciseDb();
   const u = musUi();
+  // Plan coverage in both views: a muscle no exercise of the schedule trains as a main muscle is "not in your plan".
+  const cov = Muscles.planCoverage(db, planNames(), muscleOf);
+  const gaps = new Set(Muscles.MUSCLES.filter((m) => !cov.mine[m.key].main.length).map((m) => m.key));
   if (u.mode === 'all') {
-    const cov = Muscles.planCoverage(db, planNames(), muscleOf);
-    return { db, fromSheet, mode: 'all', value: cov.score, cov, scale: 'plan' };
+    // Planned hard sets a week per muscle: each exercise's planned sets × how often its day is on the schedule.
+    const perWeek = {};
+    for (const day of Object.values(state.settings.schedule || DEFAULT_SCHEDULE)) if (day) perWeek[day] = (perWeek[day] || 0) + 1;
+    const planned = Muscles.plannedWeekly(db, state.exercises, perWeek, (day, name) => Progress.parsePlan(planText(day, name))?.sets || 3, muscleOf);
+    return { db, fromSheet, mode: 'all', value: planned, cov, gaps, scale: 'week' };
   }
   const t = Muscles.tally(db, musSessions(), muscleOf);
-  return { db, fromSheet, mode: 'mine', value: t.sets, t, scale: u.period === 'day' ? 'day' : 'week' };
+  return { db, fromSheet, mode: 'mine', value: t.sets, t, cov, gaps, scale: u.period === 'day' ? 'day' : 'week' };
+}
+
+/** The muscles your schedule does not cover, as tappable chips (empty when every muscle is covered). */
+function gapsHtml(d) {
+  if (!d.gaps.size) return `<div class="gapcard ok">${icon('check')}<span>Every muscle has at least one main exercise in your plan.</span></div>`;
+  const list = Muscles.MUSCLES.filter((m) => d.gaps.has(m.key));
+  return `<div class="gapcard">
+    <div class="gaphead"><span class="gapkey" aria-hidden="true"></span><b>Not in your plan · ${list.length}</b></div>
+    <p class="hint" style="margin:2px 0 8px">No exercise in your schedule trains these as a main muscle. Striped on the body; tap one for exercises to add.</p>
+    <div class="pills">${list
+      .map((m) => `<button type="button" class="pill-btn gap${d.cov.mine[m.key].helps.length ? ' helped' : ''}" data-action="musPick" data-key="${m.key}">${esc(m.name)}${d.cov.mine[m.key].helps.length ? ' · helped' : ''}</button>`)
+      .join('')}</div>
+  </div>`;
 }
 
 const fmtSets = (n) => `${Number.isInteger(n) ? n : n.toFixed(1)} set${n === 1 ? '' : 's'}`;
@@ -1295,13 +1314,17 @@ function figureSvg(view, d) {
   const layers = Muscles.FIG[view === 'right' ? 'left' : view];
   const mir = 'transform="matrix(-1 0 0 1 200 0)"';
   const picked = musUi().picked;
+  // A muscle not in the plan gets stripes over its colour (the stripes ignore taps, so the muscle still picks).
   const one = ([type, key, path], extra = '') =>
     type === 'm'
-      ? `<path class="m${key === picked ? ' on' : ''}" d="${path}" data-m="${key}" style="fill:var(--m${Muscles.level(d.value[key], d.scale)})" ${extra}/>`
+      ? `<path class="m${key === picked ? ' on' : ''}" d="${path}" data-m="${key}" style="fill:var(--m${Muscles.level(d.value[key], d.scale)})" ${extra}/>${
+          d.gaps.has(key) ? `<path class="nocov" d="${path}" fill="url(#mhatch)" ${extra}/>` : ''
+        }`
       : `<path class="${type}" d="${path}" ${extra}/>`;
   let inner = layers.map((l) => one(l) + (l[3] ? one(l, mir) : '')).join('');
   if (view === 'right') inner = `<g ${mir}>${inner}</g>`;
-  return `<g class="fig-in">${inner}</g>`;
+  const defs = '<defs><pattern id="mhatch" width="3.2" height="3.2" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1.1" height="3.2" class="hatch"/></pattern></defs>';
+  return `${defs}<g class="fig-in">${inner}</g>`;
 }
 
 function pickedHtml(d) {
@@ -1312,6 +1335,8 @@ function pickedHtml(d) {
   const plan = new Set(planNames().map(Muscles.norm));
   const inPlan = (name) => plan.has(Muscles.norm(name));
   const { main, helps } = Muscles.exercisesFor(d.db, key);
+  // One tap from a muscle to the exercise search, already filtered to it, adding to the day that trains it most.
+  const addBtn = `<button type="button" class="btn secondary addex" data-action="openPicker" data-ctx="plan" data-muscle="${key}" data-query="${esc(m.name)}">${icon('plus')}Add a ${esc(m.name)} exercise to your plan</button>`;
   if (d.mode === 'mine') {
     const n = d.value[key];
     const lv = Muscles.level(n, d.scale);
@@ -1324,17 +1349,23 @@ function pickedHtml(d) {
           .slice(0, 5)
           .map((e) => `<span class="${inPlan(e.name) ? 'main' : ''}">Try: ${esc(e.name)}${e.equipment ? ` · ${esc(e.equipment)}` : ''}${inPlan(e.name) ? ' (in your plan)' : ''}</span>`)
           .join('');
-    return `<b>${esc(m.name)}</b><span class="hint">${esc(fmtSets(n))} ${esc(when)} · ${esc(verdict)}</span><div class="exs">${chips}</div>`;
+    const gap = d.gaps.has(key)
+      ? `<p class="gapnote">${tag('Not in your plan', 'warn')} No exercise in your schedule trains it as a main muscle${
+          d.cov.mine[key].helps.length ? ` (helped by ${esc(d.cov.mine[key].helps.join(', '))})` : ''
+        }.${done.length ? ` Try: ${esc(main.slice(0, 3).map((e) => e.name).join(', '))}.` : ''}</p>`
+      : '';
+    return `<b>${esc(m.name)}</b><span class="hint">${esc(fmtSets(n))} ${esc(when)} · ${esc(verdict)}</span>${gap}<div class="exs">${chips}</div>${addBtn}`;
   }
   const mine = d.cov.mine[key];
+  const weekly = Math.round(d.value[key] * 10) / 10;
   const row = (e) =>
     `<li><span class="ename">${esc(e.name)}</span>${e.equipment ? `<span class="eq">${esc(e.equipment)}</span>` : ''}${inPlan(e.name) ? '<span class="badge">In your plan</span>' : ''}</li>`;
-  return `<b>${esc(m.name)}</b>
+  return `<b>${esc(m.name)}</b>${d.gaps.has(key) ? ` ${tag('Not in your plan', 'warn')}` : ''}
     <span class="hint">${esc(m.area)} · your plan: ${
       mine.main.length || mine.helps.length
         ? esc([mine.main.length ? `${mine.main.length} main (${mine.main.join(', ')})` : '', mine.helps.length ? `${mine.helps.length} helping` : ''].filter(Boolean).join(', '))
         : 'nothing works it yet'
-    }</span>
+    } · about ${esc(weekly)} hard sets a week planned (target ${esc(state.settings.progression.muscleSetsMin)}–${esc(state.settings.progression.muscleSetsMax)})</span>${addBtn}
     ${main.length ? `<p class="sublabel">Main exercises (${main.length})</p><ul class="exlist">${main.map(row).join('')}</ul>` : '<p class="hint">No exercise in the database has it as a main muscle.</p>'}
     ${helps.length ? `<details class="exmore"><summary>Also helped by ${helps.length} exercise${helps.length === 1 ? '' : 's'}</summary><ul class="exlist">${helps.map(row).join('')}</ul></details>` : ''}`;
 }
@@ -1344,8 +1375,10 @@ function muscleListsHtml(d) {
   const rows = Muscles.MUSCLES.map((m) => ({ m, n: d.value[m.key], lv: Muscles.level(d.value[m.key], d.scale) }));
   const max = Math.max(...rows.map((r) => r.n), 1);
   const rowHtml = ({ m, n, lv }, sub) =>
-    `<button type="button" class="mrow" data-action="musPick" data-key="${m.key}" style="--c:var(--m${lv})"><span class="sw"></span><span class="mtx"><b>${esc(m.name)}</b><span>${esc(sub)}</span></span><span class="n">${
-      d.mode === 'mine' ? esc(fmtSets(n)) : ''
+    `<button type="button" class="mrow${d.gaps.has(m.key) ? ' gap' : ''}" data-action="musPick" data-key="${m.key}" style="--c:var(--m${lv})"><span class="sw"></span><span class="mtx"><b>${esc(m.name)}${
+      d.gaps.has(m.key) ? ` ${tag('Not in plan', 'warn')}` : ''
+    }</b><span>${esc(sub)}</span></span><span class="n">${
+      d.mode === 'mine' ? esc(fmtSets(n)) : `${esc(Math.round(n * 10) / 10)}/wk`
     }</span><span class="bar"><i style="width:${(n / max) * 100}%"></i></span></button>`;
   let groups;
   if (d.mode === 'mine' && d.scale === 'week') {
@@ -1361,8 +1394,12 @@ function muscleListsHtml(d) {
       [`Not trained on ${day}`, '', rows.filter((r) => r.n === 0)],
     ];
   } else {
+    // All exercises: the gaps first, then every muscle by body area.
     const areas = [...new Set(Muscles.MUSCLES.map((m) => m.area))];
-    groups = areas.map((a) => [a, '', rows.filter((r) => r.m.area === a)]);
+    groups = [
+      ['Not in your plan', `${d.gaps.size} muscle${d.gaps.size === 1 ? '' : 's'} · no main exercise`, rows.filter((r) => d.gaps.has(r.m.key))],
+      ...areas.map((a) => [a, '', rows.filter((r) => r.m.area === a)]),
+    ];
   }
   const html = groups
     .filter(([, , list]) => list.length)
@@ -1372,18 +1409,13 @@ function muscleListsHtml(d) {
           if (d.mode === 'mine') return rowHtml(r, r.m.area);
           const c = d.cov.mine[r.m.key];
           const total = Muscles.exercisesFor(d.db, r.m.key).main.length;
-          return rowHtml(r, `${total} exercises · your plan: ${c.main.length ? `${c.main.length} main` : c.helps.length ? 'helping only' : 'none'}`);
+          return rowHtml(r, `${total} in the database · your plan: ${c.main.length ? `${c.main.length} main` : c.helps.length ? 'helping only' : 'none'}`);
         })
         .join('')}</div>`),
     )
     .join('');
-  const unmatched = d.mode === 'mine' ? d.t.unmatched : [];
-  return (
-    html +
-    (unmatched.length
-      ? `<p class="hint">Not in the exercise database, counted by their muscle group from More → Exercises: ${esc(unmatched.join(', '))}. Add them to the Sheet's Exercises tab for an exact count.</p>`
-      : '')
-  );
+  // Names the database does not know (plan or log): match each to an exercise once, saved as its other name.
+  return html + unknownNamesHtml();
 }
 
 function renderMuscles() {
@@ -1396,7 +1428,7 @@ function renderMuscles() {
   const ex = state.exdb;
   return `
     <h1 class="large">Muscles</h1>
-    <p class="sub">${d.mode === 'mine' ? 'Hard sets per muscle from your workouts · warm-ups not counted' : 'Every exercise in the database, and how your plan covers each muscle'}</p>
+    <p class="sub">${d.mode === 'mine' ? 'Hard sets per muscle from your workouts · warm-ups not counted' : 'Hard sets a week your plan gives each muscle (planned sets × days on the schedule), and every exercise in the database'}</p>
     <div class="seg2" role="tablist" aria-label="Show">
       <button type="button" role="tab" data-action="musMode" data-mode="mine" aria-selected="${d.mode === 'mine'}">My workout</button>
       <button type="button" role="tab" data-action="musMode" data-mode="all" aria-selected="${d.mode === 'all'}">All exercises</button>
@@ -1434,7 +1466,9 @@ function renderMuscles() {
       </div>
       <div class="picked" id="mpicked">${pickedHtml(d)}</div>
       <div class="scale">${Muscles.LEVELS[d.scale].map(([, label], i) => `<div style="--c:var(--m${i})">${esc(label)}</div>`).join('')}</div>
+      ${d.gaps.size ? '<div class="nocov-key"><span class="gapkey" aria-hidden="true"></span>Striped: not in your plan (no main exercise in your schedule)</div>' : ''}
     </div>
+    <div class="sgroup">${gapsHtml(d)}</div>
     ${muscleListsHtml(d)}
     ${group(
       'Exercise database',
@@ -1442,8 +1476,10 @@ function renderMuscles() {
       `<div class="card stack">
         <p class="hint" style="margin:0">${d.db.list.length} exercises · ${
           d.fromSheet ? `from your Sheet's Exercises tab${ex?.fetchedAt ? `, read ${esc(formatDate(new Date(ex.fetchedAt).toISOString().slice(0, 10), false))}` : ''}` : 'the built-in list (it is copied to your Sheet once it is connected)'
-        }. Add or change exercises in the Sheet: main and helping muscles by the names shown here, separated by commas.</p>
-        ${d.db.unknown.length ? `<p class="small warn-text" style="margin:0">⚠️ Muscle names the app does not know (fix them in the Sheet): ${esc(d.db.unknown.join(', '))}</p>` : ''}
+        }. Read again each time you open this tab. Add exercises here with the search (they go to the Sheet), or in the Sheet itself: the muscle columns have a dropdown of these names.</p>
+        ${exSyncNote()}
+        ${d.db.unknown.length ? `<p class="small warn-text iline" style="margin:0">${icon('alert')}<span>Muscle names the app does not know (fix them in the Sheet): ${esc(d.db.unknown.join(', '))}</span></p>` : ''}
+        <button type="button" class="btn secondary" data-action="openPicker" data-ctx="plan">${icon('search')}Search or add an exercise</button>
         <button type="button" class="btn secondary" data-action="musReload" ${haveApi() ? '' : 'disabled'}>Reload from the Sheet</button>
       </div>`,
     )}`;

@@ -343,7 +343,9 @@ const Muscles = (() => {
       name, equipment, main: main.map((k) => BY_KEY[k].name).join(', '), helps: helps.map((k) => BY_KEY[k].name).join(', '), notes: '',
     }));
 
-  // Rows (from the Sheet or the seed) → { list: [{ name, equipment, main: [keys], helps: [keys] }], unknown: [names] }.
+  // Rows (from the Sheet or the seed) → { list: [{ name, equipment, main: [keys], helps: [keys], aliases: [names] }],
+  // index (name and every alias → entry), unknown: [muscle names not recognised] }. A row's "Also called" cell
+  // (aliases) holds other names the owner uses for the same exercise, separated by commas.
   function buildDb(rows) {
     const unknown = new Set();
     const keys = (text) =>
@@ -364,10 +366,134 @@ const Muscles = (() => {
       if (!name || seen.has(norm(name))) continue;
       seen.add(norm(name));
       const main = [...new Set(keys(r.main))];
-      list.push({ name, equipment: String(r.equipment || '').trim(), main, helps: [...new Set(keys(r.helps))].filter((k) => !main.includes(k)) });
+      const aliases = [...new Set(String(r.aliases || '').split(/[,;\n]/).map((s) => s.trim()).filter(Boolean))];
+      list.push({ name, equipment: String(r.equipment || '').trim(), main, helps: [...new Set(keys(r.helps))].filter((k) => !main.includes(k)), aliases });
     }
     const index = new Map(list.map((e) => [norm(e.name), e]));
+    // Aliases never take over a real exercise name.
+    for (const e of list) for (const a of e.aliases) if (!index.has(norm(a))) index.set(norm(a), e);
     return { list, index, unknown: [...unknown] };
+  }
+
+  /* ------------------------------------------------- changes made in the app (v2.2) */
+
+  // Equipment offered when an exercise is created in the app.
+  const EQUIPMENT = ['Machine', 'Cable', 'Barbell', 'Dumbbell', 'Smith machine', 'Bodyweight', 'Plate', 'Kettlebell', 'Band', 'Other'];
+
+  /**
+   * Rows with the app's changes not yet confirmed by the Sheet laid over them, so the app shows them at once.
+   * ops: [{ type: 'upsert', row: { name, equipment, main, helps, aliases?, notes? } }, { type: 'alias', name, alias }].
+   * Muscles in rows are gym names joined by ", " (the Sheet's format).
+   */
+  function applyOps(rows, ops) {
+    const out = (rows || []).map((r) => ({ ...r }));
+    const find = (name) => out.find((r) => norm(r.name) === norm(name));
+    for (const op of ops || []) {
+      if (op.type === 'upsert' && op.row && op.row.name) {
+        const r = find(op.row.name);
+        if (r) Object.assign(r, Object.fromEntries(Object.entries(op.row).filter(([k, v]) => v !== undefined && k !== 'aliases')));
+        else out.push({ name: op.row.name, equipment: op.row.equipment || '', main: op.row.main || '', helps: op.row.helps || '', aliases: op.row.aliases || '', notes: op.row.notes || '' });
+      } else if (op.type === 'alias' && op.name && op.alias) {
+        const r = find(op.name);
+        if (!r) continue;
+        const list = String(r.aliases || '').split(',').map((s) => s.trim()).filter(Boolean);
+        if (!list.some((a) => norm(a) === norm(op.alias))) list.push(op.alias.trim());
+        r.aliases = list.join(', ');
+      }
+    }
+    return out;
+  }
+
+  // Short forms people write in exercise names.
+  const SHORT = { db: 'dumbbell', dbs: 'dumbbell', bb: 'barbell', kb: 'kettlebell', ez: 'ez', ohp: 'overhead press', rdl: 'romanian deadlift', sldl: 'stiff leg deadlift',
+    inc: 'incline', dec: 'decline', ext: 'extension',bw: 'bodyweight', mach: 'machine', lat: 'lat', pulldown: 'pull down', pushdown: 'push down', 'pull-up': 'pull up', chinup: 'chin up', pullup: 'pull up', smith: 'smith machine' };
+  const tokens = (s) =>
+    norm(s)
+      .split(' ')
+      .flatMap((w) => (SHORT[w] ? SHORT[w].split(' ') : [w]))
+      .filter(Boolean);
+  const grams = (s) => {
+    const t = ` ${tokens(s).join(' ')} `;
+    const g = new Set();
+    for (let i = 0; i < t.length - 1; i++) g.add(t.slice(i, i + 2));
+    return g;
+  };
+  /** 0–1: how alike two exercise names are (shared words, then shared letter pairs). */
+  function similarity(a, b) {
+    const ta = new Set(tokens(a));
+    const tb = new Set(tokens(b));
+    if (!ta.size || !tb.size) return 0;
+    let shared = 0;
+    for (const w of ta) if (tb.has(w) || [...tb].some((x) => (x.length > 3 && w.length > 3 && (x.startsWith(w) || w.startsWith(x))))) shared++;
+    const words = shared / Math.max(ta.size, tb.size);
+    const ga = grams(a);
+    const gb = grams(b);
+    let inter = 0;
+    for (const g of ga) if (gb.has(g)) inter++;
+    const dice = (2 * inter) / (ga.size + gb.size);
+    return 0.6 * words + 0.4 * dice;
+  }
+
+  /** The closest database exercises to a name the database does not know (best first). */
+  function suggest(db, name, n = 3) {
+    return db.list
+      .map((e) => ({ e, s: Math.max(similarity(name, e.name), ...e.aliases.map((a) => similarity(name, a))) }))
+      .filter((x) => x.s >= 0.35)
+      .sort((a, b) => b.s - a.s)
+      .slice(0, n)
+      .map((x) => x.e);
+  }
+
+  /**
+   * Search the database by name, alias, equipment or muscle. Every word typed must match something; exercises whose
+   * name starts with the text come first, then those that train the muscle typed as a main muscle.
+   */
+  function search(db, query, limit = 40) {
+    const q = norm(query);
+    if (!q) return db.list.slice().sort((a, b) => a.name.localeCompare(b.name)).slice(0, limit);
+    const words = tokens(query);
+    const muscleHit = muscleKey(query);
+    const scored = [];
+    for (const e of db.list) {
+      const muscleNames = [...e.main, ...e.helps].map((k) => BY_KEY[k].name);
+      const hay = norm([e.name, ...e.aliases, e.equipment, ...muscleNames, ...[...e.main, ...e.helps].map((k) => BY_KEY[k].area)].join(' '));
+      const hayTokens = tokens(hay);
+      const all = words.every((w) => hayTokens.some((h) => h.startsWith(w)));
+      if (!all && !(muscleHit && (e.main.includes(muscleHit) || e.helps.includes(muscleHit)))) continue;
+      let score = 0;
+      if (norm(e.name).startsWith(q)) score += 5;
+      if (e.aliases.some((a) => norm(a).startsWith(q))) score += 4;
+      if (tokens(e.name).some((t) => words.includes(t))) score += 2;
+      if (muscleHit && e.main.includes(muscleHit)) score += 3;
+      else if (muscleHit && e.helps.includes(muscleHit)) score += 1;
+      // A part of a muscle name ("tri", "hamstr"): exercises where it is the main muscle first.
+      const starts = (keys) => keys.some((k) => tokens(BY_KEY[k].name).some((t) => words.some((w) => w.length >= 3 && t.startsWith(w))));
+      if (!muscleHit && starts(e.main)) score += 2;
+      else if (!muscleHit && starts(e.helps)) score += 0.5;
+      scored.push({ e, score });
+    }
+    return scored.sort((a, b) => b.score - a.score || a.e.name.localeCompare(b.e.name)).slice(0, limit).map((x) => x.e);
+  }
+
+  /**
+   * Hard sets a week each muscle gets from the plan: each exercise's planned sets × how many times its day is on
+   * the weekly schedule; main muscles count the set, helping ones half (the same rule as the logged sets).
+   * days: { dayName: [exercise names] }, perWeek: { dayName: times a week }, setsOf(day, name) → planned sets.
+   */
+  function plannedWeekly(db, days, perWeek, setsOf, coarseOf = () => null) {
+    const sets = Object.fromEntries(MUSCLES.map((m) => [m.key, 0]));
+    for (const [day, names] of Object.entries(days || {})) {
+      const times = perWeek[day] || 0;
+      if (!times) continue;
+      for (const name of names || []) {
+        const e = lookup(db, name, coarseOf(name));
+        if (!e) continue;
+        const n = (setsOf(day, name) || 0) * times;
+        for (const k of e.main) sets[k] += n;
+        for (const k of e.helps) sets[k] += n / 2;
+      }
+    }
+    return sets;
   }
 
   // The owner's older coarse muscle group → muscles, for an exercise that is not in the database.
@@ -450,7 +576,10 @@ const Muscles = (() => {
     return { score, mine };
   }
 
-  return { MUSCLES, BY_KEY, FIG, SKIN, VIEW_OF, EXERCISES, LEVELS, norm, muscleKey, seedRows, buildDb, lookup, tally, exercisesFor, level, planCoverage };
+  return {
+    MUSCLES, BY_KEY, FIG, SKIN, VIEW_OF, EXERCISES, LEVELS, EQUIPMENT, norm, muscleKey, seedRows, buildDb, lookup, tally, exercisesFor, level, planCoverage,
+    applyOps, similarity, suggest, search, plannedWeekly,
+  };
 })();
 
 if (typeof module !== 'undefined') module.exports = Muscles;

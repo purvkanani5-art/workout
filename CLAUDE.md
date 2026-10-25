@@ -415,3 +415,26 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     today; Custom day folds open); History and Body pull from the Sheet by themselves at most every 6 h
     (`autoPull`, quiet, `wt.pulledAt.*`), Sync now stays as a link; the check-in's bodyweight is prefilled from
     today's weigh-in. The "next lighter week" line sits under Training on Today (not counted as attention).
+28. **v2.2.0: exercise search, the database kept in step with the Sheet, plan gaps** (owner 2026-10-25).
+    - Muscles tab marks muscles **not in your plan** (no plan exercise has them as a main muscle): stripes on the
+      figure (`.nocov` over `#mhatch`), a tappable "Not in your plan" card, row tags, a note in the panel; in All
+      exercises they are the first group. All exercises now shows **planned hard sets a week** per muscle (planned
+      sets × days on the schedule; main 1, helping ½) on the 10–20 scale.
+    - `picker.js`: one search panel (`openPicker({ ctx })`, ctx `log` / `plan` / `alias`) over names, other names,
+      equipment and muscles; "+ Another exercise", the logging panel's "Search all exercises…", Exercises & plans and
+      the Muscles tab open it. **Create** taps muscles once = Main, twice = Helping (owner asked for the Sheet's two
+      columns in the app; muscle names are never typed). Added exercises get the plan `3 × 8-12` (editable).
+    - **Aliases** (owner: "keep unmatched names saved as alias in the sheet linked to same exercise, doesn't matter
+      any name is used"): Exercises tab column F "Also called"; plan or logged names the database does not know are
+      listed ("Names to match") with the two closest matches; one tap saves the alias. Names in the plan are never
+      renamed.
+    - Code.gs POST `exerciseUpsert`, `exerciseAlias`, `exerciseSetup` (a dropdown of the 33 muscle names on Main and
+      Helping, `allowInvalid` so comma lists only warn; the owner can tick "Allow multiple selections" in the rule).
+      App changes queue in `wt.exOps`, show at once (`Muscles.applyOps`) and are sent in order; an older script keeps
+      them waiting with a "paste the new Code.gs" hint. The Exercises tab is re-read when the Muscles tab, Exercises
+      & plans or the search opens (5 min), not only every 6 h.
+    - Settings copy: once linked, a newer copy in the Sheet (e.g. another phone) is offered on Today (Use them /
+      Keep this phone's); checked at most every 30 min, never while this phone has unsent changes.
+    - Rest timer shows **Next** (the same exercise's next set, else the next unfinished exercise): one tap opens it.
+    - Panels slide up only when they open (`enter` class), not on every tap inside. The panel closes when the page
+      changes. Parked by the owner (not built): Watch heart rate/calories filled by a Shortcut; reps prefilled.

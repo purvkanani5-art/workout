@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -39,6 +39,7 @@ const KEYS = {
   recoveryOutbox: 'wt.recoveryOutbox', // [{ date, … }] the owner's morning answers waiting for the Recovery tab
   recoveryFetchedAt: 'wt.recoveryFetchedAt', // last time the Shortcut's numbers were fetched from the Sheet
   exdb: 'wt.exdb', // { rows, fetchedAt }: the Sheet's Exercises tab, cached for the muscle map (v2.0)
+  exOps: 'wt.exOps', // [{ id, type: 'upsert' | 'alias', … }] exercise database changes made in the app, waiting for the Sheet (v2.2)
 };
 
 // Weekday (0 = Sunday) → day type; '' = rest. The owner trains Monday to Saturday. Editable in Settings.
@@ -236,7 +237,9 @@ const state = {
   recovery: load(KEYS.recovery, []),
   recoveryOutbox: load(KEYS.recoveryOutbox, []),
   exdb: load(KEYS.exdb, null),
+  exOps: load(KEYS.exOps, []),
   ui: {
+    picker: null, // the exercise search panel (v2.2): { ctx, day, query, mode, create, alias }
     muscles: { mode: 'mine', period: 'week', day: null, view: 'front', picked: null, vb: null }, // Muscles tab
     morning: { soreness: null, sleepScore: '' }, // Home's morning check, before it is saved
     progress: { metric: 'e1rm', range: '12w' },
@@ -517,40 +520,114 @@ async function fetchRecovery({ force = false } = {}) {
 /* ------------------------------------------------- exercise database (v2.0, Exercises tab) */
 
 let exdbCache = null;
-/** The exercise database: the Sheet's rows when they have been read, else the built-in starting list. */
+/** The exercise database: the Sheet's rows when they have been read (else the built-in starting list), with the
+    changes made in the app that the Sheet has not confirmed yet laid over them, so they show at once. */
 function exerciseDb() {
   const rows = state.exdb && Array.isArray(state.exdb.rows) && state.exdb.rows.length ? state.exdb.rows : null;
-  if (!exdbCache || exdbCache.rows !== rows) {
-    exdbCache = { rows, db: Muscles.buildDb(rows || Muscles.seedRows()), fromSheet: Boolean(rows) };
+  if (!exdbCache || exdbCache.rows !== rows || exdbCache.ops !== state.exOps) {
+    exdbCache = { rows, ops: state.exOps, db: Muscles.buildDb(Muscles.applyOps(rows || Muscles.seedRows(), state.exOps)), fromSheet: Boolean(rows) };
   }
   return exdbCache;
 }
 
-/** Read the Exercises tab (at most every 6 hours unless forced). An empty tab gets the starting list written once;
-    the script never writes over rows that are there, so the owner's edits stay. */
-async function fetchExercises({ force = false } = {}) {
-  if (!haveApi()) return false;
-  const ex = state.exdb || {};
-  if (!force && ex.fetchedAt && Date.now() - ex.fetchedAt < 6 * 3600000) return false;
+/** Queue a database change made in the app (a new exercise, or another name for one) and send it to the Sheet. */
+function queueExerciseOp(op) {
+  state.exOps = [...state.exOps, { id: uuid(), ...op }];
+  save(KEYS.exOps, state.exOps);
+  flushExerciseOps().then(() => {
+    if (['muscles', 'settings', 'entry'].includes(route().name)) render();
+  });
+}
+
+let exOpsBusy = false;
+let exSheetError = ''; // e.g. the Sheet still runs an Apps Script without the v2.2 actions
+/** Send queued database changes in order. Each confirmed one is folded into the cached Sheet rows. */
+async function flushExerciseOps() {
+  if (!haveApi() || exOpsBusy || !state.exOps.length) return false;
+  exOpsBusy = true;
   try {
-    let rows = (await apiGet({ action: 'exercises' })).rows;
-    if (!Array.isArray(rows)) rows = [];
-    if (!rows.length) {
-      await apiPost({ action: 'exercises', rows: Muscles.seedRows() });
-      const again = (await apiGet({ action: 'exercises' })).rows;
-      rows = Array.isArray(again) && again.length ? again : Muscles.seedRows();
+    while (state.exOps.length) {
+      const op = state.exOps[0];
+      try {
+        if (op.type === 'upsert') await apiPost({ action: 'exerciseUpsert', row: op.row });
+        else await apiPost({ action: 'exerciseAlias', name: op.name, alias: op.alias });
+      } catch (err) {
+        exSheetError = err instanceof ApiError ? err.message : '';
+        if (err instanceof ApiError && !/unknown action/.test(err.message)) {
+          // The Sheet refused this one (e.g. the exercise was deleted there): drop it so the rest can go.
+          state.exOps = state.exOps.slice(1);
+          save(KEYS.exOps, state.exOps);
+          continue;
+        }
+        return false; // offline, or an older Apps Script: kept for later
+      }
+      exSheetError = '';
+      if (state.exdb && Array.isArray(state.exdb.rows)) {
+        state.exdb = { ...state.exdb, rows: Muscles.applyOps(state.exdb.rows, [op]) };
+        save(KEYS.exdb, state.exdb);
+      }
+      state.exOps = state.exOps.slice(1);
+      save(KEYS.exOps, state.exOps);
     }
-    state.exdb = { rows, fetchedAt: Date.now() };
-    save(KEYS.exdb, state.exdb);
     return true;
-  } catch {
-    return false; // offline, or an Apps Script older than v2.0: the built-in list is used meanwhile
+  } finally {
+    exOpsBusy = false;
   }
 }
 
-function refreshExercises(force = false) {
-  return fetchExercises({ force }).then((got) => {
-    if (got && route().name === 'muscles') render();
+/** Read the Exercises tab: at most every `maxAge` ms (6 h by default; the Muscles tab and the exercise search ask
+    for 5 minutes) unless forced. An empty tab gets the starting list written once; the script never writes over
+    rows that are there, so the owner's edits stay. Queued changes go first, so the read already has them. */
+let exFetching = null;
+async function fetchExercises({ force = false, maxAge = 6 * 3600000 } = {}) {
+  if (!haveApi()) return false;
+  const ex = state.exdb || {};
+  if (!force && ex.fetchedAt && Date.now() - ex.fetchedAt < maxAge) return false;
+  if (exFetching) return exFetching;
+  exFetching = (async () => {
+    try {
+      await flushExerciseOps();
+      let rows = (await apiGet({ action: 'exercises' })).rows;
+      if (!Array.isArray(rows)) rows = [];
+      if (!rows.length) {
+        await apiPost({ action: 'exercises', rows: Muscles.seedRows() });
+        const again = (await apiGet({ action: 'exercises' })).rows;
+        rows = Array.isArray(again) && again.length ? again : Muscles.seedRows();
+      }
+      state.exdb = { rows, fetchedAt: Date.now() };
+      save(KEYS.exdb, state.exdb);
+      setupMuscleDropdowns();
+      return true;
+    } catch {
+      return false; // offline, or an Apps Script older than v2.0: the built-in list is used meanwhile
+    } finally {
+      exFetching = null;
+    }
+  })();
+  return exFetching;
+}
+
+/** Once per list of muscle names: ask the Sheet to put a dropdown of them on the two muscle columns. */
+function setupMuscleDropdowns() {
+  const names = Muscles.MUSCLES.map((m) => m.name);
+  const key = names.join('|');
+  let done = '';
+  try {
+    done = localStorage.getItem('wt.exSetup') || '';
+  } catch {}
+  if (done === key) return;
+  apiPost({ action: 'exerciseSetup', muscles: names })
+    .then(() => {
+      try {
+        localStorage.setItem('wt.exSetup', key);
+      } catch {}
+    })
+    .catch(() => {}); // an older Apps Script: tried again next time
+}
+
+function refreshExercises(force = false, maxAge) {
+  return fetchExercises({ force, maxAge }).then((got) => {
+    if (got && (route().name === 'muscles' || state.ui.picker)) render();
     return got;
   });
 }
@@ -747,6 +824,40 @@ async function linkSettingsBackup({ ask = true } = {}) {
   }
   saveBackupState({ linked: true, dirty: !restore, remoteAt: null });
   if (!restore) await uploadSettings();
+  render();
+}
+
+/**
+ * v2.2: once linked, look (at most every 30 minutes) for a settings copy in the Sheet newer than the one this phone
+ * sent, e.g. saved from another phone. Today then offers it; nothing changes without a tap.
+ */
+let settingsCheckedAt = 0;
+async function checkNewerSettings() {
+  const b = state.backup;
+  if (!haveApi() || !b.linked || b.dirty || Date.now() - settingsCheckedAt < 30 * 60000) return;
+  settingsCheckedAt = Date.now();
+  try {
+    const remote = await apiGet({ action: 'settings' });
+    const at = remote.savedAt ? String(remote.savedAt) : '';
+    const newer = Boolean(remote.data && at && at > (b.sentAt || '') && at !== b.declinedAt);
+    if (newer !== Boolean(b.newerAt) || (newer && at !== b.newerAt)) {
+      saveBackupState({ newerAt: newer ? at : null });
+      if (route().name === 'home') render();
+    }
+  } catch {}
+}
+
+/** Use the newer settings copy from the Sheet. */
+async function useNewerSettings() {
+  try {
+    const remote = await apiGet({ action: 'settings' });
+    if (!remote.data) return toast('The Sheet has no settings copy', 'error');
+    applySettingsSnapshot(remote.data);
+    saveBackupState({ newerAt: null, sentAt: String(remote.savedAt || nowISO()), dirty: false });
+    toast('Settings updated from the Sheet');
+  } catch (err) {
+    toast(describeError(err), 'error');
+  }
   render();
 }
 
@@ -1260,9 +1371,15 @@ function render() {
   // Leaving the photo screens locks the vault, so decrypted photos never sit behind another screen.
   if (name !== 'photos') lockVault();
   // The logging panel redraws on every tap; keep its scroll position so it does not jump back to the top.
-  const sheetScroll = app.querySelector('.logsheet')?.scrollTop || 0;
-  app.innerHTML = html + tabBar(tabOf(name));
-  const sheet = app.querySelector('.logsheet');
+  const sheetScroll = app.querySelector('.logsheet:not(.picksheet)')?.scrollTop || 0;
+  if (state.ui.picker && state.ui.picker.hash !== location.hash) state.ui.picker = null; // left the page it was opened on
+  const pickScroll = app.querySelector('.picksheet')?.scrollTop || 0;
+  app.innerHTML = html + (state.ui.picker ? renderPicker() : '') + tabBar(tabOf(name));
+  const pick = app.querySelector('.picksheet');
+  if (pick) pick.scrollTop = pickScroll;
+  state.ui.sheetEnter = false; // panels slide up only on the render that opens them
+  if (state.ui.picker) state.ui.picker.enter = false;
+  const sheet = app.querySelector('.logsheet:not(.picksheet)');
   if (sheet) sheet.scrollTop = sheetScroll;
   clearInterval(clockHandle);
   if (name === 'entry') {
@@ -1278,6 +1395,7 @@ function render() {
   }
   if (name === 'history' && !arg) autoPull('history');
   if (name === 'body') autoPull('measurements');
+  if (name === 'muscles' || (name === 'settings' && arg === 'exercises')) refreshExercises(false, 5 * 60000); // the Sheet's latest exercises
   if (name === 'photos') afterPhotosRender();
   if (name === 'muscles') afterMusclesRender();
   if (name === 'entry') tickTimer();
@@ -1610,6 +1728,8 @@ const GLYPHS = {
   leaf: '<path d="M5 19c0-8 5-13 14-14-1 9-6 14-14 14z"/><path d="M5 19l7-7"/>',
   body: '<circle cx="12" cy="4.5" r="2.2"/><path d="M6 9l6 1 6-1M12 10v5M9 21l3-6 3 6"/>',
   cross: '<path d="M7 7l10 10M17 7L7 17"/>',
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
   watch: '<rect x="6.5" y="6.5" width="11" height="11" rx="3"/><path d="M9 6.5L9.5 3h5l.5 3.5M9 17.5l.5 3.5h5l.5-3.5M12 9.5V12l1.5 1"/>',
   alert: '<path d="M12 3.5L2.5 20h19z"/><path d="M12 10v4.5M12 17.2v.3"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.8v.2"/>',
@@ -1834,6 +1954,21 @@ function calorieBanner() {
 /** Everything on Today that needs attention, as a list of banners (empty ones left out). */
 function homeBanners() {
   const out = [];
+  const newer = state.backup.newerAt;
+  if (newer) {
+    const d = new Date(newer);
+    out.push(
+      notice(
+        'accent',
+        'cloud',
+        'sky',
+        'Newer settings in the Sheet',
+        `Saved ${esc(formatDate(newer.slice(0, 10), false))}${Number.isFinite(d.getTime()) ? `, ${esc(d.toTimeString().slice(0, 5))}` : ''}, probably on another phone: exercises, plans, schedule and the rest.`,
+        '',
+        '<button type="button" class="btn small pill" data-action="useNewerSettings">Use them</button><button type="button" class="btn small pill" data-action="keepPhoneSettingsNewer">Keep this phone’s</button>',
+      ),
+    );
+  }
   out.push(calorieBanner());
   out.push(missedCard());
   out.push(weekSummaryHome());
@@ -1903,7 +2038,7 @@ function exerciseOptions(f) {
     ${mine.map(opt).join('')}
     ${mine.length && others.length ? '<option disabled>──────────</option>' : ''}
     ${others.map(opt).join('')}
-    <option value="__new__">+ Add new exercise…</option>`;
+    <option value="__new__">Search all exercises…</option>`;
 }
 
 /** Exercises shown on the workout screen: the day's plan in order, then anything else logged today. */
@@ -1968,7 +2103,7 @@ function renderEntry() {
     ${inProgress.length ? list('In progress', inProgress, '') : ''}
     ${list('Up next', next, 'Every exercise has been started.')}
     ${finished.length ? list('Done', finished, '') : ''}
-    <div class="sgroup"><button type="button" class="btn secondary" data-action="openLog" data-name="">+ Another exercise</button></div>
+    <div class="sgroup"><button type="button" class="btn secondary" data-action="openPicker" data-ctx="log">+ Another exercise</button></div>
     ${cardio ? `<p class="hint" style="text-align:center;margin-top:16px">After lifting: ${esc(cardio)}</p>` : ''}
     ${state.ui.timer ? renderTimer() : ''}
     ${state.ui.sheet ? renderSetSheet() : ''}`;
@@ -2007,7 +2142,7 @@ function renderSetSheet() {
   const step = Number(state.settings.steps?.[f.exercise]) || 2.5;
   return `
     <div class="logsheet-overlay" data-action="closeSheet" aria-hidden="true"></div>
-    <section class="logsheet" role="dialog" aria-modal="true" aria-label="Log a set">
+    <section class="logsheet ${state.ui.sheetEnter ? 'enter' : ''}" role="dialog" aria-modal="true" aria-label="Log a set">
       <div class="grab" aria-hidden="true"></div>
       <div class="stack">
         <div class="logsheet-head">
@@ -2166,18 +2301,40 @@ function entryStatus(exercise) {
 function renderTimer() {
   const t = state.ui.timer;
   const remaining = (t.endsAt - Date.now()) / 1000;
+  const next = nextUp();
   return `
     <div class="timer floating ${remaining <= 0 ? 'done' : ''}" id="timer" role="timer" aria-label="Rest timer">
-      <div>
-        <div class="small muted">Rest</div>
-        <div class="time" id="timer-value">${remaining <= 0 ? 'Go' : fmtClock(remaining)}</div>
+      <div class="trow">
+        <div>
+          <div class="small muted">Rest</div>
+          <div class="time" id="timer-value">${remaining <= 0 ? 'Go' : fmtClock(remaining)}</div>
+        </div>
+        <div class="controls">
+          <button type="button" class="btn small" data-action="timerMinus">−15s</button>
+          <button type="button" class="btn small" data-action="timerPlus">+15s</button>
+          <button type="button" class="btn small" data-action="timerSkip">Skip</button>
+        </div>
       </div>
-      <div class="controls">
-        <button type="button" class="btn small" data-action="timerMinus">−15s</button>
-        <button type="button" class="btn small" data-action="timerPlus">+15s</button>
-        <button type="button" class="btn small" data-action="timerSkip">Skip</button>
-      </div>
+      ${
+        next
+          ? `<button type="button" class="btn nextup" data-action="openLog" data-name="${esc(next.name)}"><span>${esc(next.label)}</span><b>${esc(next.name)}</b>${CHEV}</button>`
+          : ''
+      }
     </div>`;
+}
+
+/** What comes after the set just saved: the same exercise's next set while its planned sets are not done, else the
+    next exercise in plan order that is not finished. One tap on the rest timer opens it (v2.2). */
+function nextUp() {
+  const d = state.draft;
+  if (!d) return null;
+  const cur = state.ui.form?.exercise;
+  const names = entryExercises();
+  if (cur && workingSetsDone(cur) < plannedSets(cur)) return { name: cur, label: `Set ${workingSetsDone(cur) + 1} of ${plannedSets(cur)}` };
+  const start = Math.max(0, names.indexOf(cur));
+  const order = [...names.slice(start + 1), ...names.slice(0, start + 1)];
+  const n = order.find((x) => x !== cur && workingSetsDone(x) < plannedSets(x));
+  return n ? { name: n, label: 'Next exercise' } : null;
 }
 
 function summarise(session) {
@@ -2596,13 +2753,11 @@ function renderSettings() {
                 .join('')}</div>`
             : '<p class="empty pad">No exercises for this day yet.</p>'
         }
-        <div class="addrow input-row">
-          <label for="manage-new" class="sr-only">New exercise</label>
-          <input id="manage-new" class="input" placeholder="New exercise" value="${esc(ui.manageNew)}" data-input="manageNew" autocomplete="off" />
-          <button type="button" class="btn" data-action="manageAdd">Add</button>
-        </div>
+        <button type="button" class="lrow addlink" data-action="openPicker" data-ctx="plan" data-day="${esc(day)}">${appIcon('search', 'blue')}<span class="tx"><b>Add an exercise to ${esc(day)}</b><span>Search the exercise database, or create one with its muscles</span></span>${CHEV}</button>
       </div>`,
       )}
+      ${exSyncNote() ? `<div class="sgroup">${exSyncNote()}</div>` : ''}
+      ${unknownNamesHtml()}
       ${group(
         'After lifting',
         '',
@@ -3248,6 +3403,7 @@ const actions = {
     const f = state.ui.form;
     if (!f || f.editingId || f.exercise !== name || !name) state.ui.form = newForm(name);
     state.ui.sheet = true;
+    state.ui.sheetEnter = true; // slide up once, not on every tap inside
     render();
   },
 
@@ -3280,6 +3436,17 @@ const actions = {
   },
 
   /** Today's "Start <day>": the scheduled day for today, no questions asked. */
+  useNewerSettings() {
+    return useNewerSettings();
+  },
+
+  /** Keep this phone's settings: they replace the Sheet's newer copy, and that copy is not offered again. */
+  keepPhoneSettingsNewer() {
+    saveBackupState({ declinedAt: state.backup.newerAt, newerAt: null, dirty: true });
+    uploadSettings();
+    render();
+  },
+
   /** One tap on a day on the Workout tab starts it on the chosen date (today unless changed). */
   quickStart(el) {
     const st = state.ui.start;
@@ -3831,9 +3998,9 @@ const changes = {
   exercise(el) {
     const f = form();
     if (el.value === '__new__') {
-      f.addingExercise = true;
-      render();
-      document.getElementById('new-exercise')?.focus();
+      // v2.2: the exercise search (the whole database, or create one with its muscles)
+      state.ui.sheet = false;
+      openPicker({ ctx: 'log' });
       return;
     }
     f.addingExercise = false;
@@ -4498,6 +4665,8 @@ function normaliseSession(raw) {
 Object.assign(actions, trackActions);
 Object.assign(changes, trackChanges);
 Object.assign(inputs, trackInputs);
+Object.assign(actions, pickerActions);
+Object.assign(inputs, pickerInputs);
 
 function bindEvents() {
   const app = document.getElementById('app');
@@ -4545,6 +4714,7 @@ function bindEvents() {
       syncOutbox();
       refreshRecovery();
       refreshExercises();
+      checkNewerSettings();
       if (route().name === 'entry') tickTimer();
     }
   });
@@ -4572,3 +4742,4 @@ registerServiceWorker();
 syncOutbox();
 refreshRecovery();
 refreshExercises();
+checkNewerSettings();

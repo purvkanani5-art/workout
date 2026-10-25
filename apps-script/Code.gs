@@ -21,6 +21,9 @@
  *   GET  {scriptUrl}?action=recovery&token=…&days=60
  *   POST {scriptUrl}                       body: { token, action: "exercises", rows: [...] }  (seed, empty tab only)
  *   GET  {scriptUrl}?action=exercises&token=…
+ *   POST {scriptUrl}                       body: { token, action: "exerciseUpsert", row: {...} }   (add or update a row)
+ *   POST {scriptUrl}                       body: { token, action: "exerciseAlias", name, alias }  (another name for a row)
+ *   POST {scriptUrl}                       body: { token, action: "exerciseSetup", muscles: [...] } (muscle dropdowns)
  *
  * Log: one row per set. Writing is idempotent by Session ID: submitting the same session twice adds
  * nothing and returns { ok: true, duplicate: true, rows: 0 }.
@@ -72,7 +75,10 @@ var R_FIELDS = { sleepHours: 2, sleepScore: 3, rhr: 4, hrv: 5, soreness: 6, scor
 var E_SHEET_NAME = 'Exercises';
 // The exercise database for the muscle map: one row per exercise. Muscles are written by their gym names, separated
 // by commas. The app writes its starting list once (only into an empty tab); after that the owner edits it here.
-var E_HEADERS = ['Exercise', 'Equipment', 'Main muscles', 'Helping muscles', 'Notes'];
+// "Also called" (v2.2): other names the owner uses for the same exercise, separated by commas; the app matches them
+// to this row. The app adds rows and aliases here itself (exerciseUpsert / exerciseAlias) and sets a dropdown of the
+// muscle names on the two muscle columns (exerciseSetup).
+var E_HEADERS = ['Exercise', 'Equipment', 'Main muscles', 'Helping muscles', 'Notes', 'Also called'];
 // Column numbers (1-based) used below. Notes to Satisfaction are per-session and filled on a session's first row
 // only; RIR (reps in reserve, 3 = "3 or more") and Warm-up are per set and were added after the first version.
 var COL = {
@@ -180,6 +186,9 @@ function doPost(e) {
   // The iPhone Shortcut sends a flat body ({ token, action, sleep, rhr, hrv }); the app sends { entry: {...} }.
   if (body.action === 'recovery') return recovery_(body.entry || body, body.entry ? 'app' : 'shortcut');
   if (body.action === 'exercises') return seedExercises_(body.rows);
+  if (body.action === 'exerciseUpsert') return upsertExercise_(body.row);
+  if (body.action === 'exerciseAlias') return aliasExercise_(body.name, body.alias);
+  if (body.action === 'exerciseSetup') return setupExercises_(body.muscles);
   if (body.action !== 'submit') return json_({ ok: false, error: 'unknown action' });
 
   var session = body.session;
@@ -708,8 +717,113 @@ function getExerciseSheet_() {
   if (sheet.getLastRow() === 0) {
     sheet.getRange(1, 1, 1, E_HEADERS.length).setValues([E_HEADERS]).setFontWeight('bold');
     sheet.setFrozenRows(1);
+  } else {
+    // A tab made by an older Code.gs gets the new header cells ("Also called"); headers you renamed stay.
+    if (sheet.getMaxColumns() < E_HEADERS.length) sheet.insertColumnsAfter(sheet.getMaxColumns(), E_HEADERS.length - sheet.getMaxColumns());
+    var head = sheet.getRange(1, 1, 1, E_HEADERS.length);
+    var cur = head.getValues()[0];
+    var changed = false;
+    for (var i = 0; i < E_HEADERS.length; i++) if (cur[i] === '' || cur[i] === null) { cur[i] = E_HEADERS[i]; changed = true; }
+    if (changed) head.setValues([cur]).setFontWeight('bold');
   }
   return sheet;
+}
+
+/** Same matching as the app: case, punctuation and a plural s are ignored. */
+function normName_(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(' ')
+    .map(function (w) { return w.length > 3 && /s$/.test(w) && !/ss$/.test(w) ? w.slice(0, -1) : w; })
+    .join(' ');
+}
+
+/** Row number (2…) of an exercise by its name, or 0. */
+function exerciseRow_(sheet, name) {
+  var last = sheet.getLastRow();
+  if (last < 2) return 0;
+  var names = sheet.getRange(2, 1, last - 1, 1).getValues();
+  var want = normName_(name);
+  for (var i = 0; i < names.length; i++) if (normName_(names[i][0]) === want) return i + 2;
+  return 0;
+}
+
+/** Add an exercise made in the app, or update the cells it sends (blank ones are left alone). Aliases are merged. */
+function upsertExercise_(row) {
+  if (!row || !String(row.name || '').trim()) return json_({ ok: false, error: 'no name' });
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var sheet = getExerciseSheet_();
+    var r = exerciseRow_(sheet, row.name);
+    var fields = [String(row.name).trim(), row.equipment, row.main, row.helps, row.notes];
+    if (!r) {
+      r = sheet.getLastRow() + 1;
+      sheet.getRange(r, 1, 1, E_HEADERS.length).setValues([[fields[0], String(row.equipment || ''), String(row.main || ''), String(row.helps || ''), String(row.notes || ''), String(row.aliases || '')]]);
+      return json_({ ok: true, added: true });
+    }
+    for (var c = 1; c < fields.length; c++) if (fields[c] !== undefined && fields[c] !== null && String(fields[c]) !== '') sheet.getRange(r, c + 1).setValue(String(fields[c]));
+    if (row.aliases) mergeAliases_(sheet, r, String(row.aliases).split(','));
+    return json_({ ok: true, added: false });
+  } catch (err) {
+    return json_({ ok: false, error: String((err && err.message) || err) });
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (ignore) {}
+  }
+}
+
+function mergeAliases_(sheet, r, extra) {
+  var cell = sheet.getRange(r, 6);
+  var list = String(cell.getValue() || '').split(',').map(function (s) { return s.trim(); }).filter(String);
+  var seen = list.map(normName_);
+  for (var i = 0; i < extra.length; i++) {
+    var a = String(extra[i] || '').trim();
+    if (a && seen.indexOf(normName_(a)) < 0) { list.push(a); seen.push(normName_(a)); }
+  }
+  cell.setValue(list.join(', '));
+}
+
+/** Another name for an exercise: added to its "Also called" cell. */
+function aliasExercise_(name, alias) {
+  if (!String(name || '').trim() || !String(alias || '').trim()) return json_({ ok: false, error: 'name and alias needed' });
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var sheet = getExerciseSheet_();
+    var r = exerciseRow_(sheet, name);
+    if (!r) return json_({ ok: false, error: 'no exercise named ' + name });
+    mergeAliases_(sheet, r, [alias]);
+    return json_({ ok: true });
+  } catch (err) {
+    return json_({ ok: false, error: String((err && err.message) || err) });
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (ignore) {}
+  }
+}
+
+/**
+ * A dropdown of the muscle names on Main muscles and Helping muscles. Several muscles in one cell are allowed (the
+ * rule warns, it never rejects); in the Sheet, Data → Data validation → this rule → "Allow multiple selections" turns
+ * the dropdown into tick boxes. Set again only when the list of names changes.
+ */
+function setupExercises_(muscles) {
+  if (!Array.isArray(muscles) || !muscles.length) return json_({ ok: false, error: 'no muscles' });
+  var names = muscles.map(function (m) { return String(m).trim(); }).filter(String);
+  var key = names.join('|');
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('E_MUSCLES') === key) return json_({ ok: true, changed: false });
+  var sheet = getExerciseSheet_();
+  var rule = SpreadsheetApp.newDataValidation().requireValueInList(names, true).setAllowInvalid(true)
+    .setHelpText('Pick the muscle names (gym names). Several are separated by commas.').build();
+  sheet.getRange(2, 3, Math.max(sheet.getMaxRows() - 1, 1), 2).setDataValidation(rule);
+  props.setProperty('E_MUSCLES', key);
+  return json_({ ok: true, changed: true });
 }
 
 /** Write the app's starting exercise list, but only into an empty tab: the owner's edits are never overwritten. */
@@ -723,7 +837,7 @@ function seedExercises_(rows) {
     var values = rows
       .filter(function (r) { return r && String(r.name || '').trim(); })
       .map(function (r) {
-        return [String(r.name).trim(), String(r.equipment || ''), String(r.main || ''), String(r.helps || ''), String(r.notes || '')];
+        return [String(r.name).trim(), String(r.equipment || ''), String(r.main || ''), String(r.helps || ''), String(r.notes || ''), String(r.aliases || '')];
       });
     if (!values.length) return json_({ ok: false, error: 'no rows' });
     sheet.getRange(2, 1, values.length, E_HEADERS.length).setValues(values);
@@ -746,7 +860,7 @@ function exerciseRows_() {
     .getValues()
     .filter(function (r) { return String(r[0] || '').trim(); })
     .map(function (r) {
-      return { name: String(r[0]).trim(), equipment: String(r[1] || ''), main: String(r[2] || ''), helps: String(r[3] || ''), notes: String(r[4] || '') };
+      return { name: String(r[0]).trim(), equipment: String(r[1] || ''), main: String(r[2] || ''), helps: String(r[3] || ''), notes: String(r[4] || ''), aliases: String(r[5] || '') };
     });
 }
 
