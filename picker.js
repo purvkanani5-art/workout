@@ -44,7 +44,7 @@ function dayForMuscle(key) {
   for (const day of planDays()) {
     const n = (state.exercises[day] || []).filter((name) => {
       const e = Muscles.lookup(db, name, manualGroup(name));
-      return e && (e.main.includes(key) || e.helps.includes(key));
+      return e && (e.main.includes(key) || e.helps.includes(key) || e.minor.includes(key));
     }).length;
     if (n > bestN) [best, bestN] = [day, n];
   }
@@ -115,12 +115,17 @@ function renderSearch() {
     <div id="pick-results">${pickResultsHtml()}</div>`;
 }
 
-/** New exercise: name, equipment (one tap), muscles (tap once = Main, twice = Helping, three times = off). */
+// Tapping a muscle cycles Main → Helping (secondary, ½ set) → Tertiary (¼ set) → off.
+const NEXT_MARK = { '': 'main', main: 'helps', helps: 'minor', minor: '' };
+const MARK_LABEL = { main: 'Main', helps: 'Helps', minor: 'Tertiary' };
+
+/** New exercise: name, equipment (one tap), muscles (tap once = Main, twice = Helping, three times = Tertiary, four = off). */
 function renderCreateForm() {
   const c = pickerUi().create;
   const areas = [...new Set(Muscles.MUSCLES.map((m) => m.area))];
   const main = Object.keys(c.marks).filter((k) => c.marks[k] === 'main');
   const helps = Object.keys(c.marks).filter((k) => c.marks[k] === 'helps');
+  const minor = Object.keys(c.marks).filter((k) => c.marks[k] === 'minor');
   const edit = pickerUi().ctx === 'edit';
   return `
     <div class="stack">
@@ -147,19 +152,19 @@ function renderCreateForm() {
       </fieldset>
       <fieldset>
         <legend>Muscles</legend>
-        <p class="hint" style="margin:0 0 8px">Tap once for a <b class="mk main">Main</b> muscle, twice for a <b class="mk helps">Helping</b> one, again to clear.</p>
+        <p class="hint" style="margin:0 0 8px">Tap once for a <b class="mk main">Main</b> muscle, twice for a <b class="mk helps">Helping</b> one (½ set), three times for a <b class="mk minor">Tertiary</b> one (¼ set), again to clear.</p>
         ${areas
           .map(
             (a) => `<p class="sublabel">${esc(a)}</p><div class="pills">${Muscles.MUSCLES.filter((m) => m.area === a)
               .map((m) => {
                 const st = c.marks[m.key] || '';
-                return `<button type="button" class="pill-btn mpick ${st}" data-action="pickMuscle" data-key="${m.key}" aria-label="${esc(m.name)}${st ? `, ${st === 'main' ? 'main' : 'helping'}` : ''}">${esc(m.name)}${st ? `<small>${st === 'main' ? 'Main' : 'Helps'}</small>` : ''}</button>`;
+                return `<button type="button" class="pill-btn mpick ${st}" data-action="pickMuscle" data-key="${m.key}" aria-label="${esc(m.name)}${st ? `, ${MARK_LABEL[st].toLowerCase()}` : ''}">${esc(m.name)}${st ? `<small>${MARK_LABEL[st]}</small>` : ''}</button>`;
               })
               .join('')}</div>`,
           )
           .join('')}
       </fieldset>
-      <p class="small muted" style="margin:0">${main.length ? `Main: ${esc(muscleNames(main))}` : 'Pick at least one main muscle.'}${helps.length ? `<br />Helping: ${esc(muscleNames(helps))}` : ''}</p>
+      <p class="small muted" style="margin:0">${main.length ? `Main: ${esc(muscleNames(main))}` : 'Pick at least one main muscle.'}${helps.length ? `<br />Helping: ${esc(muscleNames(helps))}` : ''}${minor.length ? `<br />Tertiary: ${esc(muscleNames(minor))}` : ''}</p>
       <button type="button" class="btn primary" data-action="pickSave">${edit ? 'Save changes' : `Save exercise${pickerUi().ctx === 'alias' ? '' : ' and add it'}`}</button>
     </div>`;
 }
@@ -178,6 +183,7 @@ function openEditor(day, index) {
   if (e) {
     for (const k of e.main) marks[k] = 'main';
     for (const k of e.helps) marks[k] = 'helps';
+    for (const k of e.minor) marks[k] = 'minor';
   }
   state.ui.picker = {
     ctx: 'edit', mode: 'create', query: '', alias: '', day, hash: location.hash, enter: true,
@@ -198,6 +204,7 @@ function saveEdit() {
   if (step !== null && !(step > 0)) return toast('Weight step must be a number above 0', 'error');
   const main = Object.keys(c.marks).filter((k) => c.marks[k] === 'main');
   const helps = Object.keys(c.marks).filter((k) => c.marks[k] === 'helps');
+  const minor = Object.keys(c.marks).filter((k) => c.marks[k] === 'minor');
   if (!main.length) return toast('Tap at least one main muscle', 'error');
   const day = p.day;
   if (newName !== c.oldName) renameEverywhere(c.oldName, newName);
@@ -214,7 +221,7 @@ function saveEdit() {
     delete state.settings.muscles[newName];
   }
   save(KEYS.settings, state.settings);
-  const row = { equipment: c.equipment, main: muscleNames(main), helps: muscleNames(helps), replace: true };
+  const row = { equipment: c.equipment, main: muscleNames(main), helps: muscleNames(helps), minor: muscleNames(minor), replace: true };
   if (c.entryName) {
     const ops = [{ type: 'upsert', row: { name: c.entryName, ...row } }];
     if (Muscles.norm(newName) !== Muscles.norm(c.entryName)) ops.push({ type: 'alias', name: c.entryName, alias: newName });
@@ -379,7 +386,7 @@ const pickerActions = {
   pickMuscle(el) {
     const c = pickerUi().create;
     const k = el.dataset.key;
-    c.marks[k] = !c.marks[k] ? 'main' : c.marks[k] === 'main' ? 'helps' : '';
+    c.marks[k] = NEXT_MARK[c.marks[k] || ''];
     if (!c.marks[k]) delete c.marks[k];
     render();
   },
@@ -401,11 +408,12 @@ const pickerActions = {
     if (!name) return toast('Give the exercise a name', 'error');
     const main = Object.keys(c.marks).filter((k) => c.marks[k] === 'main');
     const helps = Object.keys(c.marks).filter((k) => c.marks[k] === 'helps');
+    const minor = Object.keys(c.marks).filter((k) => c.marks[k] === 'minor');
     if (!main.length) return toast('Tap at least one main muscle', 'error');
     const { db } = exerciseDb();
     const existing = db.index.get(Muscles.norm(name));
     if (existing && Muscles.norm(existing.name) === Muscles.norm(name)) return toast(`${existing.name} is already in the database`, 'error');
-    queueExerciseOp({ type: 'upsert', row: { name, equipment: c.equipment, main: muscleNames(main), helps: muscleNames(helps), aliases: p.ctx === 'alias' && Muscles.norm(p.alias) !== Muscles.norm(name) ? p.alias : '' } });
+    queueExerciseOp({ type: 'upsert', row: { name, equipment: c.equipment, main: muscleNames(main), helps: muscleNames(helps), minor: muscleNames(minor), aliases: p.ctx === 'alias' && Muscles.norm(p.alias) !== Muscles.norm(name) ? p.alias : '' } });
     toast(`${name} added to the exercise database`);
     if (p.ctx === 'alias') return closePicker();
     usePicked(name);

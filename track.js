@@ -90,7 +90,7 @@ function renderProgress() {
       'Hard sets per muscle',
       '<a class="btn link small" href="#muscles">Muscle map ›</a>',
       `<section class="card stack">
-      <p class="hint" style="margin:0">Last 7 days, counted like the Muscles tab: a main muscle gets the whole set, a helping muscle half. Useful range ${p.muscleSetsMin}–${p.muscleSetsMax} a week. Tap a muscle to see which exercises gave its sets.</p>
+      <p class="hint" style="margin:0">Last 7 days, counted like the Muscles tab: a main muscle gets the whole set, a helping muscle half, a tertiary muscle a quarter. Useful range ${p.muscleSetsMin}–${p.muscleSetsMax} a week. Tap a muscle to see which exercises gave its sets.</p>
       ${
         muscles.length
           ? `<div class="bars">${muscles
@@ -1339,7 +1339,9 @@ function pickedHtml(d) {
   const m = Muscles.BY_KEY[key];
   const plan = new Set(planNames().map(Muscles.norm));
   const inPlan = (name) => plan.has(Muscles.norm(name));
-  const { main, helps } = Muscles.exercisesFor(d.db, key);
+  const { main, helps, minor } = Muscles.exercisesFor(d.db, key);
+  // " × ½ = 1.5" for a helping muscle, " × ¼ = 0.75" for a tertiary one, nothing for a main one.
+  const share = (v) => (v.main ? '' : ` × ${(v.weight ?? 0.5) === 0.25 ? '¼' : '½'} = ${Math.round(v.counted * 100) / 100}`);
   // One tap from a muscle to the exercise search, already filtered to it, adding to the day that trains it most.
   const addBtn = `<button type="button" class="btn secondary addex" data-action="openPicker" data-ctx="plan" data-muscle="${key}" data-query="${esc(m.name)}">${icon('plus')}Add ${d.gaps.has(key) ? 'a' : 'another'} ${esc(m.name)} exercise to your plan</button>`;
   if (d.mode === 'mine') {
@@ -1350,7 +1352,7 @@ function pickedHtml(d) {
     const done = [...d.t.by[key].entries()].sort((a, b) => b[1].main - a[1].main || b[1].sets - a[1].sets);
     // Where the number comes from: each exercise, its day(s), its sets, and half for a helping muscle.
     const chips = done.length
-      ? done.map(([name, v]) => `<span class="${v.main ? 'main' : ''}">${esc(name)}${v.days.length ? ` (${esc(v.days.join(', '))})` : ''} · ${esc(fmtSets(v.sets))}${v.main ? '' : ` × ½ = ${esc(Math.round(v.counted * 10) / 10)}`}</span>`).join('')
+      ? done.map(([name, v]) => `<span class="${v.main ? 'main' : ''}">${esc(name)}${v.days.length ? ` (${esc(v.days.join(', '))})` : ''} · ${esc(fmtSets(v.sets))}${esc(share(v))}</span>`).join('')
       : main
           .slice(0, 5)
           .map((e) => `<span class="${inPlan(e.name) ? 'main' : ''}">Try: ${esc(e.name)}${e.equipment ? ` · ${esc(e.equipment)}` : ''}${inPlan(e.name) ? ' (in your plan)' : ''}</span>`)
@@ -1361,8 +1363,12 @@ function pickedHtml(d) {
         }.${done.length ? ` Try: ${esc(main.slice(0, 3).map((e) => e.name).join(', '))}.` : ''}</p>`
       : '';
     const fromMain = done.filter(([, v]) => v.main).reduce((a, [, v]) => a + v.counted, 0);
-    const fromHelp = done.filter(([, v]) => !v.main).reduce((a, [, v]) => a + v.counted, 0);
-    const sum = done.length && fromHelp ? ` = ${Math.round(fromMain * 10) / 10} as main + ${Math.round(fromHelp * 10) / 10} as helper (half a set each)` : '';
+    const fromHelp = done.filter(([, v]) => !v.main && v.weight !== 0.25).reduce((a, [, v]) => a + v.counted, 0);
+    const fromMinor = done.filter(([, v]) => v.weight === 0.25).reduce((a, [, v]) => a + v.counted, 0);
+    const r2 = (x) => Math.round(x * 100) / 100;
+    const sum = done.length && (fromHelp || fromMinor)
+      ? ` = ${r2(fromMain)} as main${fromHelp ? ` + ${r2(fromHelp)} as helper (½ set each)` : ''}${fromMinor ? ` + ${r2(fromMinor)} as tertiary (¼ set each)` : ''}`
+      : '';
     return `<b>${esc(m.name)}</b><span class="hint">${esc(fmtSets(n))} ${esc(when)}${esc(sum)} · ${esc(verdict)}</span>${gap}<div class="exs">${chips}</div>${addBtn}`;
   }
   const mine = d.cov.mine[key];
@@ -1371,23 +1377,22 @@ function pickedHtml(d) {
     `<li><span class="ename">${esc(e.name)}</span>${e.equipment ? `<span class="eq">${esc(e.equipment)}</span>` : ''}${inPlan(e.name) ? '<span class="badge">In your plan</span>' : ''}</li>`;
   return `<b>${esc(m.name)}</b>${d.gaps.has(key) ? ` ${tag('Not in your plan', 'warn')}` : ''}
     <span class="hint">${esc(m.area)} · your plan: ${
-      mine.main.length || mine.helps.length
-        ? esc([mine.main.length ? `${mine.main.length} main (${mine.main.join(', ')})` : '', mine.helps.length ? `${mine.helps.length} helping` : ''].filter(Boolean).join(', '))
+      mine.main.length || mine.helps.length || mine.minor.length
+        ? esc([mine.main.length ? `${mine.main.length} main (${mine.main.join(', ')})` : '', mine.helps.length ? `${mine.helps.length} helping` : '', mine.minor.length ? `${mine.minor.length} tertiary` : ''].filter(Boolean).join(', '))
         : 'nothing works it yet'
     } · ${esc(weekly)} hard sets a week planned (target ${esc(state.settings.progression.muscleSetsMin)}–${esc(state.settings.progression.muscleSetsMax)})</span>
     ${
       d.planBy?.[key]?.length
         ? `<p class="sublabel">Where the ${esc(weekly)} planned sets come from</p><div class="exs">${d.planBy[key]
             .map(
-              (x) => `<span class="${x.main ? 'main' : ''}">${esc(x.name)} (${esc(x.day)}${d.perWeek[x.day] > 1 ? ` × ${d.perWeek[x.day]} a week` : ''}) · ${esc(fmtSets(x.sets))}${
-                x.main ? '' : ` × ½ = ${esc(Math.round(x.counted * 10) / 10)}`
-              }</span>`,
+              (x) => `<span class="${x.main ? 'main' : ''}">${esc(x.name)} (${esc(x.day)}${d.perWeek[x.day] > 1 ? ` × ${d.perWeek[x.day]} a week` : ''}) · ${esc(fmtSets(x.sets))}${esc(share(x))}</span>`,
             )
             .join('')}</div>`
         : ''
     }${addBtn}
     ${main.length ? `<p class="sublabel">Main exercises (${main.length})</p><ul class="exlist">${main.map(row).join('')}</ul>` : '<p class="hint">No exercise in the database has it as a main muscle.</p>'}
-    ${helps.length ? `<details class="exmore"><summary>Also helped by ${helps.length} exercise${helps.length === 1 ? '' : 's'}</summary><ul class="exlist">${helps.map(row).join('')}</ul></details>` : ''}`;
+    ${helps.length ? `<details class="exmore"><summary>Also helped by ${helps.length} exercise${helps.length === 1 ? '' : 's'}</summary><ul class="exlist">${helps.map(row).join('')}</ul></details>` : ''}
+    ${minor.length ? `<details class="exmore"><summary>Tertiary in ${minor.length} exercise${minor.length === 1 ? '' : 's'}</summary><ul class="exlist">${minor.map(row).join('')}</ul></details>` : ''}`;
 }
 
 function muscleListsHtml(d) {
@@ -1429,7 +1434,7 @@ function muscleListsHtml(d) {
           if (d.mode === 'mine') return rowHtml(r, r.m.area);
           const c = d.cov.mine[r.m.key];
           const total = Muscles.exercisesFor(d.db, r.m.key).main.length;
-          return rowHtml(r, `${total} in the database · your plan: ${c.main.length ? `${c.main.length} main` : c.helps.length ? 'helping only' : 'none'}`);
+          return rowHtml(r, `${total} in the database · your plan: ${c.main.length ? `${c.main.length} main` : c.helps.length || c.minor.length ? 'helping only' : 'none'}`);
         })
         .join('')}</div>`),
     )
@@ -1448,7 +1453,7 @@ function renderMuscles() {
   const ex = state.exdb;
   return `
     <h1 class="large">Muscles</h1>
-    <p class="sub">${d.mode === 'mine' ? 'Sets you logged (not your plan) · a helping muscle counts half a set · warm-ups not counted' : 'Hard sets a week your plan gives each muscle (planned sets × days on the schedule), and every exercise in the database'}</p>
+    <p class="sub">${d.mode === 'mine' ? 'Sets you logged (not your plan) · a helping muscle counts half a set, a tertiary one a quarter · warm-ups not counted' : 'Hard sets a week your plan gives each muscle (planned sets × days on the schedule), and every exercise in the database'}</p>
     <div class="seg2" role="tablist" aria-label="Show">
       <button type="button" role="tab" data-action="musMode" data-mode="mine" aria-selected="${d.mode === 'mine'}">Logged sets</button>
       <button type="button" role="tab" data-action="musMode" data-mode="all" aria-selected="${d.mode === 'all'}">My plan</button>

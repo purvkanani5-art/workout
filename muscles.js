@@ -7,7 +7,7 @@
    The exercise database lives in the Google Sheet's "Exercises" tab (decision 24). This file's EXERCISES are only
    the seed written there the first time; after that the Sheet's rows are used, so the owner can add or change
    exercises there. Muscles in the Sheet are written by the names below; matching ignores case and punctuation.
-   Counting: a main muscle gets the full set, a helping muscle half a set. */
+   Counting: a main muscle gets the full set, a helping muscle half a set, a tertiary muscle a quarter (v2.3). */
 
 const Muscles = (() => {
   // [key, gym name, area]. Keys are internal and never change; names are what the owner reads and types.
@@ -20,7 +20,7 @@ const Muscles = (() => {
     ['bicepsOuter', 'Biceps long head', 'Arms'], ['bicepsInner', 'Biceps short head', 'Arms'], ['brachialis', 'Brachialis', 'Arms'],
     ['triceps', 'Triceps', 'Arms'],
     ['forearmTop', 'Brachioradialis', 'Forearms'], ['forearmGrip', 'Forearm flexors', 'Forearms'], ['forearmBack', 'Forearm extensors', 'Forearms'],
-    ['abs', 'Abs', 'Core'], ['obliques', 'Obliques', 'Core'], ['serratus', 'Serratus', 'Core'],
+    ['abs', 'Abs', 'Core'], ['obliques', 'Obliques', 'Core'], ['serratus', 'Serratus anterior', 'Core'],
     ['glutes', 'Glute max', 'Glutes & hips'], ['outerHip', 'Glute medius', 'Glutes & hips'], ['hipFlexors', 'Hip flexors', 'Glutes & hips'],
     ['quads', 'Quads', 'Legs'], ['hamstrings', 'Hamstrings', 'Legs'], ['innerThighs', 'Adductors', 'Legs'],
     ['calfInner', 'Gastrocnemius inner head', 'Calves'], ['calfOuter', 'Gastrocnemius outer head', 'Calves'], ['calfLower', 'Soleus', 'Calves'],
@@ -38,7 +38,7 @@ const Muscles = (() => {
     forearms: 'forearmGrip', 'forearm flexor': 'forearmGrip', 'forearm extensor': 'forearmBack', 'glute max': 'glutes', glutes: 'glutes',
     'gluteus maximus': 'glutes', 'glute med': 'outerHip', 'gluteus medius': 'outerHip', abductors: 'outerHip', adductor: 'innerThighs',
     'inner thighs': 'innerThighs', quadriceps: 'quads', calves: 'calfInner', gastrocnemius: 'calfInner', 'inner calf': 'calfInner',
-    'outer calf': 'calfOuter', 'tibialis anterior': 'shins', shins: 'shins', 'hip flexor': 'hipFlexors', core: 'abs',
+    'outer calf': 'calfOuter', 'tibialis anterior': 'shins', shins: 'shins', 'hip flexor': 'hipFlexors', core: 'abs', serratus: 'serratus',
   };
   const norm = (s) =>
     String(s || '')
@@ -337,13 +337,13 @@ const Muscles = (() => {
 
   /* ---------------------------------------------------------------- database rows */
 
-  // Sheet rows ⇄ database entries. A row: { name, equipment, main: "Mid pecs, …", helps: "…", notes }.
+  // Sheet rows ⇄ database entries. A row: { name, equipment, main: "Mid pecs, …", helps: "…", minor: "…" (tertiary), notes }.
   const seedRows = () =>
     EXERCISES.map(([name, equipment, main, helps]) => ({
-      name, equipment, main: main.map((k) => BY_KEY[k].name).join(', '), helps: helps.map((k) => BY_KEY[k].name).join(', '), notes: '',
+      name, equipment, main: main.map((k) => BY_KEY[k].name).join(', '), helps: helps.map((k) => BY_KEY[k].name).join(', '), minor: '', notes: '',
     }));
 
-  // Rows (from the Sheet or the seed) → { list: [{ name, equipment, main: [keys], helps: [keys], aliases: [names] }],
+  // Rows (from the Sheet or the seed) → { list: [{ name, equipment, main: [keys], helps: [keys], minor: [keys], aliases: [names] }],
   // index (name and every alias → entry), unknown: [muscle names not recognised] }. A row's "Also called" cell
   // (aliases) holds other names the owner uses for the same exercise, separated by commas.
   function buildDb(rows) {
@@ -367,7 +367,9 @@ const Muscles = (() => {
       seen.add(norm(name));
       const main = [...new Set(keys(r.main))];
       const aliases = [...new Set(String(r.aliases || '').split(/[,;\n]/).map((s) => s.trim()).filter(Boolean))];
-      list.push({ name, equipment: String(r.equipment || '').trim(), main, helps: [...new Set(keys(r.helps))].filter((k) => !main.includes(k)), aliases });
+      const helps = [...new Set(keys(r.helps))].filter((k) => !main.includes(k));
+      const minor = [...new Set(keys(r.minor))].filter((k) => !main.includes(k) && !helps.includes(k));
+      list.push({ name, equipment: String(r.equipment || '').trim(), main, helps, minor, aliases });
     }
     const index = new Map(list.map((e) => [norm(e.name), e]));
     // Aliases never take over a real exercise name.
@@ -382,7 +384,7 @@ const Muscles = (() => {
 
   /**
    * Rows with the app's changes not yet confirmed by the Sheet laid over them, so the app shows them at once.
-   * ops: [{ type: 'upsert', row: { name, equipment, main, helps, aliases?, notes? } }, { type: 'alias', name, alias }].
+   * ops: [{ type: 'upsert', row: { name, equipment, main, helps, minor, aliases?, notes? } }, { type: 'alias', name, alias }].
    * Muscles in rows are gym names joined by ", " (the Sheet's format).
    */
   function applyOps(rows, ops) {
@@ -392,7 +394,7 @@ const Muscles = (() => {
       if (op.type === 'upsert' && op.row && op.row.name) {
         const r = find(op.row.name);
         if (r) Object.assign(r, Object.fromEntries(Object.entries(op.row).filter(([k, v]) => v !== undefined && k !== 'aliases')));
-        else out.push({ name: op.row.name, equipment: op.row.equipment || '', main: op.row.main || '', helps: op.row.helps || '', aliases: op.row.aliases || '', notes: op.row.notes || '' });
+        else out.push({ name: op.row.name, equipment: op.row.equipment || '', main: op.row.main || '', helps: op.row.helps || '', minor: op.row.minor || '', aliases: op.row.aliases || '', notes: op.row.notes || '' });
       } else if (op.type === 'alias' && op.name && op.alias) {
         const r = find(op.name);
         if (!r) continue;
@@ -551,17 +553,18 @@ const Muscles = (() => {
     const muscleHit = muscleKey(query);
     const scored = [];
     for (const e of db.list) {
-      const muscleNames = [...e.main, ...e.helps].map((k) => BY_KEY[k].name);
-      const hay = norm([e.name, ...e.aliases, e.equipment, ...muscleNames, ...[...e.main, ...e.helps].map((k) => BY_KEY[k].area)].join(' '));
+      const muscleNames = [...e.main, ...e.helps, ...e.minor].map((k) => BY_KEY[k].name);
+      const hay = norm([e.name, ...e.aliases, e.equipment, ...muscleNames, ...[...e.main, ...e.helps, ...e.minor].map((k) => BY_KEY[k].area)].join(' '));
       const hayTokens = tokens(hay);
       const all = words.every((w) => hayTokens.some((h) => h.startsWith(w)));
-      if (!all && !(muscleHit && (e.main.includes(muscleHit) || e.helps.includes(muscleHit)))) continue;
+      if (!all && !(muscleHit && (e.main.includes(muscleHit) || e.helps.includes(muscleHit) || e.minor.includes(muscleHit)))) continue;
       let score = 0;
       if (norm(e.name).startsWith(q)) score += 5;
       if (e.aliases.some((a) => norm(a).startsWith(q))) score += 4;
       if (tokens(e.name).some((t) => words.includes(t))) score += 2;
       if (muscleHit && e.main.includes(muscleHit)) score += 3;
       else if (muscleHit && e.helps.includes(muscleHit)) score += 1;
+      else if (muscleHit && e.minor.includes(muscleHit)) score += 0.5;
       // A part of a muscle name ("tri", "hamstr"): exercises where it is the main muscle first.
       const starts = (keys) => keys.some((k) => tokens(BY_KEY[k].name).some((t) => words.some((w) => w.length >= 3 && t.startsWith(w))));
       if (!muscleHit && starts(e.main)) score += 2;
@@ -573,7 +576,7 @@ const Muscles = (() => {
 
   /**
    * Hard sets a week each muscle gets from the plan: each exercise's planned sets × how many times its day is on
-   * the weekly schedule; main muscles count the set, helping ones half (the same rule as the logged sets).
+   * the weekly schedule; main muscles count the set, helping ones half, tertiary ones a quarter (as the logged sets).
    * days: { dayName: [exercise names] }, perWeek: { dayName: times a week }, setsOf(day, name) → planned sets.
    */
   function plannedWeekly(db, days, perWeek, setsOf, coarseOf = () => null) {
@@ -591,18 +594,19 @@ const Muscles = (() => {
         const e = lookup(db, name, coarseOf(name));
         if (!e) continue;
         const n = (setsOf(day, name) || 0) * times;
-        for (const k of e.main) {
-          sets[k] += n;
-          by[k].push({ name, day, sets: n, counted: n, main: true });
-        }
-        for (const k of e.helps) {
-          sets[k] += n / 2;
-          by[k].push({ name, day, sets: n, counted: n / 2, main: false });
+        for (const [list, weight] of TIERS(e)) {
+          for (const k of list) {
+            sets[k] += n * weight;
+            by[k].push({ name, day, sets: n, counted: n * weight, main: weight === 1, weight });
+          }
         }
       }
     }
     return { sets, by };
   }
+
+  // [muscle keys, share of a set]: main 1, helping (secondary) half, tertiary a quarter.
+  const TIERS = (e) => [[e.main, 1], [e.helps, 0.5], [e.minor || [], 0.25]];
 
   // The owner's older coarse muscle group → muscles, for an exercise that is not in the database.
   const COARSE = {
@@ -618,11 +622,11 @@ const Muscles = (() => {
     const hit = db.index.get(norm(name));
     if (hit) return hit;
     const c = coarse && COARSE[coarse];
-    return c ? { name, equipment: '', main: c[0], helps: c[1], guessed: true } : null;
+    return c ? { name, equipment: '', main: c[0], helps: c[1], minor: [], guessed: true } : null;
   }
 
   /**
-   * Sets per muscle from workout sessions (warm-ups left out). A main muscle gets the whole set, a helping muscle half.
+   * Sets per muscle from workout sessions (warm-ups left out). A main muscle gets the whole set, a helping muscle half, a tertiary one a quarter.
    * Returns { sets: {key: n}, by: {key: Map(exercise → {sets, main})}, unmatched: [exercise names] }.
    */
   function tally(db, sessions, coarseOf = () => null) {
@@ -635,10 +639,11 @@ const Muscles = (() => {
         const e = lookup(db, set.exercise, coarseOf(set.exercise));
         if (!e) { unmatched.add(set.exercise); continue; }
         if (e.guessed) unmatched.add(set.exercise);
-        for (const [list, weight, isMain] of [[e.main, 1, true], [e.helps, 0.5, false]]) {
+        for (const [list, weight] of TIERS(e)) {
+          const isMain = weight === 1;
           for (const k of list) {
             sets[k] += weight;
-            const cur = by[k].get(set.exercise) || { sets: 0, main: isMain, counted: 0, days: [] };
+            const cur = by[k].get(set.exercise) || { sets: 0, main: isMain, counted: 0, days: [], weight };
             cur.sets += 1;
             cur.counted += weight;
             cur.main = cur.main || isMain;
@@ -655,7 +660,8 @@ const Muscles = (() => {
   function exercisesFor(db, key) {
     const main = db.list.filter((e) => e.main.includes(key)).sort((a, b) => a.name.localeCompare(b.name));
     const helps = db.list.filter((e) => e.helps.includes(key)).sort((a, b) => a.name.localeCompare(b.name));
-    return { main, helps };
+    const minor = db.list.filter((e) => e.minor.includes(key)).sort((a, b) => a.name.localeCompare(b.name));
+    return { main, helps, minor };
   }
 
   // Colour levels 0–4. Week: about 10–20 hard sets a muscle is the usual target. Day: one session's worth.
@@ -673,15 +679,16 @@ const Muscles = (() => {
     return lv;
   }
 
-  /** How the owner's plan covers each muscle: main exercises count 1, helping 0.5 (for colouring); plus the lists. */
+  /** How the owner's plan covers each muscle: main exercises count 1, helping 0.5, tertiary 0.25 (for colouring); plus the lists. */
   function planCoverage(db, planNames, coarseOf = () => null) {
     const score = Object.fromEntries(MUSCLES.map((m) => [m.key, 0]));
-    const mine = Object.fromEntries(MUSCLES.map((m) => [m.key, { main: [], helps: [] }]));
+    const mine = Object.fromEntries(MUSCLES.map((m) => [m.key, { main: [], helps: [], minor: [] }]));
     for (const name of new Set(planNames)) {
       const e = lookup(db, name, coarseOf(name));
       if (!e) continue;
       for (const k of e.main) { score[k] += 1; mine[k].main.push(name); }
       for (const k of e.helps) { score[k] += 0.5; mine[k].helps.push(name); }
+      for (const k of e.minor) { score[k] += 0.25; mine[k].minor.push(name); }
     }
     return { score, mine };
   }

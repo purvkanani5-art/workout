@@ -2128,9 +2128,12 @@ details.customday[open] > summary .chev { transform: rotate(90deg); }
 .pill-btn.mpick.main small { background: rgba(23, 18, 15, .15); }
 .pill-btn.mpick.helps { background: var(--sel-bg); border-color: var(--sel-border); border-style: dashed; color: var(--sel-text); }
 .pill-btn.mpick.helps small { background: var(--card); }
+.pill-btn.mpick.minor { border-style: dotted; border-color: var(--sel-border); color: var(--sel-text); }
+.pill-btn.mpick.minor small { background: var(--sel-bg); }
 .mk { padding: 0 6px; border-radius: 6px; }
 .mk.main { background: var(--saffron); color: var(--ink); }
 .mk.helps { background: var(--sel-bg); color: var(--sel-text); border: 1px dashed var(--sel-border); }
+.mk.minor { color: var(--sel-text); border: 1px dotted var(--sel-border); }
 .picksheet .sublabel { margin: 12px 0 6px; }
 
 /* Names the database does not know */

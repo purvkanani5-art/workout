@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '2.2.2';
+const APP_VERSION = '2.3.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -614,7 +614,7 @@ async function fetchExercises({ force = false, maxAge = 6 * 3600000 } = {}) {
 /** Once per list of muscle names: ask the Sheet to put a dropdown of them on the two muscle columns. */
 function setupMuscleDropdowns() {
   const names = Muscles.MUSCLES.map((m) => m.name);
-  const key = names.join('|');
+  const key = `v2.3|${names.join('|')}`; // v2.3: sent again so the Sheet's new Tertiary column gets the dropdown
   let done = '';
   try {
     done = localStorage.getItem('wt.exSetup') || '';
@@ -938,7 +938,7 @@ function musclesText(name) {
   const e = exerciseEntry(name);
   if (!e || !e.main.length) return '';
   const names = (keys) => keys.map((k) => Muscles.BY_KEY[k].name).join(', ');
-  return `${names(e.main)}${e.helps.length ? ` · helps ${names(e.helps)}` : ''}`;
+  return `${names(e.main)}${e.helps.length ? ` · helps ${names(e.helps)}` : ''}${e.minor?.length ? ` · tertiary ${names(e.minor)}` : ''}`;
 }
 
 function progressCtx() {

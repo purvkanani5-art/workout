@@ -78,7 +78,8 @@ var E_SHEET_NAME = 'Exercises';
 // "Also called" (v2.2): other names the owner uses for the same exercise, separated by commas; the app matches them
 // to this row. The app adds rows and aliases here itself (exerciseUpsert / exerciseAlias) and sets a dropdown of the
 // muscle names on the two muscle columns (exerciseSetup).
-var E_HEADERS = ['Exercise', 'Equipment', 'Main muscles', 'Helping muscles', 'Notes', 'Also called'];
+// v2.3: 'Tertiary muscles' (a quarter set each) is the last column, so older tabs keep their columns.
+var E_HEADERS = ['Exercise', 'Equipment', 'Main muscles', 'Helping muscles', 'Notes', 'Also called', 'Tertiary muscles'];
 // Column numbers (1-based) used below. Notes to Satisfaction are per-session and filled on a session's first row
 // only; RIR (reps in reserve, 3 = "3 or more") and Warm-up are per set and were added after the first version.
 var COL = {
@@ -764,7 +765,7 @@ function upsertExercise_(row) {
     var fields = [String(row.name).trim(), row.equipment, row.main, row.helps, row.notes];
     if (!r) {
       r = sheet.getLastRow() + 1;
-      sheet.getRange(r, 1, 1, E_HEADERS.length).setValues([[fields[0], String(row.equipment || ''), String(row.main || ''), String(row.helps || ''), String(row.notes || ''), String(row.aliases || '')]]);
+      sheet.getRange(r, 1, 1, E_HEADERS.length).setValues([[fields[0], String(row.equipment || ''), String(row.main || ''), String(row.helps || ''), String(row.notes || ''), String(row.aliases || ''), String(row.minor || '')]]);
       return json_({ ok: true, added: true });
     }
     // row.replace (an edit in the app): equipment and both muscle columns are written even when blank, so a muscle
@@ -773,6 +774,7 @@ function upsertExercise_(row) {
       var replace = row.replace && c <= 3;
       if (replace || (fields[c] !== undefined && fields[c] !== null && String(fields[c]) !== '')) sheet.getRange(r, c + 1).setValue(String(fields[c] || ''));
     }
+    if (row.replace || (row.minor !== undefined && row.minor !== null && String(row.minor) !== '')) sheet.getRange(r, 7).setValue(String(row.minor || ''));
     if (row.aliases) mergeAliases_(sheet, r, String(row.aliases).split(','));
     return json_({ ok: true, added: false });
   } catch (err) {
@@ -824,7 +826,7 @@ function aliasExercise_(name, alias) {
 }
 
 /**
- * A dropdown of the muscle names on Main muscles and Helping muscles. Several muscles in one cell are allowed (the
+ * A dropdown of the muscle names on Main, Helping and Tertiary muscles. Several muscles in one cell are allowed (the
  * rule warns, it never rejects); in the Sheet, Data → Data validation → this rule → "Allow multiple selections" turns
  * the dropdown into tick boxes. Set again only when the list of names changes.
  */
@@ -833,11 +835,13 @@ function setupExercises_(muscles) {
   var names = muscles.map(function (m) { return String(m).trim(); }).filter(String);
   var key = names.join('|');
   var props = PropertiesService.getScriptProperties();
+  key = 'v2.3|' + key; // set again once for the Tertiary column
   if (props.getProperty('E_MUSCLES') === key) return json_({ ok: true, changed: false });
   var sheet = getExerciseSheet_();
   var rule = SpreadsheetApp.newDataValidation().requireValueInList(names, true).setAllowInvalid(true)
     .setHelpText('Pick the muscle names (gym names). Several are separated by commas.').build();
   sheet.getRange(2, 3, Math.max(sheet.getMaxRows() - 1, 1), 2).setDataValidation(rule);
+  sheet.getRange(2, 7, Math.max(sheet.getMaxRows() - 1, 1), 1).setDataValidation(rule);
   props.setProperty('E_MUSCLES', key);
   return json_({ ok: true, changed: true });
 }
@@ -853,7 +857,7 @@ function seedExercises_(rows) {
     var values = rows
       .filter(function (r) { return r && String(r.name || '').trim(); })
       .map(function (r) {
-        return [String(r.name).trim(), String(r.equipment || ''), String(r.main || ''), String(r.helps || ''), String(r.notes || ''), String(r.aliases || '')];
+        return [String(r.name).trim(), String(r.equipment || ''), String(r.main || ''), String(r.helps || ''), String(r.notes || ''), String(r.aliases || ''), String(r.minor || '')];
       });
     if (!values.length) return json_({ ok: false, error: 'no rows' });
     sheet.getRange(2, 1, values.length, E_HEADERS.length).setValues(values);
@@ -876,7 +880,7 @@ function exerciseRows_() {
     .getValues()
     .filter(function (r) { return String(r[0] || '').trim(); })
     .map(function (r) {
-      return { name: String(r[0]).trim(), equipment: String(r[1] || ''), main: String(r[2] || ''), helps: String(r[3] || ''), notes: String(r[4] || ''), aliases: String(r[5] || '') };
+      return { name: String(r[0]).trim(), equipment: String(r[1] || ''), main: String(r[2] || ''), helps: String(r[3] || ''), notes: String(r[4] || ''), aliases: String(r[5] || ''), minor: String(r[6] || '') };
     });
 }
 
