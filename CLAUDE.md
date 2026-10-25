@@ -438,3 +438,12 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     - Rest timer shows **Next** (the same exercise's next set, else the next unfinished exercise): one tap opens it.
     - Panels slide up only when they open (`enter` class), not on every tap inside. The panel closes when the page
       changes. Parked by the owner (not built): Watch heart rate/calories filled by a Shortcut; reps prefilled.
+29. **v2.2.1: own names matched automatically** (owner: "i dont want to do that part manually. check my all workouts
+    and correct aliases"). `Muscles.autoMatch` (short forms DB/BB/RDL…, phrase forms pull down/flyes/ham curl,
+    "seated"/"standing" optional with standing preferred, different equipment never matches, a defining word such as
+    incline/hammer/reverse on one side only counts against) links a plan or logged name only when sure; near-ties
+    are accepted only when they share the main muscles. `autoAliasUnknown()` runs on Today, Muscles, Exercises &
+    plans and after each Sheet read, on the Sheet's rows; matches are saved as aliases and listed under "Matched
+    automatically" (Change). An alias belongs to one exercise (moved, in the app and in Code.gs). `norm` also drops a
+    plural "es" (crunches → crunch), the same in Code.gs. Checked against 73 ways of writing exercises: 72 match,
+    "Chest supported row" (machine vs dumbbell, different muscles) is left with two one-tap choices.
