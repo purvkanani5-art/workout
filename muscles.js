@@ -577,7 +577,13 @@ const Muscles = (() => {
    * days: { dayName: [exercise names] }, perWeek: { dayName: times a week }, setsOf(day, name) → planned sets.
    */
   function plannedWeekly(db, days, perWeek, setsOf, coarseOf = () => null) {
+    return plannedDetail(db, days, perWeek, setsOf, coarseOf).sets;
+  }
+
+  /** plannedWeekly with where each muscle's sets come from: by[key] = [{ name, day, sets, counted, main }]. */
+  function plannedDetail(db, days, perWeek, setsOf, coarseOf = () => null) {
     const sets = Object.fromEntries(MUSCLES.map((m) => [m.key, 0]));
+    const by = Object.fromEntries(MUSCLES.map((m) => [m.key, []]));
     for (const [day, names] of Object.entries(days || {})) {
       const times = perWeek[day] || 0;
       if (!times) continue;
@@ -585,11 +591,17 @@ const Muscles = (() => {
         const e = lookup(db, name, coarseOf(name));
         if (!e) continue;
         const n = (setsOf(day, name) || 0) * times;
-        for (const k of e.main) sets[k] += n;
-        for (const k of e.helps) sets[k] += n / 2;
+        for (const k of e.main) {
+          sets[k] += n;
+          by[k].push({ name, day, sets: n, counted: n, main: true });
+        }
+        for (const k of e.helps) {
+          sets[k] += n / 2;
+          by[k].push({ name, day, sets: n, counted: n / 2, main: false });
+        }
       }
     }
-    return sets;
+    return { sets, by };
   }
 
   // The owner's older coarse muscle group → muscles, for an exercise that is not in the database.
@@ -626,9 +638,11 @@ const Muscles = (() => {
         for (const [list, weight, isMain] of [[e.main, 1, true], [e.helps, 0.5, false]]) {
           for (const k of list) {
             sets[k] += weight;
-            const cur = by[k].get(set.exercise) || { sets: 0, main: isMain };
+            const cur = by[k].get(set.exercise) || { sets: 0, main: isMain, counted: 0, days: [] };
             cur.sets += 1;
+            cur.counted += weight;
             cur.main = cur.main || isMain;
+            if (s.dayType && !cur.days.includes(s.dayType)) cur.days.push(s.dayType);
             by[k].set(set.exercise, cur);
           }
         }
@@ -674,7 +688,7 @@ const Muscles = (() => {
 
   return {
     MUSCLES, BY_KEY, FIG, SKIN, VIEW_OF, EXERCISES, LEVELS, EQUIPMENT, norm, muscleKey, seedRows, buildDb, lookup, tally, exercisesFor, level, planCoverage,
-    applyOps, similarity, suggest, search, plannedWeekly, autoMatch, matchScore, coreWords,
+    applyOps, similarity, suggest, search, plannedWeekly, plannedDetail, autoMatch, matchScore, coreWords,
   };
 })();
 

@@ -447,3 +447,14 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     automatically" (Change). An alias belongs to one exercise (moved, in the app and in Code.gs). `norm` also drops a
     plural "es" (crunches → crunch), the same in Code.gs. Checked against 73 ways of writing exercises: 72 match,
     "Chest supported row" (machine vs dumbbell, different muscles) is left with two one-tap choices.
+30. **v2.2.2: one source of muscles** (owner: "exercises and plans and muscles are not synced… incline db press shows
+    chest… choose muscles worked in drop down to edit them… totally synced"). The exercise database is the only
+    source: `exerciseEntry(name)` (name, other name, else the old typed group via `manualGroup`), `muscleOf` = broad
+    group of the first main muscle (`GROUP_OF`, for upper/lower weight steps), `musclesText` for Exercises & plans.
+    Progress's hard-sets bars, the weekly summary and the "not trained for N days" warning use `muscleSets()` =
+    `Muscles.tally` (main 1, helping ½), the same as the Muscles tab, with gym names; a bar opens that muscle on the
+    Muscles tab. ✎ in Exercises & plans opens the editor (`openEditor`, picker ctx `edit`): name, plan, weight step,
+    equipment and Main/Helping chips; saving writes the database row (`exerciseUpsert` with `replace`, so cleared
+    muscles clear in the Sheet too) and, when renamed, keeps the new name as another name. The Muscles views are
+    "Logged sets" (last 7 days, logged, not the plan) and "My plan" (planned sets a week); a picked muscle shows
+    where its number comes from (each exercise, day, sets, × ½ for a helper).

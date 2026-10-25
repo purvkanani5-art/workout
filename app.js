@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '2.2.1';
+const APP_VERSION = '2.2.2';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -704,26 +704,40 @@ function missedPause(exercise, from, to) {
   return state.missed.filter((m) => m.date > from && m.date <= to && dayExercises(m.dayType).includes(exercise)).length * per;
 }
 
-/** Muscle groups in the plan not trained (working sets) for more than `neglectDays`. Newest workouts count. */
+/** Muscles your plan trains as a main muscle that no working set has trained (as a main muscle) for more than
+    `neglectDays`. Same muscles and names as the Muscles tab (v2.2.2). */
 function neglectedMuscles() {
   const limit = Number(state.settings.progression.neglectDays) || 0;
   if (!limit) return [];
-  const planned = new Set();
-  for (const day of Object.keys(state.exercises)) for (const ex of dayExercises(day)) if (muscleOf(ex)) planned.add(muscleOf(ex));
+  const { db } = exerciseDb();
+  const cov = Muscles.planCoverage(db, planNames(), manualGroup);
+  const planned = Muscles.MUSCLES.filter((m) => cov.mine[m.key].main.length);
   const last = {};
   for (const s of state.history) {
     for (const set of s.sets) {
-      const m = muscleOf(set.exercise);
-      if (m && Progress.isWorking(set) && (!last[m] || s.date > last[m])) last[m] = s.date;
+      if (!Progress.isWorking(set)) continue;
+      const e = Muscles.lookup(db, set.exercise, manualGroup(set.exercise));
+      if (e) for (const k of e.main) if (!last[k] || s.date > last[k]) last[k] = s.date;
     }
   }
   const today = todayISO();
   const started = state.history.length ? state.history.map((s) => s.date).sort()[0] : null;
   if (!started) return [];
-  return [...planned]
-    .map((m) => ({ muscle: m, last: last[m] || null, days: Progress.daysBetween(last[m] || started, today) }))
+  return planned
+    .map((m) => ({ muscle: m.name, key: m.key, last: last[m.key] || null, days: Progress.daysBetween(last[m.key] || started, today) }))
     .filter((x) => x.days > limit)
     .sort((a, b) => b.days - a.days);
+}
+
+/** Hard sets per muscle (database muscles, main 1 · helping ½, warm-ups left out) in the sessions given: the one
+    count used by the Muscles tab, Progress and the weekly summary, so they always agree. */
+function muscleSets(sessions) {
+  return Muscles.tally(exerciseDb().db, sessions, manualGroup);
+}
+
+/** Workouts (saved, plus the one in progress) from `from` to `to`, inclusive. */
+function sessionsBetween(from, to) {
+  return [...state.history, ...(state.draft ? [state.draft] : [])].filter((s) => s.date >= from && s.date <= to);
 }
 
 /* ------------------------------------------------- settings copy in the Sheet */
@@ -893,8 +907,38 @@ function planText(dayType, exercise) {
   return '';
 }
 
-function muscleOf(exercise) {
+/** The old typed muscle group (v1.1). Kept only as a fallback for names the exercise database does not know. */
+function manualGroup(exercise) {
   return state.settings.muscles?.[exercise] || '';
+}
+
+/** The exercise database row a name means: by name or other name, else made from its old typed group (or null).
+    v2.2.2: the database is the one source of muscles for every page. */
+function exerciseEntry(name) {
+  return Muscles.lookup(exerciseDb().db, name, manualGroup(name));
+}
+
+// A database muscle → the broad group the progression maths uses (upper/lower body weight steps).
+const GROUP_OF = {
+  neck: 'Back', upperTraps: 'Back', middleTraps: 'Back', lowerTraps: 'Back', rotatorCuff: 'Rear delts', lats: 'Back', lowerBack: 'Lower back',
+  chestUpper: 'Chest', chestMid: 'Chest', chestLower: 'Chest', frontDelts: 'Shoulders', sideDelts: 'Shoulders', rearDelts: 'Rear delts',
+  bicepsOuter: 'Biceps', bicepsInner: 'Biceps', brachialis: 'Biceps', triceps: 'Triceps', forearmTop: 'Biceps', forearmGrip: 'Biceps', forearmBack: 'Biceps',
+  abs: 'Core', obliques: 'Core', serratus: 'Core', glutes: 'Glutes', outerHip: 'Glutes', hipFlexors: 'Core', quads: 'Quads', hamstrings: 'Hamstrings',
+  innerThighs: 'Quads', calfInner: 'Calves', calfOuter: 'Calves', calfLower: 'Calves', shins: 'Calves',
+};
+
+/** Broad muscle group of an exercise, from its first main muscle in the database (else the old typed group). */
+function muscleOf(exercise) {
+  const e = exerciseEntry(exercise);
+  return e && e.main.length ? GROUP_OF[e.main[0]] || '' : manualGroup(exercise);
+}
+
+/** "main: Upper pecs · helps: Anterior delts, Triceps" for an exercise, from the database. */
+function musclesText(name) {
+  const e = exerciseEntry(name);
+  if (!e || !e.main.length) return '';
+  const names = (keys) => keys.map((k) => Muscles.BY_KEY[k].name).join(', ');
+  return `${names(e.main)}${e.helps.length ? ` · helps ${names(e.helps)}` : ''}`;
 }
 
 function progressCtx() {
@@ -2746,14 +2790,15 @@ function renderSettings() {
                     name,
                     [
                       state.targets[day]?.[name] ? `Plan ${state.targets[day][name]}` : '',
-                      muscleOf(name),
+                      // v2.2.2: the muscles come from the exercise database, the same as the Muscles tab.
+                      musclesText(name) || 'muscles not set: tap ✎',
                       state.settings.steps?.[name] ? `step ${fmtKg(state.settings.steps[name])} kg` : '',
                     ]
                       .filter(Boolean)
                       .join(' · '),
                     ibtn('up', `data-action="moveExercise" data-index="${i}" data-dir="-1"`, `Move ${name} up`, i === 0) +
                       ibtn('down', `data-action="moveExercise" data-index="${i}" data-dir="1"`, `Move ${name} down`, i === list.length - 1) +
-                      ibtn('edit', `data-action="renameExercise" data-index="${i}"`, `Rename ${name}`) +
+                      ibtn('edit', `data-action="editExercise" data-index="${i}"`, `Edit ${name}`) +
                       ibtn('trash', `data-action="removeExercise" data-index="${i}"`, `Remove ${name}`),
                   ),
                 )

@@ -2151,6 +2151,10 @@ details.automatch > summary { list-style: none; cursor: pointer; }
 details.automatch > summary::-webkit-details-marker { display: none; }
 details.automatch[open] > summary .note { color: var(--sel-text); }
 
+/* v2.2.2: longer gym names in Progress's hard-sets bars; rows open the Muscles tab */
+.bar-row { grid-template-columns: 128px 1fr 58px; cursor: pointer; }
+.bar-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 /* Empty and loading */
 .empty { font-size: 14px; }
 .spin { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; vertical-align: -2px; margin-right: 8px; animation: spin .8s linear infinite; opacity: .7; }

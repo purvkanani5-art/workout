@@ -767,7 +767,12 @@ function upsertExercise_(row) {
       sheet.getRange(r, 1, 1, E_HEADERS.length).setValues([[fields[0], String(row.equipment || ''), String(row.main || ''), String(row.helps || ''), String(row.notes || ''), String(row.aliases || '')]]);
       return json_({ ok: true, added: true });
     }
-    for (var c = 1; c < fields.length; c++) if (fields[c] !== undefined && fields[c] !== null && String(fields[c]) !== '') sheet.getRange(r, c + 1).setValue(String(fields[c]));
+    // row.replace (an edit in the app): equipment and both muscle columns are written even when blank, so a muscle
+    // taken off in the app is taken off here too. Otherwise blank cells are left alone.
+    for (var c = 1; c < fields.length; c++) {
+      var replace = row.replace && c <= 3;
+      if (replace || (fields[c] !== undefined && fields[c] !== null && String(fields[c]) !== '')) sheet.getRange(r, c + 1).setValue(String(fields[c] || ''));
+    }
     if (row.aliases) mergeAliases_(sheet, r, String(row.aliases).split(','));
     return json_({ ok: true, added: false });
   } catch (err) {

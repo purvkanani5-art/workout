@@ -43,7 +43,7 @@ function dayForMuscle(key) {
   let bestN = -1;
   for (const day of planDays()) {
     const n = (state.exercises[day] || []).filter((name) => {
-      const e = Muscles.lookup(db, name, muscleOf(name));
+      const e = Muscles.lookup(db, name, manualGroup(name));
       return e && (e.main.includes(key) || e.helps.includes(key));
     }).length;
     if (n > bestN) [best, bestN] = [day, n];
@@ -93,9 +93,9 @@ function renderPicker() {
     <div class="logsheet-overlay picker-overlay" data-action="pickClose" aria-hidden="true"></div>
     <section class="logsheet picksheet ${p.enter ? 'enter' : ''}" role="dialog" aria-modal="true" aria-label="${esc(title)}">
       <div class="grab" aria-hidden="true"></div>
-      <div class="pick-head"><b>${esc(p.mode === 'create' ? 'New exercise' : title)}</b><button type="button" class="btn link" data-action="${
-        p.mode === 'create' ? 'pickBack' : 'pickClose'
-      }">${p.mode === 'create' ? 'Back' : 'Close'}</button></div>
+      <div class="pick-head"><b>${esc(p.ctx === 'edit' ? 'Edit exercise' : p.mode === 'create' ? 'New exercise' : title)}</b><button type="button" class="btn link" data-action="${
+        p.mode === 'create' && p.ctx !== 'edit' ? 'pickBack' : 'pickClose'
+      }">${p.mode === 'create' && p.ctx !== 'edit' ? 'Back' : 'Close'}</button></div>
       ${body}
     </section>`;
 }
@@ -121,12 +121,26 @@ function renderCreateForm() {
   const areas = [...new Set(Muscles.MUSCLES.map((m) => m.area))];
   const main = Object.keys(c.marks).filter((k) => c.marks[k] === 'main');
   const helps = Object.keys(c.marks).filter((k) => c.marks[k] === 'helps');
+  const edit = pickerUi().ctx === 'edit';
   return `
     <div class="stack">
       <div>
         <label for="pick-name">Name</label>
         <input id="pick-name" class="input" value="${esc(c.name)}" placeholder="e.g. Hammer Strength Row" data-input="pickName" autocomplete="off" />
       </div>
+      ${
+        edit
+          ? `<div class="two">
+              <div><label for="pick-plan">Plan</label><input id="pick-plan" class="input" value="${esc(c.plan)}" placeholder="3 × 8-12" data-input="pickPlan" autocomplete="off" /></div>
+              <div><label for="pick-step">Weight step (kg)</label><input id="pick-step" class="input" type="number" inputmode="decimal" min="0" step="0.5" value="${esc(c.step)}" placeholder="default" data-input="pickStep" /></div>
+            </div>
+            <p class="hint" style="margin:0">${
+              c.entryName
+                ? `${c.entryName === c.oldName ? 'This exercise' : `“${esc(c.oldName)}” counts as <b>${esc(c.entryName)}</b>; this`} is the exercise database's row: muscles changed here change it on every page and in the Sheet.`
+                : 'Not in the exercise database yet: saving adds it (and to the Sheet) with these muscles.'
+            }</p>`
+          : ''
+      }
       <fieldset>
         <legend>Equipment</legend>
         <div class="pills">${Muscles.EQUIPMENT.map((q) => `<button type="button" class="pill-btn ${c.equipment === q ? 'on' : ''}" aria-pressed="${c.equipment === q}" data-action="pickEquip" data-value="${esc(q)}">${esc(q)}</button>`).join('')}</div>
@@ -146,8 +160,70 @@ function renderCreateForm() {
           .join('')}
       </fieldset>
       <p class="small muted" style="margin:0">${main.length ? `Main: ${esc(muscleNames(main))}` : 'Pick at least one main muscle.'}${helps.length ? `<br />Helping: ${esc(muscleNames(helps))}` : ''}</p>
-      <button type="button" class="btn primary" data-action="pickSave">Save exercise${pickerUi().ctx === 'alias' ? '' : ' and add it'}</button>
+      <button type="button" class="btn primary" data-action="pickSave">${edit ? 'Save changes' : `Save exercise${pickerUi().ctx === 'alias' ? '' : ' and add it'}`}</button>
     </div>`;
+}
+
+/**
+ * v2.2.2: edit an exercise of the plan in the same panel as a new one: name, plan, weight step, equipment and its
+ * muscles (tap once = Main, twice = Helping), starting from what the exercise database says. Saving changes the
+ * database row (and the Sheet's), so the Muscles tab, Progress and Exercises & plans all show the same muscles.
+ */
+function openEditor(day, index) {
+  const name = state.exercises[day]?.[index];
+  if (!name) return;
+  const e = exerciseEntry(name);
+  const real = e && !e.guessed ? e : null; // a row of the database (not a guess from the old muscle group)
+  const marks = {};
+  if (e) {
+    for (const k of e.main) marks[k] = 'main';
+    for (const k of e.helps) marks[k] = 'helps';
+  }
+  state.ui.picker = {
+    ctx: 'edit', mode: 'create', query: '', alias: '', day, hash: location.hash, enter: true,
+    create: { name, equipment: real?.equipment || '', marks, plan: state.targets[day]?.[name] || '', step: state.settings.steps?.[name] ?? '', oldName: name, entryName: real?.name || null },
+  };
+  render();
+}
+
+function saveEdit() {
+  const p = pickerUi();
+  const c = p.create;
+  const val = (id, fallback) => (document.getElementById(id)?.value ?? fallback ?? '').toString().trim();
+  const newName = val('pick-name', c.name);
+  const plan = val('pick-plan', c.plan);
+  const stepRaw = val('pick-step', c.step);
+  if (!newName) return toast('The name cannot be empty', 'error');
+  const step = stepRaw === '' ? null : Number(stepRaw);
+  if (step !== null && !(step > 0)) return toast('Weight step must be a number above 0', 'error');
+  const main = Object.keys(c.marks).filter((k) => c.marks[k] === 'main');
+  const helps = Object.keys(c.marks).filter((k) => c.marks[k] === 'helps');
+  if (!main.length) return toast('Tap at least one main muscle', 'error');
+  const day = p.day;
+  if (newName !== c.oldName) renameEverywhere(c.oldName, newName);
+  if (!state.targets[day]) state.targets[day] = {};
+  if (plan) state.targets[day][newName] = plan;
+  else delete state.targets[day][newName];
+  save(KEYS.targets, state.targets);
+  state.settings.steps = { ...(state.settings.steps || {}) };
+  if (step === null) delete state.settings.steps[newName];
+  else state.settings.steps[newName] = step;
+  // The old typed muscle group is no longer used for this exercise: the database row is the one source.
+  if (state.settings.muscles?.[newName]) {
+    state.settings.muscles = { ...state.settings.muscles };
+    delete state.settings.muscles[newName];
+  }
+  save(KEYS.settings, state.settings);
+  const row = { equipment: c.equipment, main: muscleNames(main), helps: muscleNames(helps), replace: true };
+  if (c.entryName) {
+    const ops = [{ type: 'upsert', row: { name: c.entryName, ...row } }];
+    if (Muscles.norm(newName) !== Muscles.norm(c.entryName)) ops.push({ type: 'alias', name: c.entryName, alias: newName });
+    queueExerciseOp(ops);
+  } else {
+    queueExerciseOp({ type: 'upsert', row: { name: newName, ...row, aliases: '' } });
+  }
+  toast(newName === c.oldName ? `${newName} updated` : `Renamed to ${newName}`);
+  closePicker();
 }
 
 /** Put the picked exercise where the panel was opened from. */
@@ -307,8 +383,19 @@ const pickerActions = {
     if (!c.marks[k]) delete c.marks[k];
     render();
   },
+  editExercise(el) {
+    openEditor(state.ui.manageDay, Number(el.dataset.index));
+  },
+  /** From Progress's hard-sets bars: the Muscles tab, last 7 days, with that muscle picked. */
+  musOpen(el) {
+    const key = el.dataset.key;
+    const u = musUi();
+    Object.assign(u, { mode: 'mine', period: 'week', picked: key, vb: null, view: Muscles.FIG.front.some((l) => l[1] === key) ? 'front' : Muscles.VIEW_OF[key] || 'front' });
+    location.hash = '#muscles';
+  },
   pickSave() {
     const p = pickerUi();
+    if (p.ctx === 'edit') return saveEdit();
     const c = p.create;
     const name = (document.getElementById('pick-name')?.value ?? c.name).trim();
     if (!name) return toast('Give the exercise a name', 'error');
@@ -345,5 +432,11 @@ const pickerInputs = {
   },
   pickName(el) {
     pickerUi().create.name = el.value;
+  },
+  pickPlan(el) {
+    pickerUi().create.plan = el.value;
+  },
+  pickStep(el) {
+    pickerUi().create.step = el.value;
   },
 };

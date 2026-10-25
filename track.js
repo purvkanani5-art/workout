@@ -50,10 +50,11 @@ function renderProgress() {
     .filter(Boolean)
     .sort((a, b) => STATUS_ORDER[a.status.kind] - STATUS_ORDER[b.status.kind] || a.exercise.localeCompare(b.exercise));
   const p = state.settings.progression;
-  const counts = Progress.weeklyMuscleSets(state.history, muscleOf, todayISO());
-  const assigned = Object.values(state.settings.muscles || {});
-  const muscles = [...new Set([...MUSCLE_GROUPS, ...assigned, ...Object.keys(counts)])].filter((m) => counts[m] || assigned.includes(m));
-  const maxCount = Math.max(p.muscleSetsMax, ...Object.values(counts));
+  // v2.2.2: the same count and muscles as the Muscles tab (database muscles, main 1 · helping ½, last 7 days).
+  const tally = muscleSets(sessionsBetween(Progress.addDays(todayISO(), -6), todayISO()));
+  const cov = Muscles.planCoverage(exerciseDb().db, planNames(), manualGroup);
+  const muscles = Muscles.MUSCLES.filter((m) => tally.sets[m.key] > 0 || cov.mine[m.key].main.length);
+  const maxCount = Math.max(p.muscleSetsMax, ...muscles.map((m) => tally.sets[m.key]));
   const due = analyses.filter((a) => a.status.kind === 'increase').length;
   const ups = analyses.filter((a) => a.trend === 'up').length;
   const downs = analyses.filter((a) => a.trend === 'down').length;
@@ -89,15 +90,15 @@ function renderProgress() {
       'Hard sets per muscle',
       '<a class="btn link small" href="#muscles">Muscle map ›</a>',
       `<section class="card stack">
-      <p class="hint" style="margin:0">Last 7 days. Useful range ${p.muscleSetsMin}–${p.muscleSetsMax} working sets a week (More → Progression).</p>
+      <p class="hint" style="margin:0">Last 7 days, counted like the Muscles tab: a main muscle gets the whole set, a helping muscle half. Useful range ${p.muscleSetsMin}–${p.muscleSetsMax} a week. Tap a muscle to see which exercises gave its sets.</p>
       ${
         muscles.length
           ? `<div class="bars">${muscles
               .map((m) => {
-                const n = counts[m] || 0;
+                const n = Math.round(tally.sets[m.key] * 10) / 10;
                 const state_ = n < p.muscleSetsMin ? 'low' : n > p.muscleSetsMax ? 'high' : 'ok';
-                return `<div class="bar-row">
-                  <span class="bar-label">${esc(m)}</span>
+                return `<div class="bar-row" role="button" tabindex="0" data-action="musOpen" data-key="${m.key}">
+                  <span class="bar-label">${esc(m.name)}</span>
                   <span class="bar-track"><span class="bar-fill ${state_}" style="width:${Math.round((n / maxCount) * 100)}%"></span>
                     <span class="bar-band" style="left:${(p.muscleSetsMin / maxCount) * 100}%;width:${((p.muscleSetsMax - p.muscleSetsMin) / maxCount) * 100}%"></span></span>
                   <span class="bar-value">${n}${state_ === 'low' ? ' · low' : state_ === 'high' ? ' · high' : ''}</span>
@@ -148,8 +149,12 @@ function weekSummary(endIso) {
   const missed = state.missed.filter((m) => inWeek(m.date)).sort((a, b) => a.date.localeCompare(b.date));
   const deload = sessions.some((s) => inDeload(s.date));
 
-  // Sets per muscle over the week's 7 days (or up to today while it runs).
-  const counts = Progress.weeklyMuscleSets(state.history, muscleOf, end < today ? end : today);
+  // Sets per muscle in the week, counted like the Muscles tab; "low" only for muscles the plan trains as main.
+  const wt = muscleSets(sessions);
+  const cov = Muscles.planCoverage(exerciseDb().db, planNames(), manualGroup);
+  const counts = Object.fromEntries(
+    Muscles.MUSCLES.filter((m) => wt.sets[m.key] > 0 || cov.mine[m.key].main.length).map((m) => [m.name, Math.round(wt.sets[m.key] * 10) / 10]),
+  );
   const low = Object.entries(counts).filter(([, n]) => n < p.muscleSetsMin);
   const high = Object.entries(counts).filter(([, n]) => n > p.muscleSetsMax);
 
@@ -1282,16 +1287,16 @@ function musData() {
   const { db, fromSheet } = exerciseDb();
   const u = musUi();
   // Plan coverage in both views: a muscle no exercise of the schedule trains as a main muscle is "not in your plan".
-  const cov = Muscles.planCoverage(db, planNames(), muscleOf);
+  const cov = Muscles.planCoverage(db, planNames(), manualGroup);
   const gaps = new Set(Muscles.MUSCLES.filter((m) => !cov.mine[m.key].main.length).map((m) => m.key));
   if (u.mode === 'all') {
     // Planned hard sets a week per muscle: each exercise's planned sets × how often its day is on the schedule.
     const perWeek = {};
     for (const day of Object.values(state.settings.schedule || DEFAULT_SCHEDULE)) if (day) perWeek[day] = (perWeek[day] || 0) + 1;
-    const planned = Muscles.plannedWeekly(db, state.exercises, perWeek, (day, name) => Progress.parsePlan(planText(day, name))?.sets || 3, muscleOf);
-    return { db, fromSheet, mode: 'all', value: planned, cov, gaps, scale: 'week' };
+    const plan = Muscles.plannedDetail(db, state.exercises, perWeek, (day, name) => Progress.parsePlan(planText(day, name))?.sets || 3, manualGroup);
+    return { db, fromSheet, mode: 'all', value: plan.sets, planBy: plan.by, perWeek, cov, gaps, scale: 'week' };
   }
-  const t = Muscles.tally(db, musSessions(), muscleOf);
+  const t = Muscles.tally(db, musSessions(), manualGroup);
   return { db, fromSheet, mode: 'mine', value: t.sets, t, cov, gaps, scale: u.period === 'day' ? 'day' : 'week' };
 }
 
@@ -1336,15 +1341,16 @@ function pickedHtml(d) {
   const inPlan = (name) => plan.has(Muscles.norm(name));
   const { main, helps } = Muscles.exercisesFor(d.db, key);
   // One tap from a muscle to the exercise search, already filtered to it, adding to the day that trains it most.
-  const addBtn = `<button type="button" class="btn secondary addex" data-action="openPicker" data-ctx="plan" data-muscle="${key}" data-query="${esc(m.name)}">${icon('plus')}Add a ${esc(m.name)} exercise to your plan</button>`;
+  const addBtn = `<button type="button" class="btn secondary addex" data-action="openPicker" data-ctx="plan" data-muscle="${key}" data-query="${esc(m.name)}">${icon('plus')}Add ${d.gaps.has(key) ? 'a' : 'another'} ${esc(m.name)} exercise to your plan</button>`;
   if (d.mode === 'mine') {
     const n = d.value[key];
     const lv = Muscles.level(n, d.scale);
     const when = u.period === 'day' ? `on ${formatDate(u.day || todayISO(), false)}` : 'in the last 7 days';
     const verdict = (d.scale === 'week' ? ['not trained', 'too little', 'some work, below the 10-set target', 'on target', 'a lot'] : ['not trained', 'light', 'moderate', 'solid', 'heavy'])[lv];
     const done = [...d.t.by[key].entries()].sort((a, b) => b[1].main - a[1].main || b[1].sets - a[1].sets);
+    // Where the number comes from: each exercise, its day(s), its sets, and half for a helping muscle.
     const chips = done.length
-      ? done.map(([name, v]) => `<span class="${v.main ? 'main' : ''}">${esc(name)} · ${esc(fmtSets(v.sets))}${v.main ? '' : ' (helps)'}</span>`).join('')
+      ? done.map(([name, v]) => `<span class="${v.main ? 'main' : ''}">${esc(name)}${v.days.length ? ` (${esc(v.days.join(', '))})` : ''} · ${esc(fmtSets(v.sets))}${v.main ? '' : ` × ½ = ${esc(Math.round(v.counted * 10) / 10)}`}</span>`).join('')
       : main
           .slice(0, 5)
           .map((e) => `<span class="${inPlan(e.name) ? 'main' : ''}">Try: ${esc(e.name)}${e.equipment ? ` · ${esc(e.equipment)}` : ''}${inPlan(e.name) ? ' (in your plan)' : ''}</span>`)
@@ -1354,7 +1360,10 @@ function pickedHtml(d) {
           d.cov.mine[key].helps.length ? ` (helped by ${esc(d.cov.mine[key].helps.join(', '))})` : ''
         }.${done.length ? ` Try: ${esc(main.slice(0, 3).map((e) => e.name).join(', '))}.` : ''}</p>`
       : '';
-    return `<b>${esc(m.name)}</b><span class="hint">${esc(fmtSets(n))} ${esc(when)} · ${esc(verdict)}</span>${gap}<div class="exs">${chips}</div>${addBtn}`;
+    const fromMain = done.filter(([, v]) => v.main).reduce((a, [, v]) => a + v.counted, 0);
+    const fromHelp = done.filter(([, v]) => !v.main).reduce((a, [, v]) => a + v.counted, 0);
+    const sum = done.length && fromHelp ? ` = ${Math.round(fromMain * 10) / 10} as main + ${Math.round(fromHelp * 10) / 10} as helper (half a set each)` : '';
+    return `<b>${esc(m.name)}</b><span class="hint">${esc(fmtSets(n))} ${esc(when)}${esc(sum)} · ${esc(verdict)}</span>${gap}<div class="exs">${chips}</div>${addBtn}`;
   }
   const mine = d.cov.mine[key];
   const weekly = Math.round(d.value[key] * 10) / 10;
@@ -1365,7 +1374,18 @@ function pickedHtml(d) {
       mine.main.length || mine.helps.length
         ? esc([mine.main.length ? `${mine.main.length} main (${mine.main.join(', ')})` : '', mine.helps.length ? `${mine.helps.length} helping` : ''].filter(Boolean).join(', '))
         : 'nothing works it yet'
-    } · about ${esc(weekly)} hard sets a week planned (target ${esc(state.settings.progression.muscleSetsMin)}–${esc(state.settings.progression.muscleSetsMax)})</span>${addBtn}
+    } · ${esc(weekly)} hard sets a week planned (target ${esc(state.settings.progression.muscleSetsMin)}–${esc(state.settings.progression.muscleSetsMax)})</span>
+    ${
+      d.planBy?.[key]?.length
+        ? `<p class="sublabel">Where the ${esc(weekly)} planned sets come from</p><div class="exs">${d.planBy[key]
+            .map(
+              (x) => `<span class="${x.main ? 'main' : ''}">${esc(x.name)} (${esc(x.day)}${d.perWeek[x.day] > 1 ? ` × ${d.perWeek[x.day]} a week` : ''}) · ${esc(fmtSets(x.sets))}${
+                x.main ? '' : ` × ½ = ${esc(Math.round(x.counted * 10) / 10)}`
+              }</span>`,
+            )
+            .join('')}</div>`
+        : ''
+    }${addBtn}
     ${main.length ? `<p class="sublabel">Main exercises (${main.length})</p><ul class="exlist">${main.map(row).join('')}</ul>` : '<p class="hint">No exercise in the database has it as a main muscle.</p>'}
     ${helps.length ? `<details class="exmore"><summary>Also helped by ${helps.length} exercise${helps.length === 1 ? '' : 's'}</summary><ul class="exlist">${helps.map(row).join('')}</ul></details>` : ''}`;
 }
@@ -1428,10 +1448,10 @@ function renderMuscles() {
   const ex = state.exdb;
   return `
     <h1 class="large">Muscles</h1>
-    <p class="sub">${d.mode === 'mine' ? 'Hard sets per muscle from your workouts · warm-ups not counted' : 'Hard sets a week your plan gives each muscle (planned sets × days on the schedule), and every exercise in the database'}</p>
+    <p class="sub">${d.mode === 'mine' ? 'Sets you logged (not your plan) · a helping muscle counts half a set · warm-ups not counted' : 'Hard sets a week your plan gives each muscle (planned sets × days on the schedule), and every exercise in the database'}</p>
     <div class="seg2" role="tablist" aria-label="Show">
-      <button type="button" role="tab" data-action="musMode" data-mode="mine" aria-selected="${d.mode === 'mine'}">My workout</button>
-      <button type="button" role="tab" data-action="musMode" data-mode="all" aria-selected="${d.mode === 'all'}">All exercises</button>
+      <button type="button" role="tab" data-action="musMode" data-mode="mine" aria-selected="${d.mode === 'mine'}">Logged sets</button>
+      <button type="button" role="tab" data-action="musMode" data-mode="all" aria-selected="${d.mode === 'all'}">My plan</button>
     </div>
     ${
       d.mode === 'mine'
