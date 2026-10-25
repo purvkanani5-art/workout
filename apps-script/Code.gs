@@ -736,7 +736,10 @@ function normName_(s) {
     .replace(/[^a-z0-9]+/g, ' ')
     .trim()
     .split(' ')
-    .map(function (w) { return w.length > 3 && /s$/.test(w) && !/ss$/.test(w) ? w.slice(0, -1) : w; })
+    .map(function (w) {
+      if (w.length > 4 && /(ch|sh|x|ss)es$/.test(w)) return w.slice(0, -2);
+      return w.length > 3 && /s$/.test(w) && !/ss$/.test(w) ? w.slice(0, -1) : w;
+    })
     .join(' ');
 }
 
@@ -796,6 +799,14 @@ function aliasExercise_(name, alias) {
     var sheet = getExerciseSheet_();
     var r = exerciseRow_(sheet, name);
     if (!r) return json_({ ok: false, error: 'no exercise named ' + name });
+    // One other name belongs to one exercise: removed from any other row first (the app changed a match).
+    var last = sheet.getLastRow();
+    var cells = sheet.getRange(2, 6, last - 1, 1).getValues();
+    for (var i = 0; i < cells.length; i++) {
+      if (i + 2 === r || !cells[i][0]) continue;
+      var kept = String(cells[i][0]).split(',').map(function (s) { return s.trim(); }).filter(function (a) { return a && normName_(a) !== normName_(alias); });
+      if (kept.join(', ') !== String(cells[i][0])) sheet.getRange(i + 2, 6).setValue(kept.join(', '));
+    }
     mergeAliases_(sheet, r, [alias]);
     return json_({ ok: true });
   } catch (err) {

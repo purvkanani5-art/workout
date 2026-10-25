@@ -2146,6 +2146,11 @@ details.customday[open] > summary .chev { transform: rotate(90deg); }
 /* The toast sits above the floating rest timer while it shows */
 body:has(#timer.floating) .toast { bottom: calc(200px + env(safe-area-inset-bottom)); }
 
+/* Matched automatically (collapsible group) */
+details.automatch > summary { list-style: none; cursor: pointer; }
+details.automatch > summary::-webkit-details-marker { display: none; }
+details.automatch[open] > summary .note { color: var(--sel-text); }
+
 /* Empty and loading */
 .empty { font-size: 14px; }
 .spin { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; vertical-align: -2px; margin-right: 8px; animation: spin .8s linear infinite; opacity: .7; }

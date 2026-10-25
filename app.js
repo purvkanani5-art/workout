@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.2.1';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -39,6 +39,7 @@ const KEYS = {
   recoveryOutbox: 'wt.recoveryOutbox', // [{ date, … }] the owner's morning answers waiting for the Recovery tab
   recoveryFetchedAt: 'wt.recoveryFetchedAt', // last time the Shortcut's numbers were fetched from the Sheet
   exdb: 'wt.exdb', // { rows, fetchedAt }: the Sheet's Exercises tab, cached for the muscle map (v2.0)
+  autoAliases: 'wt.autoAliases', // [{ alias, name, date }] your own names the app matched to database exercises by itself (v2.2.1)
   exOps: 'wt.exOps', // [{ id, type: 'upsert' | 'alias', … }] exercise database changes made in the app, waiting for the Sheet (v2.2)
 };
 
@@ -238,6 +239,7 @@ const state = {
   recoveryOutbox: load(KEYS.recoveryOutbox, []),
   exdb: load(KEYS.exdb, null),
   exOps: load(KEYS.exOps, []),
+  autoAliases: load(KEYS.autoAliases, []),
   ui: {
     picker: null, // the exercise search panel (v2.2): { ctx, day, query, mode, create, alias }
     muscles: { mode: 'mine', period: 'week', day: null, view: 'front', picked: null, vb: null }, // Muscles tab
@@ -530,9 +532,11 @@ function exerciseDb() {
   return exdbCache;
 }
 
-/** Queue a database change made in the app (a new exercise, or another name for one) and send it to the Sheet. */
+/** Queue database changes made in the app (a new exercise, or another name for one) and send them to the Sheet. */
 function queueExerciseOp(op) {
-  state.exOps = [...state.exOps, { id: uuid(), ...op }];
+  const list = Array.isArray(op) ? op : [op];
+  if (!list.length) return;
+  state.exOps = [...state.exOps, ...list.map((o) => ({ id: uuid(), ...o }))];
   save(KEYS.exOps, state.exOps);
   flushExerciseOps().then(() => {
     if (['muscles', 'settings', 'entry'].includes(route().name)) render();
@@ -627,6 +631,7 @@ function setupMuscleDropdowns() {
 
 function refreshExercises(force = false, maxAge) {
   return fetchExercises({ force, maxAge }).then((got) => {
+    if (got) autoAliasUnknown(); // new Sheet rows may match more of your names
     if (got && (route().name === 'muscles' || state.ui.picker)) render();
     return got;
   });
@@ -1396,6 +1401,8 @@ function render() {
   if (name === 'history' && !arg) autoPull('history');
   if (name === 'body') autoPull('measurements');
   if (name === 'muscles' || (name === 'settings' && arg === 'exercises')) refreshExercises(false, 5 * 60000); // the Sheet's latest exercises
+  // Your own exercise names are matched to the database by themselves (no manual step), on these pages.
+  if (['home', 'muscles'].includes(name) || (name === 'settings' && arg === 'exercises')) setTimeout(autoAliasUnknown, 0);
   if (name === 'photos') afterPhotosRender();
   if (name === 'muscles') afterMusclesRender();
   if (name === 'entry') tickTimer();
@@ -2758,6 +2765,7 @@ function renderSettings() {
       )}
       ${exSyncNote() ? `<div class="sgroup">${exSyncNote()}</div>` : ''}
       ${unknownNamesHtml()}
+      ${autoMatchedHtml()}
       ${group(
         'After lifting',
         '',

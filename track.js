@@ -1415,7 +1415,7 @@ function muscleListsHtml(d) {
     )
     .join('');
   // Names the database does not know (plan or log): match each to an exercise once, saved as its other name.
-  return html + unknownNamesHtml();
+  return html + unknownNamesHtml() + autoMatchedHtml();
 }
 
 function renderMuscles() {

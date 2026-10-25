@@ -46,7 +46,7 @@ const Muscles = (() => {
       .replace(/[^a-z0-9]+/g, ' ')
       .trim()
       .split(' ')
-      .map((w) => (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w))
+      .map((w) => (w.length > 4 && /(ch|sh|x|ss)es$/.test(w) ? w.slice(0, -2) : w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w))
       .join(' ');
   const NAME_TO_KEY = new Map();
   for (const m of MUSCLES) {
@@ -396,6 +396,11 @@ const Muscles = (() => {
       } else if (op.type === 'alias' && op.name && op.alias) {
         const r = find(op.name);
         if (!r) continue;
+        // One other name belongs to one exercise: taken off any other row first (a match that was changed).
+        for (const o of out) {
+          if (o === r || !o.aliases) continue;
+          o.aliases = String(o.aliases).split(',').map((s) => s.trim()).filter((a) => a && norm(a) !== norm(op.alias)).join(', ');
+        }
         const list = String(r.aliases || '').split(',').map((s) => s.trim()).filter(Boolean);
         if (!list.some((a) => norm(a) === norm(op.alias))) list.push(op.alias.trim());
         r.aliases = list.join(', ');
@@ -432,6 +437,97 @@ const Muscles = (() => {
     for (const g of ga) if (gb.has(g)) inter++;
     const dice = (2 * inter) / (ga.size + gb.size);
     return 0.6 * words + 0.4 * dice;
+  }
+
+  /* ---------- automatic matching of the owner's own names (v2.2.1) ---------- */
+
+  // Phrases written several ways → one form (applied before splitting into words).
+  const PHRASES = [
+    [/\bpull[\s-]*downs?\b/g, 'pulldown'], [/\bpush[\s-]*downs?\b/g, 'pushdown'], [/\bpress[\s-]*downs?\b/g, 'pushdown'],
+    [/\bpull[\s-]*ups?\b/g, 'pullup'], [/\bchin[\s-]*ups?\b/g, 'chinup'], [/\bpush[\s-]*ups?\b/g, 'pushup'], [/\bsit[\s-]*ups?\b/g, 'situp'],
+    [/\bskull[\s-]*crushers?\b/g, 'skullcrusher'], [/\bflyes?\b|\bflys\b|\bflies\b/g, 'fly'], [/\blat raises?\b/g, 'lateral raise'],
+    [/\b(ham|hamstring|hamstrings) curls?\b/g, 'leg curl'], [/\bquad extensions?\b/g, 'leg extension'], [/\bleg ext\b/g, 'leg extension'],
+    [/\bpec fly\b|\bmachine fly\b|\bbutterfly\b/g, 'pec deck'], [/\breverse fly\b/g, 'rear delt fly'], [/\bt[\s-]*bar\b/g, 'tbar'],
+    [/\bez[\s-]*bar\b/g, 'ez'], [/\boverhead press\b/g, 'shoulder press'], [/\bmilitary press\b/g, 'shoulder press'],
+    [/\bside lateral\b/g, 'lateral'], [/\bbench\b(?!\s*(press|dip))/g, 'bench press'], [/\brope\b/g, 'rope cable'],
+  ];
+  // Words that make it a different exercise when the candidate has them and the name does not (incline vs flat…).
+  const KEYWORDS = new Set(['incline', 'decline', 'shoulder', 'close', 'reverse', 'front', 'rear', 'lateral', 'overhead', 'hammer', 'wrist', 'preacher',
+    'concentration', 'spider', 'drag', 'zottman', 'bayesian', 'upright', 'sumo', 'romanian', 'stiff', 'bulgarian', 'goblet', 'hack', 'sissy', 'donkey',
+    'nordic', 'kickback', 'pullover', 'neutral', 'single', 'straight', 'knee', 'bent', 'landmine', 'arnold', 'cuban', 'y', 'external', 'scapular']);
+  // Muscle words in a name ("Tricep Pushdown"): satisfied by any exercise that trains that muscle.
+  const MUSCLE_WORDS = { tricep: ['triceps'], bicep: ['bicepsInner', 'bicepsOuter'] };
+  // Short forms → words.
+  const SHORTS = { db: 'dumbbell', dbs: 'dumbbell', dumbell: 'dumbbell', bb: 'barbell', kb: 'kettlebell', ohp: 'shoulder press', rdl: 'romanian deadlift',
+    sldl: 'stiff leg deadlift', bss: 'bulgarian split squat', inc: 'incline', dec: 'decline', ext: 'extension', bw: 'bodyweight', mach: 'machine',
+    tri: 'tricep', tris: 'tricep', bi: 'bicep', bis: 'bicep', oh: 'overhead', cgbp: 'close grip bench press', hs: 'hammer strength', cg: 'close grip', ng: 'neutral grip' };
+  // Words that do not change which exercise it is.
+  // "Seated" and "standing" are optional too, but a seated candidate loses a little when the name does not say seated
+  // (Calf Raise = standing; a shoulder press is still found seated).
+  const OPTIONAL = new Set(['seated', 'standing', 'the', 'with', 'on', 'a', 'and', 'of', 'weighted', 'flat', 'grip', 'single', 'one', 'arm', 'both', 'x', 'set', 'sets', 'heavy', 'light', 'slow', 'plate', 'loaded', 'variation', 'free']);
+  const EQUIP = ['dumbbell', 'barbell', 'cable', 'machine', 'smith', 'kettlebell', 'band', 'ez', 'bodyweight'];
+  function coreWords(s) {
+    let t = ` ${String(s || '').toLowerCase().replace(/[()]/g, ' ')} `;
+    for (const [re, rep] of PHRASES) t = t.replace(re, rep);
+    return [
+      ...new Set(
+        norm(t)
+          .split(' ')
+          .flatMap((w) => (SHORTS[w] ? norm(SHORTS[w]).split(' ') : [w]))
+          .filter((w) => w && !OPTIONAL.has(w) && !/^\d+$/.test(w)),
+      ),
+    ];
+  }
+  /** 0–1 confidence that two names are the same exercise (`entry` = the candidate's database row, for muscle words). */
+  function matchScore(name, candidate, entry = null) {
+    let a = coreWords(name);
+    let b = coreWords(candidate);
+    if (entry) {
+      for (const [w, keys] of Object.entries(MUSCLE_WORDS)) {
+        if (keys.some((k) => entry.main.includes(k))) {
+          a = a.filter((x) => x !== w);
+          b = b.filter((x) => x !== w);
+        }
+      }
+    }
+    if (!a.length || !b.length) return 0;
+    const raw = (s) => ` ${norm(s)} `;
+    const seatedPenalty = raw(candidate).includes(' seated ') && !raw(name).includes(' seated ') ? 0.08 : 0;
+    // A defining word on one side only (incline, hammer, reverse…) makes it a different exercise.
+    const extraKey = (b.filter((w) => KEYWORDS.has(w) && !a.includes(w)).length + a.filter((w) => KEYWORDS.has(w) && !b.includes(w)).length) * 0.1;
+    return Math.max(0, baseScore(a, b) - seatedPenalty - extraKey);
+  }
+  function baseScore(a, b) {
+    const A = new Set(a);
+    const B = new Set(b);
+    const eqA = a.filter((w) => EQUIP.includes(w));
+    const eqB = b.filter((w) => EQUIP.includes(w));
+    // Different equipment named on both sides: not the same exercise.
+    if (eqA.length && eqB.length && !eqA.some((w) => B.has(w))) return 0;
+    const inter = a.filter((w) => B.has(w)).length;
+    if (inter === A.size && inter === B.size) return 1;
+    if (inter === A.size) return Math.max(0, 0.9 - 0.08 * (B.size - A.size)); // every word of the name is in the candidate
+    if (inter === B.size) return Math.max(0, 0.86 - 0.08 * (A.size - B.size)); // the candidate is a shorter form of the name
+    return (0.8 * inter) / new Set([...a, ...b]).size;
+  }
+
+  /**
+   * The database exercise a name surely means, or null. Sure = scores at least 0.74 and clearly ahead; when several
+   * tie, they must all train the same muscles (then counting is the same whichever is picked).
+   */
+  function autoMatch(db, name) {
+    if (db.index.has(norm(name))) return null;
+    const scored = db.list
+      .map((e) => ({ e, s: Math.max(matchScore(name, e.name, e), ...e.aliases.map((x) => matchScore(name, x, e))) }))
+      .filter((x) => x.s >= 0.74)
+      .sort((x, y) => y.s - x.s || x.e.name.length - y.e.name.length);
+    if (!scored.length) return null;
+    const best = scored[0];
+    const close = scored.filter((x) => best.s - x.s < 0.06);
+    // Near-ties are fine when they share the main muscles (coverage and counting then come out the same).
+    const same = (x) => x.e.main.slice().sort().join() === best.e.main.slice().sort().join();
+    if (close.length > 1 && !close.every(same)) return null;
+    return { e: best.e, score: best.s, tied: close.length };
   }
 
   /** The closest database exercises to a name the database does not know (best first). */
@@ -578,7 +674,7 @@ const Muscles = (() => {
 
   return {
     MUSCLES, BY_KEY, FIG, SKIN, VIEW_OF, EXERCISES, LEVELS, EQUIPMENT, norm, muscleKey, seedRows, buildDb, lookup, tally, exercisesFor, level, planCoverage,
-    applyOps, similarity, suggest, search, plannedWeekly,
+    applyOps, similarity, suggest, search, plannedWeekly, autoMatch, matchScore, coreWords,
   };
 })();
 

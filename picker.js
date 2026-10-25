@@ -155,6 +155,12 @@ function usePicked(name) {
   const p = pickerUi();
   if (p.ctx === 'alias') {
     if (Muscles.norm(name) !== Muscles.norm(p.alias)) queueExerciseOp({ type: 'alias', name, alias: p.alias });
+    // A changed automatic match keeps its place in "Matched automatically", now pointing at your choice.
+    const auto = state.autoAliases.find((x) => Muscles.norm(x.alias) === Muscles.norm(p.alias));
+    if (auto) {
+      auto.name = name;
+      save(KEYS.autoAliases, state.autoAliases);
+    }
     toast(`“${p.alias}” now counts as ${name}`);
     return closePicker();
   }
@@ -208,6 +214,44 @@ function unknownNamesHtml() {
       .join('')}</div>
     <p class="hint gnote">The name you use is kept: it is saved as another name (“Also called”) of the exercise in the Sheet, so any name you use counts for the same muscles.</p>`,
   );
+}
+
+/**
+ * v2.2.1: your own names (plan and every logged workout) matched to database exercises by the app itself, so a
+ * muscle is never "not in your plan" because of how an exercise is written ("DB Shoulder Press" = Seated Dumbbell
+ * Shoulder Press). Only sure matches are made (Muscles.autoMatch); the rest stay in "Names to match". Each match is
+ * saved as another name in the Sheet and listed under "Matched automatically", where it can be changed.
+ * Runs on the Sheet's rows (not the built-in list) when the Sheet is connected, so the names it links exist there.
+ */
+function autoAliasUnknown() {
+  const { db, fromSheet } = exerciseDb();
+  if (haveApi() && !fromSheet) return 0;
+  const made = [];
+  for (const n of unknownNames()) {
+    const m = Muscles.autoMatch(db, n);
+    if (m) made.push({ alias: n, name: m.e.name, date: todayISO() });
+  }
+  if (!made.length) return 0;
+  queueExerciseOp(made.map((x) => ({ type: 'alias', name: x.name, alias: x.alias })));
+  state.autoAliases = [...state.autoAliases.filter((x) => !made.some((y) => Muscles.norm(y.alias) === Muscles.norm(x.alias))), ...made];
+  save(KEYS.autoAliases, state.autoAliases);
+  toast(`Matched ${made.length} of your exercise name${made.length === 1 ? '' : 's'} to the database`);
+  return made.length;
+}
+
+/** "Matched automatically": each of your names and the exercise it now counts as, with Change. */
+function autoMatchedHtml(open = false) {
+  const list = state.autoAliases.slice().sort((a, b) => a.alias.localeCompare(b.alias));
+  if (!list.length) return '';
+  return `<section class="sgroup"><details class="automatch" ${open ? 'open' : ''}>
+    <summary class="ghead"><h2>Matched automatically</h2><span class="note">${list.length} name${list.length === 1 ? '' : 's'} ›</span></summary>
+    <div class="card flush">${list
+      .map(
+        (x) => `<div class="erow"><div class="tx"><b>${esc(x.alias)}</b><span>counts as ${esc(x.name)}</span></div><div class="acts"><button type="button" class="btn small pill" data-action="aliasPick" data-alias="${esc(x.alias)}">Change</button></div></div>`,
+      )
+      .join('')}</div>
+    <p class="hint gnote">Your names stay as they are; each is saved as another name of the exercise in the Sheet's “Also called” column.</p>
+  </details></section>`;
 }
 
 /** One line on database changes still waiting for the Sheet. */
@@ -285,7 +329,7 @@ const pickerActions = {
     render();
   },
   aliasPick(el) {
-    openPicker({ ctx: 'alias', alias: el.dataset.alias, query: '' });
+    openPicker({ ctx: 'alias', alias: el.dataset.alias, query: el.dataset.alias });
   },
   aliasNew(el) {
     openPicker({ ctx: 'alias', alias: el.dataset.alias, query: el.dataset.alias });
