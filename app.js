@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.4.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -704,31 +704,31 @@ function missedPause(exercise, from, to) {
   return state.missed.filter((m) => m.date > from && m.date <= to && dayExercises(m.dayType).includes(exercise)).length * per;
 }
 
-/** Muscles your plan trains as a main muscle that no working set has trained (as a main muscle) for more than
-    `neglectDays`. Same muscles and names as the Muscles tab (v2.2.2). */
-function neglectedMuscles() {
-  const limit = Number(state.settings.progression.neglectDays) || 0;
-  if (!limit) return [];
-  const { db } = exerciseDb();
-  const cov = Muscles.planCoverage(db, planNames(), manualGroup);
-  const planned = Muscles.MUSCLES.filter((m) => cov.mine[m.key].main.length);
-  const last = {};
-  for (const s of state.history) {
-    for (const set of s.sets) {
-      if (!Progress.isWorking(set)) continue;
-      const e = Muscles.lookup(db, set.exercise, manualGroup(set.exercise));
-      if (e) for (const k of e.main) if (!last[k] || s.date > last[k]) last[k] = s.date;
-    }
-  }
-  const today = todayISO();
-  const started = state.history.length ? state.history.map((s) => s.date).sort()[0] : null;
-  if (!started) return [];
-  return planned
-    .map((m) => ({ muscle: m.name, key: m.key, last: last[m.key] || null, days: Progress.daysBetween(last[m.key] || started, today) }))
-    .filter((x) => x.days > limit)
-    .sort((a, b) => b.days - a.days);
+/** A muscle's weekly target: { sets, direct } from Settings → Muscle set targets, else the owner's table (muscles.js).
+    sets 0 = no target. direct: only sets where it is a main muscle count. */
+function muscleTarget(key) {
+  const own = state.settings.muscleTargets?.[key];
+  const def = Muscles.TARGETS[key] || [0, false];
+  return { sets: Number(own?.sets ?? def[0]) || 0, direct: own?.direct ?? def[1] };
 }
 
+/** The sets that count toward a muscle's target, from a tally or plan result ({ sets, direct }). */
+function towardTarget(key, res) {
+  return muscleTarget(key).direct ? res.direct[key] || 0 : res.sets[key] || 0;
+}
+
+/** v2.3: muscles under their weekly target in the last 7 days (direct targets count only main-muscle sets). Only
+    once the first workout is at least a week old, so a new log does not flag every muscle. */
+function neglectedMuscles() {
+  const today = todayISO();
+  const from = Progress.addDays(today, -6);
+  const started = state.history.length ? state.history.map((s) => s.date).sort()[0] : null;
+  if (!started || started > from) return [];
+  const t = muscleSets(sessionsBetween(from, today));
+  return Muscles.MUSCLES.map((m) => ({ muscle: m.name, key: m.key, have: Math.round(towardTarget(m.key, t) * 10) / 10, ...muscleTarget(m.key) }))
+    .filter((x) => x.sets > 0 && x.have < x.sets)
+    .sort((a, b) => a.have / a.sets - b.have / b.sets);
+}
 /** Hard sets per muscle (database muscles, main 1 · helping ½, warm-ups left out) in the sessions given: the one
     count used by the Muscles tab, Progress and the weekly summary, so they always agree. */
 function muscleSets(sessions) {
@@ -1806,7 +1806,7 @@ const CHEV = '<svg class="chev" width="9" height="15" viewBox="0 0 10 16" aria-h
 
 // Settings sections opened from More: [data-sec name, title, icon, colour, one-line summary].
 const SETTINGS_SECTIONS = {
-  schedule: ['Schedule', 'calendar', 'red'], exercises: ['Exercises & plans', 'dumbbell', 'ink'], progression: ['Progression', 'trend', 'green'],
+  schedule: ['Schedule', 'calendar', 'red'], exercises: ['Exercises & plans', 'dumbbell', 'ink'], progression: ['Progression', 'trend', 'green'], targets: ['Muscle set targets', 'dumbbell', 'saffron'],
   logging: ['Logging & rest timer', 'timer', 'grey'], questions: ['End-of-workout questions', 'chat', 'indigo'], recovery: ['Lighter weeks', 'leaf', 'green'],
   calories: ['Calories & body fat', 'flame', 'saffron'], recoveryScore: ['Recovery score & Shortcut', 'heart', 'pink'], body: ['Measurements & photos', 'ruler', 'teal'],
   sheet: ['Google Sheet', 'sheet', 'gsheet'], copy: ['Settings copy', 'cloud', 'sky'], backup: ['Backup', 'download', 'blue'],
@@ -1826,6 +1826,7 @@ function renderMore() {
       ${sec('schedule', [1, 2, 3, 4, 5, 6, 0].map((i) => sched[i] ? `${WEEKDAYS[i].slice(0, 3)} ${sched[i]}` : '').filter(Boolean).slice(0, 2).join(' · ') + ' …')}
       ${sec('exercises', `${manageDays().length} days · ${allKnownExercises().length} exercises`)}
       ${sec('progression', 'When to add weight, warnings')}
+      ${sec('targets', 'Weekly sets per muscle, direct or total')}
       ${sec('logging', `Reps buttons · rest ${s.restSeconds} s · RIR ${s.requireRir ? 'on' : 'off'}`)}
       ${sec('questions', `${questions().length} questions after each workout`)}
       ${sec('recovery', 'Lighter week alerts')}
@@ -1865,9 +1866,10 @@ function nextWorkoutHtml(planned) {
       <p class="small iline" style="margin:0">${icon('calendar')}<span>${line}</span></p>
       ${
         neglected.length
-          ? `<p class="small warn-text iline" style="margin:6px 0 0">${icon('alert')}<span>Not trained for over ${esc(state.settings.progression.neglectDays)} days: ${neglected
-              .map((n) => `<strong>${esc(n.muscle)}</strong> ${n.last ? `${n.days} days` : 'not yet'}`)
-              .join(', ')}</span></p>`
+          ? `<p class="small warn-text iline" style="margin:6px 0 0">${icon('alert')}<span>Under weekly target (last 7 days): ${neglected
+              .slice(0, 6)
+              .map((n) => `<strong>${esc(n.muscle)}</strong> ${esc(n.have)}/${esc(n.sets)}${n.direct ? ' direct' : ''}`)
+              .join(', ')}${neglected.length > 6 ? ` and ${neglected.length - 6} more (<a href="#muscles">Muscles</a>)` : ''}</span></p>`
           : ''
       }
     </div>`;
@@ -2726,6 +2728,7 @@ function renderSettings() {
 
     ${renderScheduleSettings()}
     ${renderProgressionSettings()}
+    ${renderTargetSettings()}
     ${renderRecoverySettings()}
     ${renderBodySettings()}
     ${renderCalorieSettings()}
@@ -2935,18 +2938,17 @@ const PROGRESSION_FIELDS = [
   ['watchDays', 'Watch period after adding weight (days)', 'Checks that reps stay inside the range at the new weight.', 1],
   ['shortfallDays', 'Shortfall warning after (days)', 'A set below its earlier level for this long gets ⚠️ above Save set.', 1],
   ['stagnantDays', 'Stagnant warning after (days)', 'A set with no new best for longer than this is called stagnant.', 1],
-  ['muscleSetsMin', 'Weekly hard sets per muscle, low end', '', 1],
+  ['muscleSetsMin', 'Weekly hard sets per muscle, low end', 'Only for muscles with no target of their own (Muscle set targets).', 1],
   ['muscleSetsMax', 'Weekly hard sets per muscle, high end', '', 1],
   ['missedPauseDays', 'Clock pause per missed workout (days)', 'Shortfall, stagnant and new-weight clocks of that day’s exercises skip this many days.', 1],
   ['missedSchedDays', 'Lighter week pushed back per missed workout (days)', '0 keeps the lighter-week schedule fixed.', 1],
-  ['neglectDays', 'Flag a muscle not trained for over (days)', 'Shown on Home. 0 turns it off.', 1],
 ];
 
 // The progression fields in groups on their settings page.
 const PROGRESSION_GROUPS = [
   ['Adding weight', ['readyRir', 'topTolerance', 'readySessions', 'readyMinDays', 'stepUpper', 'stepLower', 'watchDays']],
   ['Comparing workouts', ['maintainBand', 'avgWindow']],
-  ['Warnings', ['shortfallDays', 'stagnantDays', 'stallSessions', 'dropSessions', 'neglectDays']],
+  ['Warnings', ['shortfallDays', 'stagnantDays', 'stallSessions', 'dropSessions']],
   ['Weekly hard sets per muscle', ['muscleSetsMin', 'muscleSetsMax']],
   ['Missed workouts', ['missedPauseDays', 'missedSchedDays']],
 ];
@@ -2962,6 +2964,29 @@ function renderProgressionSettings() {
       ${PROGRESSION_GROUPS.map(([title, keys]) => group(title, '', `<div class="card flush">${keys.map((k) => field(byKey[k])).join('')}</div>`)).join('')}
       <div class="sgroup"><button type="button" class="btn secondary" data-action="resetProgression">Restore the defaults</button></div>
     </section>`;
+}
+
+/** v2.3: weekly set target per muscle, and whether only direct sets (as a main muscle) count toward it. */
+function renderTargetSettings() {
+  const areas = [...new Set(Muscles.MUSCLES.map((m) => m.area))];
+  const row = (m) => {
+    const t = muscleTarget(m.key);
+    return `<div class="frow"><label for="tgt-${m.key}"><b>${esc(m.name)}</b><span>${t.sets ? (t.direct ? 'Direct sets only (as a main muscle)' : 'All sets (helping ½, tertiary ¼)') : 'No target'}</span></label>
+      <span class="tgtctl"><input id="tgt-${m.key}" class="input fnum" type="number" inputmode="numeric" min="0" step="1" value="${esc(t.sets)}" data-change="muscleTargetSets" data-key="${m.key}" aria-label="${esc(m.name)} sets a week" />
+      <button type="button" class="pill-btn ${t.direct ? 'on' : ''}" aria-pressed="${t.direct}" data-action="muscleTargetDirect" data-key="${m.key}">Direct</button></span></div>`;
+  };
+  return `
+    <section class="secpage" data-sec="targets">
+      <p class="sub">Hard sets a week each muscle should get. <b>Direct</b> on: only sets where it is a main muscle count. Off: every set counts (helping ½, tertiary ¼). 0 = no target. Home warns about muscles under target in the last 7 days; the Muscles tab and Progress colour by it.</p>
+      ${areas.map((a) => group(a, '', `<div class="card flush">${Muscles.MUSCLES.filter((m) => m.area === a).map(row).join('')}</div>`)).join('')}
+      <div class="sgroup"><button type="button" class="btn secondary" data-action="resetTargets">Restore the table's targets</button></div>
+    </section>`;
+}
+
+function setMuscleTarget(key, patch) {
+  const cur = muscleTarget(key);
+  state.settings.muscleTargets = { ...(state.settings.muscleTargets || {}), [key]: { ...cur, ...patch } };
+  save(KEYS.settings, state.settings);
 }
 
 // Recovery triggers: [switch key, title, [[number key, label, step], …]]
@@ -3937,6 +3962,19 @@ const actions = {
     render();
   },
 
+  muscleTargetDirect(el) {
+    setMuscleTarget(el.dataset.key, { direct: !muscleTarget(el.dataset.key).direct });
+    render();
+  },
+
+  async resetTargets() {
+    const ok = await openModal({ title: 'Restore the weekly set targets?', message: 'Every muscle goes back to the table’s sets and direct/total choice.', confirmText: 'Restore' });
+    if (!ok) return;
+    delete state.settings.muscleTargets;
+    save(KEYS.settings, state.settings);
+    render();
+  },
+
   async resetRecovery() {
     const ok = await openModal({ title: 'Restore the recovery defaults?', confirmText: 'Restore' });
     if (!ok) return;
@@ -4120,6 +4158,15 @@ const changes = {
   requireRir(el) {
     state.settings.requireRir = el.checked;
     save(KEYS.settings, state.settings);
+  },
+  muscleTargetSets(el) {
+    const v = Number(el.value);
+    if (!Number.isFinite(v) || v < 0) {
+      el.value = muscleTarget(el.dataset.key).sets;
+      return toast('Enter a number of 0 or more', 'error');
+    }
+    setMuscleTarget(el.dataset.key, { sets: v });
+    render();
   },
   progression(el) {
     const key = el.dataset.key;

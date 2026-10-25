@@ -2130,6 +2130,14 @@ details.customday[open] > summary .chev { transform: rotate(90deg); }
 .pill-btn.mpick.helps small { background: var(--card); }
 .pill-btn.mpick.minor { border-style: dotted; border-color: var(--sel-border); color: var(--sel-text); }
 .pill-btn.mpick.minor small { background: var(--sel-bg); }
+.tgtctl { display: inline-flex; align-items: center; gap: 8px; flex: none; }
+.tgtctl .input.fnum { width: 64px; }
+.tgtan { display: grid; gap: 8px; margin: 8px 0 4px; }
+.tgtan .tgtrow { display: grid; grid-template-columns: 92px 1fr auto; align-items: center; gap: 8px; font-size: 13px; }
+.tgtan .tgtbar { position: relative; height: 8px; border-radius: 999px; background: var(--sel-bg); overflow: hidden; }
+.tgtan .tgtbar i { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: var(--saffron); }
+.tgtan .tgtbar i.low { background: var(--warn, #d9822b); opacity: .7; }
+.tgtan .tgtbar b { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ink); }
 .mk { padding: 0 6px; border-radius: 6px; }
 .mk.main { background: var(--saffron); color: var(--ink); }
 .mk.helps { background: var(--sel-bg); color: var(--sel-text); border: 1px dashed var(--sel-border); }

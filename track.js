@@ -54,7 +54,9 @@ function renderProgress() {
   const tally = muscleSets(sessionsBetween(Progress.addDays(todayISO(), -6), todayISO()));
   const cov = Muscles.planCoverage(exerciseDb().db, planNames(), manualGroup);
   const muscles = Muscles.MUSCLES.filter((m) => tally.sets[m.key] > 0 || cov.mine[m.key].main.length);
-  const maxCount = Math.max(p.muscleSetsMax, ...muscles.map((m) => tally.sets[m.key]));
+  // v2.3: each muscle against its own target (direct targets count only main-muscle sets).
+  const tgt = (k) => muscleTarget(k).sets || p.muscleSetsMin;
+  const maxCount = Math.max(...muscles.map((m) => Math.max(towardTarget(m.key, tally), tgt(m.key) * 1.2)), 1);
   const due = analyses.filter((a) => a.status.kind === 'increase').length;
   const ups = analyses.filter((a) => a.trend === 'up').length;
   const downs = analyses.filter((a) => a.trend === 'down').length;
@@ -90,18 +92,19 @@ function renderProgress() {
       'Hard sets per muscle',
       '<a class="btn link small" href="#muscles">Muscle map ›</a>',
       `<section class="card stack">
-      <p class="hint" style="margin:0">Last 7 days, counted like the Muscles tab: a main muscle gets the whole set, a helping muscle half, a tertiary muscle a quarter. Useful range ${p.muscleSetsMin}–${p.muscleSetsMax} a week. Tap a muscle to see which exercises gave its sets.</p>
+      <p class="hint" style="margin:0">Last 7 days, counted like the Muscles tab: a main muscle gets the whole set, a helping muscle half, a tertiary muscle a quarter. The line is each muscle's weekly target (Settings → Muscle set targets; "d" = direct sets only). Tap a muscle to see which exercises gave its sets.</p>
       ${
         muscles.length
           ? `<div class="bars">${muscles
               .map((m) => {
-                const n = Math.round(tally.sets[m.key] * 10) / 10;
-                const state_ = n < p.muscleSetsMin ? 'low' : n > p.muscleSetsMax ? 'high' : 'ok';
+                const n = Math.round(towardTarget(m.key, tally) * 10) / 10;
+                const t = tgt(m.key);
+                const state_ = n < t ? 'low' : n > t * 2 ? 'high' : 'ok';
                 return `<div class="bar-row" role="button" tabindex="0" data-action="musOpen" data-key="${m.key}">
                   <span class="bar-label">${esc(m.name)}</span>
                   <span class="bar-track"><span class="bar-fill ${state_}" style="width:${Math.round((n / maxCount) * 100)}%"></span>
-                    <span class="bar-band" style="left:${(p.muscleSetsMin / maxCount) * 100}%;width:${((p.muscleSetsMax - p.muscleSetsMin) / maxCount) * 100}%"></span></span>
-                  <span class="bar-value">${n}${state_ === 'low' ? ' · low' : state_ === 'high' ? ' · high' : ''}</span>
+                    <span class="bar-band" style="left:${(t / maxCount) * 100}%;width:2px"></span></span>
+                  <span class="bar-value">${n}/${t}${muscleTarget(m.key).direct ? ' d' : ''}${state_ === 'low' ? ' · low' : state_ === 'high' ? ' · high' : ''}</span>
                 </div>`;
               })
               .join('')}</div>`
@@ -152,11 +155,12 @@ function weekSummary(endIso) {
   // Sets per muscle in the week, counted like the Muscles tab; "low" only for muscles the plan trains as main.
   const wt = muscleSets(sessions);
   const cov = Muscles.planCoverage(exerciseDb().db, planNames(), manualGroup);
-  const counts = Object.fromEntries(
-    Muscles.MUSCLES.filter((m) => wt.sets[m.key] > 0 || cov.mine[m.key].main.length).map((m) => [m.name, Math.round(wt.sets[m.key] * 10) / 10]),
-  );
-  const low = Object.entries(counts).filter(([, n]) => n < p.muscleSetsMin);
-  const high = Object.entries(counts).filter(([, n]) => n > p.muscleSetsMax);
+  // v2.3: low / high against each muscle's own target ("6/14"); direct targets count only main-muscle sets.
+  const shown = Muscles.MUSCLES.filter((m) => wt.sets[m.key] > 0 || cov.mine[m.key].main.length);
+  const counts = Object.fromEntries(shown.map((m) => [m.name, Math.round(towardTarget(m.key, wt) * 10) / 10]));
+  const tg = (m) => muscleTarget(m.key).sets || p.muscleSetsMin;
+  const low = shown.filter((m) => counts[m.name] < tg(m)).map((m) => [m.name, `${counts[m.name]}/${tg(m)}`]);
+  const high = shown.filter((m) => counts[m.name] > tg(m) * 2).map((m) => [m.name, `${counts[m.name]}/${tg(m)}`]);
 
   // Overall strength with the same weeks as this summary.
   const stats = statsHistory();
@@ -233,7 +237,7 @@ function renderWeekSummary(w) {
       ? [w.low.length ? `low: ${w.low.map(([m, n]) => `${m} ${n}`).join(', ')}` : '', w.high.length ? `high: ${w.high.map(([m, n]) => `${m} ${n}`).join(', ')}` : ''].filter(Boolean).join(' · ')
       : 'every muscle in range'
     : 'none logged';
-  rows.push(`<li><span>Sets per muscle</span>${esc(setsText)} <span class="muted">(${esc(state.settings.progression.muscleSetsMin)}–${esc(state.settings.progression.muscleSetsMax)})</span></li>`);
+  rows.push(`<li><span>Sets per muscle</span>${esc(setsText)} <span class="muted">(vs each muscle's target)</span></li>`);
   if (w.weight) rows.push(`<li><span>Bodyweight</span><strong>${esc(fmtKg(Math.round(w.weight.now * 10) / 10))} kg</strong> avg${w.weight.delta !== null ? ` · ${esc(Progress.signed(w.weight.delta, 1, ' kg'))} vs last week` : ''}</li>`);
   if (w.waist) rows.push(`<li><span>Waist</span><strong>${esc(fmtKg(w.waist.now))} cm</strong>${w.waist.delta !== null ? ` · ${esc(Progress.signed(w.waist.delta, 1, ' cm'))}` : ''}</li>`);
   if (w.feel !== null) rows.push(`<li><span>How you felt</span><strong>${w.feel.toFixed(1)} / 5</strong> average</li>`);
@@ -1294,10 +1298,48 @@ function musData() {
     const perWeek = {};
     for (const day of Object.values(state.settings.schedule || DEFAULT_SCHEDULE)) if (day) perWeek[day] = (perWeek[day] || 0) + 1;
     const plan = Muscles.plannedDetail(db, state.exercises, perWeek, (day, name) => Progress.parsePlan(planText(day, name))?.sets || 3, manualGroup);
-    return { db, fromSheet, mode: 'all', value: plan.sets, planBy: plan.by, perWeek, cov, gaps, scale: 'week' };
+    return withTargets({ db, fromSheet, mode: 'all', value: plan.sets, direct: plan.direct, planBy: plan.by, perWeek, cov, gaps, scale: 'week' });
   }
   const t = Muscles.tally(db, musSessions(), manualGroup);
-  return { db, fromSheet, mode: 'mine', value: t.sets, t, cov, gaps, scale: u.period === 'day' ? 'day' : 'week' };
+  return withTargets({ db, fromSheet, mode: 'mine', value: t.sets, direct: t.direct, t, cov, gaps, scale: u.period === 'day' ? 'day' : 'week' });
+}
+
+/**
+ * v2.3: weekly targets on the Muscles data. d.lv(key) = colour level (week: against the muscle's own target; one day:
+ * the fixed day scale). d.planW / d.doneW = planned sets a week and sets logged in the last 7 days, whichever view is
+ * shown, for the planned-vs-done analysis under the body.
+ */
+function withTargets(d) {
+  const { db } = d;
+  d.sets = d.value; // so towardTarget(key, d) reads the shown numbers
+  const perWeek = {};
+  for (const day of Object.values(state.settings.schedule || DEFAULT_SCHEDULE)) if (day) perWeek[day] = (perWeek[day] || 0) + 1;
+  d.planW = d.mode === 'all' ? { sets: d.value, direct: d.direct } : Muscles.plannedDetail(db, state.exercises, perWeek, (day, name) => Progress.parsePlan(planText(day, name))?.sets || 3, manualGroup);
+  const today = todayISO();
+  const from = Progress.addDays(today, -6);
+  d.doneW = d.mode === 'mine' && d.scale === 'week' ? d.t : Muscles.tally(db, [...state.history, ...(state.draft ? [state.draft] : [])].filter((s) => s.date >= from && s.date <= today), manualGroup);
+  d.lv = (key) => (d.scale === 'week' ? Muscles.targetLevel(towardTarget(key, d), muscleTarget(key).sets || state.settings.progression.muscleSetsMin) : Muscles.level(d.value[key], d.scale));
+  return d;
+}
+
+/** Planned a week vs done in the last 7 days against the muscle's target, as two bars (direct and total shown). */
+function targetAnalysisHtml(d, key) {
+  const t = muscleTarget(key);
+  const r1 = (x) => Math.round(x * 10) / 10;
+  const line = (label, res) => {
+    const n = towardTarget(key, res);
+    const max = Math.max(t.sets, n, 1) * 1.15;
+    const other = t.direct ? `${r1(res.sets[key] || 0)} total` : `${r1(res.direct[key] || 0)} direct`;
+    return `<div class="tgtrow"><span>${esc(label)}</span><span class="tgtbar"><i class="${t.sets && n < t.sets ? 'low' : ''}" style="width:${(n / max) * 100}%"></i>${
+      t.sets ? `<b style="left:${(t.sets / max) * 100}%"></b>` : ''
+    }</span><span><strong>${esc(r1(n))}</strong>${t.sets ? ` / ${esc(t.sets)}` : ''} <span class="muted">(${esc(other)})</span></span></div>`;
+  };
+  const plan = towardTarget(key, d.planW);
+  const done = towardTarget(key, d.doneW);
+  const verdict = !t.sets
+    ? 'No weekly target set (Settings → Muscle set targets).'
+    : `Target ${t.sets} ${t.direct ? 'direct sets (as a main muscle)' : 'sets (helping ½, tertiary ¼)'} a week. Plan ${plan >= t.sets ? 'reaches it' : `is ${r1(t.sets - plan)} short`}; last 7 days ${done >= t.sets ? 'reached it' : `${r1(t.sets - done)} short`}.`;
+  return `<div class="tgtan">${line('Planned / week', d.planW)}${line('Done, 7 days', d.doneW)}<span class="hint">${esc(verdict)}</span></div>`;
 }
 
 /** The muscles your schedule does not cover, as tappable chips (empty when every muscle is covered). */
@@ -1322,7 +1364,7 @@ function figureSvg(view, d) {
   // A muscle not in the plan gets stripes over its colour (the stripes ignore taps, so the muscle still picks).
   const one = ([type, key, path], extra = '') =>
     type === 'm'
-      ? `<path class="m${key === picked ? ' on' : ''}" d="${path}" data-m="${key}" style="fill:var(--m${Muscles.level(d.value[key], d.scale)})" ${extra}/>${
+      ? `<path class="m${key === picked ? ' on' : ''}" d="${path}" data-m="${key}" style="fill:var(--m${d.lv(key)})" ${extra}/>${
           d.gaps.has(key) ? `<path class="nocov" d="${path}" fill="url(#mhatch)" ${extra}/>` : ''
         }`
       : `<path class="${type}" d="${path}" ${extra}/>`;
@@ -1346,9 +1388,9 @@ function pickedHtml(d) {
   const addBtn = `<button type="button" class="btn secondary addex" data-action="openPicker" data-ctx="plan" data-muscle="${key}" data-query="${esc(m.name)}">${icon('plus')}Add ${d.gaps.has(key) ? 'a' : 'another'} ${esc(m.name)} exercise to your plan</button>`;
   if (d.mode === 'mine') {
     const n = d.value[key];
-    const lv = Muscles.level(n, d.scale);
+    const lv = d.lv(key);
     const when = u.period === 'day' ? `on ${formatDate(u.day || todayISO(), false)}` : 'in the last 7 days';
-    const verdict = (d.scale === 'week' ? ['not trained', 'too little', 'some work, below the 10-set target', 'on target', 'a lot'] : ['not trained', 'light', 'moderate', 'solid', 'heavy'])[lv];
+    const verdict = (d.scale === 'week' ? ['not trained', 'under half its target', 'below its target', 'on target', 'over 2× its target'] : ['not trained', 'light', 'moderate', 'solid', 'heavy'])[lv];
     const done = [...d.t.by[key].entries()].sort((a, b) => b[1].main - a[1].main || b[1].sets - a[1].sets);
     // Where the number comes from: each exercise, its day(s), its sets, and half for a helping muscle.
     const chips = done.length
@@ -1369,18 +1411,20 @@ function pickedHtml(d) {
     const sum = done.length && (fromHelp || fromMinor)
       ? ` = ${r2(fromMain)} as main${fromHelp ? ` + ${r2(fromHelp)} as helper (½ set each)` : ''}${fromMinor ? ` + ${r2(fromMinor)} as tertiary (¼ set each)` : ''}`
       : '';
-    return `<b>${esc(m.name)}</b><span class="hint">${esc(fmtSets(n))} ${esc(when)}${esc(sum)} · ${esc(verdict)}</span>${gap}<div class="exs">${chips}</div>${addBtn}`;
+    return `<b>${esc(m.name)}</b>${targetAnalysisHtml(d, key)}<span class="hint">${esc(fmtSets(n))} ${esc(when)}${esc(sum)} · ${esc(verdict)}</span>${gap}<div class="exs">${chips}</div>${addBtn}`;
   }
   const mine = d.cov.mine[key];
   const weekly = Math.round(d.value[key] * 10) / 10;
   const row = (e) =>
     `<li><span class="ename">${esc(e.name)}</span>${e.equipment ? `<span class="eq">${esc(e.equipment)}</span>` : ''}${inPlan(e.name) ? '<span class="badge">In your plan</span>' : ''}</li>`;
+  const tg = muscleTarget(key);
   return `<b>${esc(m.name)}</b>${d.gaps.has(key) ? ` ${tag('Not in your plan', 'warn')}` : ''}
+    ${targetAnalysisHtml(d, key)}
     <span class="hint">${esc(m.area)} · your plan: ${
       mine.main.length || mine.helps.length || mine.minor.length
         ? esc([mine.main.length ? `${mine.main.length} main (${mine.main.join(', ')})` : '', mine.helps.length ? `${mine.helps.length} helping` : '', mine.minor.length ? `${mine.minor.length} tertiary` : ''].filter(Boolean).join(', '))
         : 'nothing works it yet'
-    } · ${esc(weekly)} hard sets a week planned (target ${esc(state.settings.progression.muscleSetsMin)}–${esc(state.settings.progression.muscleSetsMax)})</span>
+    } · ${esc(weekly)} hard sets a week planned${tg.sets ? ` (target ${esc(tg.sets)}${tg.direct ? ' direct' : ''})` : ''}</span>
     ${
       d.planBy?.[key]?.length
         ? `<p class="sublabel">Where the ${esc(weekly)} planned sets come from</p><div class="exs">${d.planBy[key]
@@ -1397,20 +1441,22 @@ function pickedHtml(d) {
 
 function muscleListsHtml(d) {
   const u = musUi();
-  const rows = Muscles.MUSCLES.map((m) => ({ m, n: d.value[m.key], lv: Muscles.level(d.value[m.key], d.scale) }));
+  const rows = Muscles.MUSCLES.map((m) => ({ m, n: d.value[m.key], lv: d.lv(m.key) }));
   const max = Math.max(...rows.map((r) => r.n), 1);
   const rowHtml = ({ m, n, lv }, sub) =>
     `<button type="button" class="mrow${d.gaps.has(m.key) ? ' gap' : ''}" data-action="musPick" data-key="${m.key}" style="--c:var(--m${lv})"><span class="sw"></span><span class="mtx"><b>${esc(m.name)}${
       d.gaps.has(m.key) ? ` ${tag('Not in plan', 'warn')}` : ''
     }</b><span>${esc(sub)}</span></span><span class="n">${
-      d.mode === 'mine' ? esc(fmtSets(n)) : `${esc(Math.round(n * 10) / 10)}/wk`
+      d.scale === 'week' && muscleTarget(m.key).sets
+        ? `${esc(Math.round(towardTarget(m.key, d) * 10) / 10)}/${esc(muscleTarget(m.key).sets)}${muscleTarget(m.key).direct ? ' d' : ''}`
+        : d.mode === 'mine' ? esc(fmtSets(n)) : `${esc(Math.round(n * 10) / 10)}/wk`
     }</span><span class="bar"><i style="width:${(n / max) * 100}%"></i></span></button>`;
   let groups;
   if (d.mode === 'mine' && d.scale === 'week') {
     groups = [
-      ['Needs more work', 'under 5 sets', rows.filter((r) => r.lv <= 1).sort((a, b) => a.n - b.n)],
-      ['Some work', '5–9 sets', rows.filter((r) => r.lv === 2).sort((a, b) => b.n - a.n)],
-      ['On target', '10 sets or more', rows.filter((r) => r.lv >= 3).sort((a, b) => b.n - a.n)],
+      ['Needs more work', 'under half its target', rows.filter((r) => r.lv <= 1).sort((a, b) => a.n - b.n)],
+      ['Some work', 'below its target', rows.filter((r) => r.lv === 2).sort((a, b) => b.n - a.n)],
+      ['On target', 'target reached', rows.filter((r) => r.lv >= 3).sort((a, b) => b.n - a.n)],
     ];
   } else if (d.mode === 'mine') {
     const day = formatDate(u.day || todayISO(), false);
@@ -1490,7 +1536,7 @@ function renderMuscles() {
         </div>
       </div>
       <div class="picked" id="mpicked">${pickedHtml(d)}</div>
-      <div class="scale">${Muscles.LEVELS[d.scale].map(([, label], i) => `<div style="--c:var(--m${i})">${esc(label)}</div>`).join('')}</div>
+      <div class="scale">${Muscles.LEVELS[d.scale === 'week' ? 'target' : d.scale].map(([, label], i) => `<div style="--c:var(--m${i})">${esc(label)}</div>`).join('')}</div>
       ${d.gaps.size ? '<div class="nocov-key"><span class="gapkey" aria-hidden="true"></span>Striped: not in your plan (no main exercise in your schedule)</div>' : ''}
     </div>
     <div class="sgroup">${gapsHtml(d)}</div>

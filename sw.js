@@ -1,6 +1,6 @@
 /* Service worker: cache-first for the app shell so the app opens with no signal.
    Bump CACHE_VERSION on every deploy; old caches are deleted on activate. */
-const CACHE_VERSION = 'wt-v18';
+const CACHE_VERSION = 'wt-v19';
 const SHELL = [
   './',
   './index.html',

@@ -27,6 +27,22 @@ const Muscles = (() => {
     ['shins', 'Tibialis', 'Calves'],
   ];
   const MUSCLES = LIST.map(([key, name, area]) => ({ key, name, area }));
+
+  // v2.3: weekly hard-set target per muscle, [sets, direct] (owner's table, 2026-10-25). direct = only sets where the
+  // muscle is a main muscle count toward it; otherwise all sets count (helping ½, tertiary ¼). Biceps: the table's
+  // 12 direct for the whole biceps applies to each head (curls train both). Gastrocnemius 8 applies to both heads.
+  // Neck and rotator cuff have no target (0). Editable per muscle in Settings → Muscle set targets.
+  const TARGETS = {
+    chestUpper: [6, false], chestMid: [5, false], chestLower: [4, false],
+    frontDelts: [4, true], sideDelts: [12, false], rearDelts: [10, false],
+    lats: [14, false], upperTraps: [6, true], middleTraps: [8, false], lowerTraps: [4, false], lowerBack: [6, false],
+    bicepsOuter: [12, true], bicepsInner: [12, true], brachialis: [6, true], triceps: [10, true],
+    forearmTop: [6, true], forearmGrip: [6, true], forearmBack: [4, true],
+    obliques: [6, false], abs: [8, false], quads: [14, false], hamstrings: [12, false],
+    glutes: [12, false], outerHip: [6, true], innerThighs: [6, true],
+    calfInner: [8, false], calfOuter: [8, false], calfLower: [6, false], shins: [6, false],
+    hipFlexors: [4, true], serratus: [4, true], neck: [0, false], rotatorCuff: [0, false],
+  };
   const BY_KEY = Object.fromEntries(MUSCLES.map((m) => [m.key, m]));
 
   // Other ways a muscle may be written in the Sheet → key.
@@ -586,6 +602,7 @@ const Muscles = (() => {
   /** plannedWeekly with where each muscle's sets come from: by[key] = [{ name, day, sets, counted, main }]. */
   function plannedDetail(db, days, perWeek, setsOf, coarseOf = () => null) {
     const sets = Object.fromEntries(MUSCLES.map((m) => [m.key, 0]));
+    const direct = Object.fromEntries(MUSCLES.map((m) => [m.key, 0]));
     const by = Object.fromEntries(MUSCLES.map((m) => [m.key, []]));
     for (const [day, names] of Object.entries(days || {})) {
       const times = perWeek[day] || 0;
@@ -597,12 +614,13 @@ const Muscles = (() => {
         for (const [list, weight] of TIERS(e)) {
           for (const k of list) {
             sets[k] += n * weight;
+            if (weight === 1) direct[k] += n;
             by[k].push({ name, day, sets: n, counted: n * weight, main: weight === 1, weight });
           }
         }
       }
     }
-    return { sets, by };
+    return { sets, direct, by };
   }
 
   // [muscle keys, share of a set]: main 1, helping (secondary) half, tertiary a quarter.
@@ -631,6 +649,7 @@ const Muscles = (() => {
    */
   function tally(db, sessions, coarseOf = () => null) {
     const sets = Object.fromEntries(MUSCLES.map((m) => [m.key, 0]));
+    const direct = Object.fromEntries(MUSCLES.map((m) => [m.key, 0]));
     const by = Object.fromEntries(MUSCLES.map((m) => [m.key, new Map()]));
     const unmatched = new Set();
     for (const s of sessions) {
@@ -643,6 +662,7 @@ const Muscles = (() => {
           const isMain = weight === 1;
           for (const k of list) {
             sets[k] += weight;
+            if (isMain) direct[k] += 1;
             const cur = by[k].get(set.exercise) || { sets: 0, main: isMain, counted: 0, days: [], weight };
             cur.sets += 1;
             cur.counted += weight;
@@ -653,7 +673,7 @@ const Muscles = (() => {
         }
       }
     }
-    return { sets, by, unmatched: [...unmatched] };
+    return { sets, direct, by, unmatched: [...unmatched] };
   }
 
   /** Every database exercise that works a muscle: main ones first, then helpers, each alphabetical. */
@@ -669,6 +689,8 @@ const Muscles = (() => {
     week: [[0, 'Not trained'], [0.5, 'Under 5'], [5, '5–9'], [10, '10–20 target'], [20.5, 'Over 20']],
     day: [[0, 'None'], [0.5, '1–2'], [2.5, '3–4'], [4.5, '5–7'], [7.5, '8+']],
     // "All exercises": how well the owner's plan covers a muscle.
+    // Week against each muscle's own target (v2.3): see targetLevel.
+    target: [[0, 'Not trained'], [0, 'Under half target'], [0, 'Below target'], [0, 'On target'], [0, 'Over 2× target']],
     plan: [[0, 'Not in your plan'], [0.5, 'Helped only'], [1, '1 main exercise'], [2, '2 main'], [3, '3 or more main']],
   };
   function level(n, scale) {
@@ -677,6 +699,14 @@ const Muscles = (() => {
     let lv = 1;
     for (let i = 1; i < L.length; i++) if (n >= L[i][0]) lv = i;
     return lv;
+  }
+
+  /** Colour level 0–4 of n sets against a weekly target: under half, below, on (up to 2×), over 2×. */
+  function targetLevel(n, target) {
+    if (!n) return 0;
+    if (!target) return level(n, 'week');
+    const r = n / target;
+    return r < 0.5 ? 1 : r < 1 ? 2 : r <= 2 ? 3 : 4;
   }
 
   /** How the owner's plan covers each muscle: main exercises count 1, helping 0.5, tertiary 0.25 (for colouring); plus the lists. */
@@ -694,7 +724,7 @@ const Muscles = (() => {
   }
 
   return {
-    MUSCLES, BY_KEY, FIG, SKIN, VIEW_OF, EXERCISES, LEVELS, EQUIPMENT, norm, muscleKey, seedRows, buildDb, lookup, tally, exercisesFor, level, planCoverage,
+    MUSCLES, BY_KEY, FIG, SKIN, VIEW_OF, EXERCISES, LEVELS, EQUIPMENT, norm, muscleKey, seedRows, buildDb, lookup, tally, exercisesFor, level, targetLevel, TARGETS, planCoverage,
     applyOps, similarity, suggest, search, plannedWeekly, plannedDetail, autoMatch, matchScore, coreWords,
   };
 })();
