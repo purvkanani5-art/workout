@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '2.0.2';
+const APP_VERSION = '2.1.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -17,6 +17,7 @@ const MUSCLE_GROUPS = ['Chest', 'Shoulders', 'Triceps', 'Back', 'Rear delts', 'B
 const LOWER_MUSCLES = ['Quads', 'Hamstrings', 'Glutes', 'Calves', 'Lower back'];
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 const KEYS = {
   settings: 'wt.settings',
@@ -890,38 +891,37 @@ function recoveryCard(where) {
   const buttons = where !== 'entry';
   if (rs.active) {
     const a = rs.active;
-    return `<div class="alert recovery-active" role="status">
-      <p class="alert-title">🟢 Lighter week · day ${Math.min(a.day, a.length)} of ${a.length}</p>
-      <p class="small" style="margin:0">Ends ${esc(formatDate(a.end))}. ${esc(DELOAD_PLAN)} These workouts are not counted in progress.</p>
-      ${buttons ? '<div class="actions"><button type="button" class="btn" data-action="endDeload">End lighter week now</button></div>' : ''}
+    const pct = Math.round((Math.min(a.day, a.length) / a.length) * 100);
+    return `<div class="alert notice ok recovery-active" role="status">
+      <div class="nhead">${appIcon('leaf', 'green')}<div class="tx"><b class="alert-title">Lighter week · day ${Math.min(a.day, a.length)} of ${a.length}</b><span>Ends ${esc(formatDate(a.end, false))}</span></div></div>
+      <div class="progress"><div style="width:${pct}%"></div></div>
+      <p class="small" style="margin:8px 0 0">${esc(DELOAD_PLAN)} These workouts are not counted in progress.</p>
+      ${buttons ? '<div class="actions"><button type="button" class="btn small pill" data-action="endDeload">End it now</button></div>' : ''}
     </div>`;
   }
   if (rs.due && !rs.snoozed) {
-    return `<div class="alert recovery-due" role="alert">
-      <p class="alert-title">⚠️ Recovery: lighter week now</p>
+    return `<div class="alert notice warn recovery-due" role="alert">
+      <div class="nhead">${appIcon('alert', 'orange')}<div class="tx"><b class="alert-title">Time for a lighter week</b><span>${esc(r.lengthDays)} days: ${esc(DELOAD_PLAN)}</span></div></div>
       <ul class="reasons">${rs.reasons.map((x) => `<li><strong class="lead">${esc(x.lead)}</strong> ${esc(x.text)}</li>`).join('')}</ul>
-      <p class="small" style="margin:0">${esc(r.lengthDays)} days: ${esc(DELOAD_PLAN)}</p>
       ${
         buttons
           ? `<div class="actions">
               <button type="button" class="btn primary-alert" data-action="startDeload">Start lighter week</button>
-              <button type="button" class="btn" data-action="snoozeRecovery">Not now (${esc(r.snoozeDays)} days)</button>
+              <button type="button" class="btn pill" data-action="snoozeRecovery">Not now (${esc(r.snoozeDays)} days)</button>
             </div>`
           : ''
       }
     </div>`;
   }
   if (where === 'entry') return '';
-  if (!rs.next) return `<p class="next-deload">🗓 Lighter week: every ${esc(r.schedWeeks)} weeks, counted from your first workout.</p>`;
+  if (!rs.next) return `<div class="next-deload">${icon('calendar')}<span>Lighter week every ${esc(r.schedWeeks)} weeks, counted from your first workout.</span></div>`;
   const left = Progress.daysBetween(todayISO(), rs.next);
   const weeksLeft = Math.max(0, Math.ceil(left / 7));
-  return `<p class="next-deload">🗓 <strong>Next lighter week:</strong> ${esc(formatDate(rs.next))} · ${
-    left <= 0 ? 'due now' : `in ${weeksLeft} week${weeksLeft === 1 ? '' : 's'}`
-  }${rs.last ? ` · last one ${esc(formatDate(rs.last, false))}` : ''}${
-    rs.pushed ? ` · +${rs.pushed} day${rs.pushed === 1 ? '' : 's'} for missed workouts` : ''
-  }${
+  return `<div class="next-deload">${icon('calendar')}<span><strong>Next lighter week ${esc(left <= 0 ? 'due now' : `in ${weeksLeft} week${weeksLeft === 1 ? '' : 's'}`)}</strong> · ${esc(formatDate(rs.next, false))}${
+    rs.last ? ` · last one ${esc(formatDate(rs.last, false))}` : ''
+  }${rs.pushed ? ` · +${rs.pushed} day${rs.pushed === 1 ? '' : 's'} for missed workouts` : ''}${
     rs.snoozed ? ` · alert snoozed until ${esc(formatDate(state.settings.snoozeUntil, false))}` : ''
-  }${!r.schedOn ? ' · schedule off' : ''}</p>`;
+  }${!r.schedOn ? ' · schedule off' : ''}</span></div>`;
 }
 
 if (!state.exercises) {
@@ -1081,6 +1081,7 @@ function openModal({ title, message = '', fields = [], confirmText = 'OK', cance
   return new Promise((resolve) => {
     modal.innerHTML = `
       <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <div class="grab" aria-hidden="true"></div>
         <h2 id="modal-title">${esc(title)}</h2>
         ${message ? `<p>${esc(message)}</p>` : ''}
         ${fields
@@ -1240,8 +1241,7 @@ function render() {
     case 'settings': {
       const sec = SETTINGS_SECTIONS[arg] ? arg : null;
       if (!sec) return go('more');
-      html = `<div class="topbar"><a class="btn link" href="#more">‹ More</a></div>
-        <h1 class="large">${esc(SETTINGS_SECTIONS[sec][0])}</h1>
+      html = `${topbar(SETTINGS_SECTIONS[sec][0], { href: 'more', label: 'More' })}
         <div class="settings-page">${renderSettings()}</div>`;
       break;
     }
@@ -1276,12 +1276,41 @@ function render() {
     // One settings section per page: the others stay in the page (their handlers are shared) but hidden.
     for (const s of app.querySelectorAll('section[data-sec]')) s.hidden = s.dataset.sec !== arg;
   }
+  if (name === 'history' && !arg) autoPull('history');
+  if (name === 'body') autoPull('measurements');
   if (name === 'photos') afterPhotosRender();
   if (name === 'muscles') afterMusclesRender();
   if (name === 'entry') tickTimer();
   if (name !== 'review' && state.ui.submit.status !== 'idle' && state.ui.submit.status !== 'sending') {
     state.ui.submit = { status: 'idle', message: '', session: null };
   }
+}
+
+/** Opening History or Body pulls from the Sheet by itself, at most every 6 hours, so the Sync buttons are optional. */
+const AUTO_PULL_MS = 6 * 3600 * 1000;
+function autoPull(kind) {
+  if (!haveApi() || !navigator.onLine || state.ui.syncing) return;
+  const key = `wt.pulledAt.${kind}`;
+  let last = 0;
+  try {
+    last = Number(localStorage.getItem(key)) || 0;
+    if (Date.now() - last < AUTO_PULL_MS) return;
+    localStorage.setItem(key, String(Date.now()));
+  } catch {
+    return;
+  }
+  setTimeout(() => (kind === 'history' ? syncHistoryFromSheet(true) : syncMeasurementsFromSheet(true)), 0);
+}
+
+/** "2 h ago" for the last automatic pull. */
+function pulledAgo(kind) {
+  let t = 0;
+  try {
+    t = Number(localStorage.getItem(`wt.pulledAt.${kind}`)) || 0;
+  } catch {}
+  if (!t) return 'not yet';
+  const m = Math.round((Date.now() - t) / 60000);
+  return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
 }
 
 /** Page header (v2.0): an optional back link, then the large title. */
@@ -1305,6 +1334,44 @@ function group(title, right, body) {
   </section>`;
 }
 
+/** A small status pill. tone: ok (green), warn (amber), bad (red), accent (saffron) or '' (grey). */
+function tag(text, tone = '') {
+  return `<span class="tag ${tone}">${esc(text)}</span>`;
+}
+
+/** A row of stat tiles: [[value, label], …]. */
+function tiles(list) {
+  return `<div class="tiles">${list.map(([v, l]) => `<div class="tile"><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join('')}</div>`;
+}
+
+/** A settings form row: label and hint on the left, the control (already built, ids and handlers intact) on the right. */
+function frow(forId, label, hint, control) {
+  return `<div class="frow"><label for="${esc(forId)}"><b>${esc(label)}</b>${hint ? `<span>${esc(hint)}</span>` : ''}</label>${control}</div>`;
+}
+
+/* Small line icons for edit rows (move, rename, delete). */
+const IGLYPH = {
+  up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+  down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
+  edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
+  trash: '<path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 13h9l1-13"/><path d="M10 11v6M14 11v6"/>',
+};
+function ibtn(glyph, attrs, label, disabled = false) {
+  return `<button type="button" class="ibtn ${glyph === 'trash' ? 'danger' : ''}" ${attrs} aria-label="${esc(label)}" ${disabled ? 'disabled' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${IGLYPH[glyph]}</svg></button>`;
+}
+
+/** One editable list row: name (and a second line), then its buttons. */
+function erow(name, sub, buttons) {
+  return `<div class="erow"><div class="tx"><b>${esc(name)}</b>${sub ? `<span>${esc(sub)}</span>` : ''}</div><div class="acts">${buttons}</div></div>`;
+}
+
+/** A logged set as one line: set number bubble, weight × reps, then reserve or warm-up. */
+function setLine(x) {
+  const reps = x.toFailure ? (x.reps == null ? 'failure' : `${x.reps} (failure)`) : x.reps;
+  const extra = x.warmup ? 'warm-up' : !x.toFailure && Number.isFinite(x.rir) ? `${rirLabel(x.rir)} in reserve` : '';
+  return `<span class="no ${x.warmup ? 'w' : ''}">${x.warmup ? 'W' : esc(x.setNo)}</span><span class="what"><b>${esc(fmtKg(x.weightKg))} kg × ${esc(reps)}</b>${extra ? ` <span class="muted">${esc(extra)}</span>` : ''}</span>`;
+}
+
 /** The bottom tab bar (all screens). `tab` is the one shown as current. */
 function tabBar(tab) {
   const d = state.draft;
@@ -1326,7 +1393,8 @@ function tabBar(tab) {
 /** Which tab a route belongs to. */
 function tabOf(name) {
   if (name === 'entry' || name === 'review' || name === 'workout') return 'workout';
-  if (name === 'history' || name === 'settings' || name === 'more' || name === 'photos') return 'more';
+  if (name === 'photos') return 'body'; // opened from Body, and its back link goes there
+  if (name === 'history' || name === 'settings' || name === 'more') return 'more';
   return ['progress', 'body', 'muscles'].includes(name) ? name : 'home';
 }
 
@@ -1359,7 +1427,7 @@ function dailyLog() {
         ${
           weighIn
             ? ''
-            : `<span class="inline"><label for="weigh-in" class="sr-only">Today's weight</label><input id="weigh-in" class="input mini" type="number" inputmode="decimal" step="0.1" min="0" placeholder="kg" value="${esc(state.ui.body.weighIn)}" data-input="weighIn" /><button type="button" class="btn small pill" data-action="saveWeighIn">Save</button></span>`
+            : `<span class="inline"><label for="weigh-in" class="sr-only">Today's weight</label><input id="weigh-in" class="input mini" type="number" inputmode="decimal" step="0.1" min="0" placeholder="kg" value="${esc(state.ui.body.weighIn)}" data-input="weighIn" data-change="weighInCommit" /><button type="button" class="btn small pill" data-action="saveWeighIn">Save</button></span>`
         }
       </div>`
           : ''
@@ -1434,13 +1502,21 @@ function renderHome() {
   const e = recoveryEntry(today) || {};
   const morningDone = Number.isFinite(e.soreness) && !state.ui.morning.editing;
   const attention = homeBanners();
+  const rc = recoveryCard('home');
+  const rcInfo = rc.includes('class="alert') ? '' : rc;
   const waiting = state.outbox.length;
   if (waiting) {
-    attention.unshift(`<div class="banner warn">
-      <p class="title">${waiting} workout${waiting === 1 ? '' : 's'} waiting to sync</p>
-      <p class="small muted" style="margin:0">${haveApi() ? 'Will retry when the app opens or comes back online.' : 'Add the script URL and token in More → Google Sheet first.'}</p>
-      <div class="actions"><button type="button" class="btn" data-action="retryNow" ${state.ui.syncing ? 'disabled' : ''}>${state.ui.syncing ? 'Syncing…' : 'Retry now'}</button></div>
-    </div>`);
+    attention.unshift(
+      notice(
+        'warn',
+        'sync',
+        'blue',
+        `${waiting} workout${waiting === 1 ? '' : 's'} waiting to sync`,
+        haveApi() ? 'Retries by itself when the app opens or comes back online.' : 'Add the script URL and token in More → Google Sheet first.',
+        '',
+        `<button type="button" class="btn small pill" data-action="retryNow" ${state.ui.syncing ? 'disabled' : ''}>${state.ui.syncing ? 'Syncing…' : 'Retry now'}</button>`,
+      ),
+    );
   }
   return `
     <div class="brandrow">
@@ -1450,7 +1526,7 @@ function renderHome() {
     <p class="sub">${esc(WEEKDAYS[new Date().getDay()])}, ${esc(formatDate(today))}</p>
     ${group('Log today', `<span class="freq">Daily · ${log.done} of ${log.total} done</span>`, log.html)}
     ${morningDone ? group('Recovery', '', morningCard()) : ''}
-    ${group('Training', '', trainingCard())}
+    ${group('Training', '', trainingCard() + (rcInfo ? `<div style="margin-top:10px">${rcInfo}</div>` : ''))}
     ${group('Nutrition & body', '<a class="btn link small" href="#body">Body ›</a>', nutritionCard())}
     ${attention.length ? group('Needs attention', `<span class="count">${attention.length}</span>`, `<div class="attention">${attention.join('')}</div>`) : ''}`;
 }
@@ -1462,39 +1538,40 @@ function renderWorkoutHome() {
   const planned = /^\d{4}-\d{2}-\d{2}$/.test(st.date) ? scheduledDay(st.date) : '';
   if (!state.ui.startPicked && planned && DAY_TYPES.includes(planned)) st.dayType = planned;
   const recent = sortedHistory().slice(0, 5);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(st.date) ? st.date : todayISO();
+  const isToday = date === todayISO();
+  // One tap starts a day: the planned one first, the rest in plan order.
+  const days = DAY_TYPES.filter((x) => x !== 'Custom');
+  const ordered = planned && days.includes(planned) ? [planned, ...days.filter((x) => x !== planned)] : days;
+  const dayRow = (day) => {
+    const n = dayExercises(day).length;
+    const last = state.history.filter((s) => s.dayType === day && s.date < date).map((s) => s.date).sort().pop();
+    const ago = last ? Progress.daysBetween(last, date) : null;
+    return `<button type="button" class="lrow" data-action="quickStart" data-day="${esc(day)}">${appIcon('dumbbell', day === planned ? 'saffron' : 'grey')}
+      <span class="tx"><b>${esc(day)}</b><span>${n} exercise${n === 1 ? '' : 's'}${last ? ` · last done ${ago === 0 ? 'today' : ago === 1 ? 'yesterday' : `${ago} days ago`}` : ' · not done yet'}</span></span>
+      ${day === planned ? tag(isToday ? 'Today' : 'Planned', 'accent') : ''}<span class="go">Start</span></button>`;
+  };
   return `
     <h1 class="large">Workout</h1>
-    <p class="sub">${d ? 'A workout is open' : 'Nothing running'}</p>
+    <p class="sub">${d ? 'A workout is open' : 'Tap a day to start'}</p>
     ${d ? group('Open workout', '', trainingCard()) : ''}
-    ${group('Start a workout', '', `<section class="card stack">
-      ${nextWorkoutHtml(planned)}
-      <fieldset>
-        <legend>Day</legend>
-        <div class="segments">
-          ${DAY_TYPES.map(
-            (day) => `
-            <label class="seg ${st.dayType === day ? 'selected' : ''}">
-              <input type="radio" name="dayType" value="${esc(day)}" data-change="startDay" ${st.dayType === day ? 'checked' : ''} />
-              ${esc(day)}
-            </label>`,
-          ).join('')}
-        </div>
-      </fieldset>
-      ${
-        st.dayType === 'Custom'
-          ? `<div>
-              <label for="custom-day">Day name</label>
-              <input id="custom-day" class="input" value="${esc(st.custom)}" placeholder="e.g. Arms" data-input="startCustom" autocomplete="off" />
-            </div>`
-          : ''
-      }
-      <div>
-        <label for="start-date">Date</label>
-        <input id="start-date" type="date" class="input" value="${esc(st.date)}" data-change="startDate" />
+    ${nextWorkoutHtml(planned) ? `<div class="sgroup">${nextWorkoutHtml(planned)}</div>` : ''}
+    ${group(
+      d ? 'Start a new workout' : 'Start a workout',
+      `<label class="datechip" for="start-date">${icon('calendar')}<span>${esc(isToday ? 'Today' : formatDate(date, false))}</span><input id="start-date" type="date" value="${esc(date)}" data-change="startDate" aria-label="Workout date" /></label>`,
+      `<div class="card flush">
+        ${ordered.map(dayRow).join('')}
+        <details class="customday" ${st.dayType === 'Custom' ? 'open' : ''}>
+          <summary class="lrow">${appIcon('bolt', 'yellow')}<span class="tx"><b>Custom day</b><span>Your own name, e.g. Arms</span></span>${CHEV}</summary>
+          <div class="addrow input-row">
+            <label for="custom-day" class="sr-only">Day name</label>
+            <input id="custom-day" class="input" value="${esc(st.custom)}" placeholder="e.g. Arms" data-input="startCustom" autocomplete="off" />
+            <button type="button" class="btn" data-action="startCustomDay">Start</button>
+          </div>
+        </details>
       </div>
-      <button type="button" class="btn primary" data-action="startWorkout">${d ? 'Start a new workout' : 'Start workout'}</button>
-      ${d ? '<p class="hint" style="text-align:center">Starting a new workout keeps the current one until you discard it.</p>' : ''}
-    </section>`)}
+      ${d ? '<p class="hint gnote">Starting a new workout asks before discarding the open one.</p>' : ''}`,
+    )}
     ${group(
       'Recent',
       '<a class="btn link small" href="#history">All ›</a>',
@@ -1532,6 +1609,14 @@ const GLYPHS = {
   chat: '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/>',
   leaf: '<path d="M5 19c0-8 5-13 14-14-1 9-6 14-14 14z"/><path d="M5 19l7-7"/>',
   body: '<circle cx="12" cy="4.5" r="2.2"/><path d="M6 9l6 1 6-1M12 10v5M9 21l3-6 3 6"/>',
+  cross: '<path d="M7 7l10 10M17 7L7 17"/>',
+  watch: '<rect x="6.5" y="6.5" width="11" height="11" rx="3"/><path d="M9 6.5L9.5 3h5l.5 3.5M9 17.5l.5 3.5h5l.5-3.5M12 9.5V12l1.5 1"/>',
+  alert: '<path d="M12 3.5L2.5 20h19z"/><path d="M12 10v4.5M12 17.2v.3"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.8v.2"/>',
+  sync: '<path d="M4 12a8 8 0 0 1 14-5.3L20 9M20 4v5h-5M20 12a8 8 0 0 1-14 5.3L4 15M4 20v-5h5"/>',
+  faceid: '<path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M9 9.5v1M15 9.5v1M12 9.5V13h-1M9.5 15.5a3.5 3.5 0 0 0 5 0"/>',
+  key: '<circle cx="8" cy="12" r="3.5"/><path d="M11.5 12H21M17.5 12v3M20 12v2"/>',
+  folder: '<path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/>',
 };
 const ICON_BG = {
   red: 'linear-gradient(#ff6961,#e5463e)', ink: 'linear-gradient(#4a3f38,#17120f)', green: 'linear-gradient(#58d27b,#2f8a55)', grey: 'linear-gradient(#a1a1a6,#6e6e73)',
@@ -1539,6 +1624,10 @@ const ICON_BG = {
   gsheet: 'linear-gradient(#3fbf68,#188038)', blue: 'linear-gradient(#5c9bff,#2f63e0)', sky: 'linear-gradient(#7fc8ff,#3a8fe0)', indigo: 'linear-gradient(#7d7aff,#4b45d6)',
   orange: 'linear-gradient(#ff9f45,#e8611a)', yellow: 'linear-gradient(#ffd84d,#f2a516)',
 };
+/** A small line icon in the text colour (in place of emoji). */
+function icon(glyph) {
+  return `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${GLYPHS[glyph]}</svg>`;
+}
 function appIcon(glyph, bg) {
   return `<span class="appicon" style="background:${ICON_BG[bg]}"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${GLYPHS[glyph]}</svg></span>`;
 }
@@ -1602,45 +1691,64 @@ function nextWorkoutHtml(planned) {
   }
   const neglected = today ? neglectedMuscles() : [];
   return `<div class="next-workout">
-      <p class="small" style="margin:0">🗓 ${line}</p>
+      <p class="small iline" style="margin:0">${icon('calendar')}<span>${line}</span></p>
       ${
         neglected.length
-          ? `<p class="small warn-text" style="margin:4px 0 0">⚠️ Not trained for over ${esc(state.settings.progression.neglectDays)} days: ${neglected
+          ? `<p class="small warn-text iline" style="margin:6px 0 0">${icon('alert')}<span>Not trained for over ${esc(state.settings.progression.neglectDays)} days: ${neglected
               .map((n) => `<strong>${esc(n.muscle)}</strong> ${n.last ? `${n.days} days` : 'not yet'}`)
-              .join(', ')}</p>`
+              .join(', ')}</span></p>`
           : ''
       }
     </div>`;
+}
+
+/** One "Needs attention" item: icon, title, a line of (already escaped) detail, extra content and actions. */
+function notice(cls, glyph, bg, title, sub, extra = '', actionsHtml = '') {
+  return `<div class="banner notice ${cls}">
+    <div class="nhead">${appIcon(glyph, bg)}<div class="tx"><b class="title">${esc(title)}</b>${sub ? `<span>${sub}</span>` : ''}</div></div>
+    ${extra}${actionsHtml ? `<div class="actions">${actionsHtml}</div>` : ''}
+  </div>`;
 }
 
 /** Missed days still waiting for a reason (newest first), each with one-tap reasons. */
 function missedCard() {
   const open = state.missed.filter((m) => !m.reason).sort((a, b) => b.date.localeCompare(a.date));
   if (!open.length) return '';
-  return `<div class="banner warn">
-      <p class="title">Missed workout${open.length === 1 ? '' : 's'}: why?</p>
-      <p class="small muted" style="margin:0">Goes to the Missed tab in the Sheet. Their exercises' clocks pause for ${esc(state.settings.progression.missedPauseDays)} days each, so a skip does not count as stalling.</p>
-      ${open
-        .slice(0, 4)
-        .map(
-          (m) => `<div class="missed-item">
-            <p class="small" style="margin:8px 0 4px"><strong>${esc(m.dayType)}</strong> · ${esc(WEEKDAYS[new Date(Date.parse(m.date)).getUTCDay()])} ${esc(formatDate(m.date, false))}</p>
+  return notice(
+    'warn',
+    'calendar',
+    'red',
+    `Missed workout${open.length === 1 ? '' : 's'}: why?`,
+    `One tap each. Their exercises' clocks pause ${esc(state.settings.progression.missedPauseDays)} days, so a skip is not counted as stalling.`,
+    `${open
+      .slice(0, 4)
+      .map(
+        (m) => `<div class="missed-item">
+            <p class="small" style="margin:10px 0 6px"><strong>${esc(m.dayType)}</strong> · ${esc(WEEKDAYS[new Date(Date.parse(m.date)).getUTCDay()])} ${esc(formatDate(m.date, false))}</p>
             <div class="pills">${missReasons()
               .map((r) => `<button type="button" class="pill-btn" data-action="missedReason" data-id="${esc(m.id)}" data-reason="${esc(r)}">${esc(r)}</button>`)
               .join('')}</div>
           </div>`,
-        )
-        .join('')}
-      ${open.length > 4 ? `<p class="small muted" style="margin:6px 0 0">${open.length - 4} more in History.</p>` : ''}
-    </div>`;
+      )
+      .join('')}
+      ${open.length > 4 ? `<p class="small muted" style="margin:6px 0 0">${open.length - 4} more in History.</p>` : ''}`,
+  );
 }
 
 /** Weight increases due, the weekly check-in, and photos waiting for a backup. */
 const RECOVERY_ADVICE = {
-  green: '🟢 Train as planned.',
-  amber: '🟠 Train, but keep the weights and do one set fewer per exercise. Stop each set with a rep or two in reserve.',
-  red: '🔴 Make it a light session (lighter-week rules: about half the sets, 10% less weight) or rest today.',
+  green: 'Train as planned.',
+  amber: 'Train, but keep the weights and do one set fewer per exercise. Stop each set with a rep or two in reserve.',
+  red: 'Make it a light session (lighter-week rules: about half the sets, 10% less weight) or rest today.',
 };
+const RECOVERY_TITLE = { green: 'Ready to train', amber: 'Go a little easier', red: 'Take it light today' };
+
+/** A ring gauge 0–100 with the number in the middle. */
+function ringGauge(score) {
+  const c = 2 * Math.PI * 30;
+  const off = score === null || score === undefined ? c : c * (1 - Math.max(0, Math.min(100, score)) / 100);
+  return `<span class="ringbox"><svg class="ring" viewBox="0 0 72 72" aria-hidden="true"><circle cx="36" cy="36" r="30" class="track"/><circle cx="36" cy="36" r="30" class="val" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}" transform="rotate(-90 36 36)"/></svg><b>${score ?? '–'}</b></span>`;
+}
 
 /** Home's morning check: soreness and the Watch sleep score from the owner, sleep / RHR / HRV from the Shortcut,
     then the day's recovery score with what to do about it. Advice only: it never locks anything. */
@@ -1659,16 +1767,24 @@ function morningCard() {
   const answered = Number.isFinite(e.soreness) && !ui.editing;
   if (answered) {
     const r = recoveryResult(today);
-    return `<div class="banner recovery-score ${esc(r?.band || '')}">
-      <p class="title">Recovery ${r && r.score !== null ? `<strong>${r.score}</strong>/100` : ''}</p>
-      ${r?.band ? `<p class="small" style="margin:0">${esc(RECOVERY_ADVICE[r.band])}</p>` : ''}
-      <p class="small muted" style="margin:6px 0 0">${esc((r?.parts || []).map((p) => `${p.label} ${p.score} (${p.detail})`).join(' · '))}</p>
-      ${(r?.notes || []).map((n) => `<p class="small muted" style="margin:2px 0 0">${esc(n)}</p>`).join('')}
-      ${fromWatch.length ? '' : `<p class="small muted" style="margin:2px 0 0">${esc(watchLine)}</p>`}
-      <div class="actions"><button type="button" class="btn link" data-action="morningEdit">Change answers</button></div>
+    const score = r && r.score !== null ? r.score : null;
+    return `<div class="card recovery-score ${esc(r?.band || '')}">
+      <div class="rhead">${ringGauge(score)}
+        <div class="tx"><b>${esc(RECOVERY_TITLE[r?.band] || 'Recovery')}</b><span>${esc(r?.band ? RECOVERY_ADVICE[r.band] : 'Not enough data for a score yet.')}</span></div>
+      </div>
+      ${
+        r?.parts?.length
+          ? `<div class="parts">${r.parts
+              .map((p) => `<div class="part"><span>${esc(p.label)}</span><i><em style="width:${Math.max(0, Math.min(100, p.score))}%"></em></i><b>${esc(p.score)}</b><small>${esc(p.detail)}</small></div>`)
+              .join('')}</div>`
+          : ''
+      }
+      ${(r?.notes || []).map((n) => `<p class="small muted" style="margin:8px 0 0">${esc(n)}</p>`).join('')}
+      ${fromWatch.length ? '' : `<p class="small muted watchline" style="margin:8px 0 0">${icon('watch')}${esc(watchLine.replace(/^⌚ /, ''))}</p>`}
+      <button type="button" class="btn link small" data-action="morningEdit" style="padding-left:0;margin-top:4px">Change answers</button>
     </div>`;
   }
-  return `<div class="banner"><p class="title">Morning check</p>${morningForm()}</div>`;
+  return `<div class="card stack"><b>Morning check</b>${morningForm()}</div>`;
 }
 
 /** The morning questions: soreness (required) and the Watch sleep score, with the Shortcut's numbers above. */
@@ -1685,30 +1801,34 @@ function morningForm() {
     ? `⌚ From your Watch: ${fromWatch.join(' · ')}`
     : '⌚ Waiting for the morning Shortcut (sleep, resting HR, HRV). More → Recovery score shows how to set it up.';
   const sore = ui.soreness ?? (Number.isFinite(e.soreness) ? e.soreness : null);
+  // Fewer taps: the optional sleep score comes first; tapping a soreness number saves both (no Save button).
   return `
-      <p class="small muted" style="margin:0">${esc(watchLine)}</p>
-      <div class="matrix-row" style="margin-top:8px">
-        <div class="q">Soreness <span class="small muted">1 = none · 10 = very sore</span></div>
+      <p class="small muted watchline" style="margin:0">${icon('watch')}${esc(watchLine.replace(/^⌚ /, ''))}</p>
+      <div class="frow inset">
+        <label for="sleep-score"><b>Watch sleep score</b><span>Optional, 0–100</span></label>
+        <input id="sleep-score" class="input fnum" type="number" inputmode="numeric" min="0" max="100" placeholder="–" value="${esc(ui.sleepScore || (Number.isFinite(e.sleepScore) ? e.sleepScore : ''))}" data-input="morningSleepScore" />
+      </div>
+      <div class="matrix-row">
+        <div class="q">How sore are you? <span class="small muted">1 = none · 10 = very sore · tap to save</span></div>
         <div class="chips ten" role="group" aria-label="Soreness">${Array.from({ length: 10 }, (_, i) => i + 1)
           .map((n) => `<button type="button" class="chip" data-action="morningSoreness" data-value="${n}" aria-pressed="${sore === n}">${n}</button>`)
           .join('')}</div>
-      </div>
-      <div>
-        <label for="sleep-score">Sleep score from the Watch (optional, 0–100)</label>
-        <input id="sleep-score" class="input" type="number" inputmode="numeric" min="0" max="100" placeholder="e.g. 82" value="${esc(ui.sleepScore || (Number.isFinite(e.sleepScore) ? e.sleepScore : ''))}" data-input="morningSleepScore" />
-      </div>
-      <div class="actions"><button type="button" class="btn" data-action="morningSave">Save</button></div>`;
+      </div>`;
 }
 
 /** A new calorie target to enter in MyFitnessPal, until the owner confirms it is entered. */
 function calorieBanner() {
   const lock = state.settings.calorieLock;
   if (!lock || lock.seen) return '';
-  return `<div class="banner">
-      <p class="title">New calorie target: ${esc(lock.target.toLocaleString('en-IN'))} kcal a day</p>
-      <p class="small muted" style="margin:0">${lock.prev ? `Was ${esc(lock.prev.toLocaleString('en-IN'))}. ` : ''}Reason: ${esc(TARGET_REASON[lock.reason] || lock.reason)}. Enter it in MyFitnessPal (Goals → Calories). Details on Body.</p>
-      <div class="actions"><button type="button" class="btn" data-action="calorieSeen">Done, it is in MyFitnessPal</button></div>
-    </div>`;
+  return notice(
+    'accent',
+    'flame',
+    'saffron',
+    `New calorie target: ${lock.target.toLocaleString('en-IN')} kcal a day`,
+    `${lock.prev ? `Was ${esc(lock.prev.toLocaleString('en-IN'))}. ` : ''}Reason: ${esc(TARGET_REASON[lock.reason] || lock.reason)}. Enter it in MyFitnessPal (Goals → Calories).`,
+    '',
+    '<button type="button" class="btn small pill" data-action="calorieSeen">Done, it is in MyFitnessPal</button>',
+  );
 }
 
 /** Everything on Today that needs attention, as a list of banners (empty ones left out). */
@@ -1720,33 +1840,40 @@ function homeBanners() {
   const all = trackedExercises()
     .map((n) => analyse(n))
     .filter(Boolean);
-  out.push(recoveryCard('home'));
+  const rc = recoveryCard('home');
+  if (rc.includes('class="alert')) out.push(rc); // the "next lighter week" line is information, shown under Training
   const due = recoveryState().active ? [] : all.filter((a) => a.status.kind === 'increase');
   if (due.length) {
-    out.push(`<div class="banner">
-      <p class="title">Time to add weight</p>
-      ${due.map((a) => `<p class="small" style="margin:2px 0 0">${esc(a.exercise)}: ${esc(fmtKg(a.status.weight))} → ${esc(fmtKg(a.status.nextWeight))} kg</p>`).join('')}
-    </div>`);
+    out.push(
+      notice(
+        'accent',
+        'dumbbell',
+        'saffron',
+        'Time to add weight',
+        `${due.length} exercise${due.length === 1 ? '' : 's'} hit the top of the range`,
+        `<div class="mini-rows">${due.map((a) => `<div><span>${esc(a.exercise)}</span><b>${esc(fmtKg(a.status.weight))} → ${esc(fmtKg(a.status.nextWeight))} kg</b></div>`).join('')}</div>`,
+      ),
+    );
   }
   const check = checkinState();
   if (check.due) {
-    out.push(`<div class="banner">
-      <p class="title">${esc(check.title)}</p>
-      <p class="small muted" style="margin:0">Measurements and photos, same time and conditions as last week.</p>
-      <div class="actions"><a class="btn" href="#body">Open check-in</a></div>
-    </div>`);
+    out.push(notice('', 'ruler', 'teal', check.title, 'Measurements and photos, same time and conditions as last week.', '', '<a class="btn small pill" href="#body">Open check-in</a>'));
   }
   const v = state.vaultInfo;
   const weeks = unsavedWeeks();
   // Before the vault is first unlocked in v1.4 the week list is unknown, so fall back to the old photo/backup dates.
   if (weeks.length || (!v.weeksChanged && v.lastPhotoAt && (!v.lastBackupAt || v.lastBackupAt < v.lastPhotoAt))) {
-    out.push(`<div class="banner warn">
-      <p class="title">Photos not saved to Files yet</p>
-      <p class="small muted" style="margin:0">${
-        weeks.length ? `${esc(weeks.map((f) => f.split(' - ')[0]).join(', '))}: save the week folder to Files → iCloud Drive → Bhimlekha.` : 'Save your week folders to Files → iCloud Drive → Bhimlekha.'
-      }</p>
-      <div class="actions"><a class="btn" href="#photos">Open Photos</a></div>
-    </div>`);
+    out.push(
+      notice(
+        'warn',
+        'folder',
+        'sky',
+        'Photos not saved to Files yet',
+        weeks.length ? `${esc(weeks.map((f) => f.split(' - ')[0]).join(', '))}: save to Files → iCloud Drive → Bhimlekha.` : 'Save your week folders to Files → iCloud Drive → Bhimlekha.',
+        '',
+        '<a class="btn small pill" href="#photos">Open Photos</a>',
+      ),
+    );
   }
   return out.filter(Boolean);
 }
@@ -1890,7 +2017,7 @@ function renderSetSheet() {
         </div>
         ${
           f.addingExercise
-            ? `<div class="input-row">
+            ? `<div class="input-row newex">
                 <input id="new-exercise" class="input" placeholder="New exercise name" value="${esc(state.ui.newExercise)}" data-input="newExercise" autocomplete="off" />
                 <button type="button" class="btn" data-action="addExercise">Add</button>
               </div>`
@@ -1945,17 +2072,16 @@ function renderSetSheet() {
           <p class="hint">0 = could not do another · 1 = one more · 2 = two more · 3+ = easy.</p>
         </fieldset>`
         }
-        <button type="button" class="chip toggle" data-action="toggleWarmup" aria-pressed="${f.warmup}">Warm-up set${f.warmup ? ' ✓' : ''}</button>
+        <div class="card flush inset"><label class="check switch"><span><b>Warm-up set</b><span>Not counted in progress or muscle sets</span></span><input type="checkbox" data-action="toggleWarmup" ${f.warmup ? 'checked' : ''} /></label></div>
         <button type="button" class="btn primary" data-action="saveSet">${f.editingId ? `Update set ${f.setNo}` : `Save set ${f.setNo}`}</button>
         ${f.editingId ? '<button type="button" class="btn secondary" data-action="cancelEdit">Cancel edit</button>' : ''}
         ${
           today.length
             ? `<div><p class="sublabel">Logged today</p>${today
                 .map(
-                  (s) => `<div class="set-row">
-                    <div class="what">${esc(describeSet(s))}</div>
-                    <button type="button" class="btn icon ghost" data-action="editSet" data-id="${s.id}" aria-label="Edit set ${s.setNo}">✎</button>
-                    <button type="button" class="btn icon ghost" data-action="deleteSet" data-id="${s.id}" aria-label="Delete set ${s.setNo}">🗑</button>
+                  (s) => `<div class="set-row setline">${setLine(s)}
+                    ${ibtn('edit', `data-action="editSet" data-id="${s.id}"`, `Edit set ${s.setNo}`)}
+                    ${ibtn('trash', `data-action="deleteSet" data-id="${s.id}"`, `Delete set ${s.setNo}`)}
                   </div>`,
                 )
                 .join('')}</div>`
@@ -1980,7 +2106,7 @@ function formReps(f) {
 function setCompareHtml() {
   const f = state.ui.form;
   if (!f || !f.exercise || f.warmup || !state.draft) return '';
-  if (inDeload(state.draft.date)) return '<div class="set-compare"><div class="small">🟢 Lighter week: comparisons are paused. Go easy, with 3–4 reps in reserve.</div></div>';
+  if (inDeload(state.draft.date)) return `<div class="set-compare"><div class="small iline">${icon('leaf')}<span>Lighter week: comparisons are paused. Go easy, with 3–4 reps in reserve.</span></div></div>`;
   const weight = f.weight === '' ? NaN : Number(f.weight);
   const sessions = statsHistory().filter((s) => s.id !== state.draft.id);
   const c = Progress.setComparison(sessions, f.exercise, f.setNo, { weight, reps: formReps(f) }, state.draft.date || todayISO(), state.settings.progression, (from, to) =>
@@ -1996,7 +2122,7 @@ function setCompareHtml() {
     const r = c.shortfall.ref;
     warn.push({
       cls: 'shortfall',
-      html: `<strong class="lead">⚠️ ${c.shortfall.days} days below</strong> your ${esc(fmtKg(r.weight))} kg × ${r.reps} of ${esc(formatDate(r.date, false))} on this set${
+      html: `<strong class="lead">${icon('alert')}${c.shortfall.days} days below</strong> your ${esc(fmtKg(r.weight))} kg × ${r.reps} of ${esc(formatDate(r.date, false))} on this set${
         c.shortfall.paused ? ` (not counting ${c.shortfall.paused} days paused for missed workouts)` : ''
       }`,
     });
@@ -2005,12 +2131,12 @@ function setCompareHtml() {
   const capped = c.stagnant && plan && !plan.timed && c.stagnant.best.reps >= plan.max - state.settings.progression.topTolerance;
   if (capped) {
     // Already at the top of the rep range: no more reps are expected until the weight goes up, so not "stagnant".
-    warn.push({ cls: 'info', html: `ℹ️ This set is at the top of its range (${c.stagnant.best.reps} reps; the range tops out at ${plan.max}). It moves on when the weight goes up.` });
+    warn.push({ cls: 'info', html: `${icon('info')}This set is at the top of its range (${c.stagnant.best.reps} reps; the range tops out at ${plan.max}). It moves on when the weight goes up.` });
   } else if (c.stagnant) {
     const b = c.stagnant.best;
     warn.push({
       cls: 'stagnant',
-      html: `<strong class="lead">⚠️ Stagnant ${c.stagnant.days} days</strong> no new best on this set since ${esc(fmtKg(b.weight))} kg × ${b.reps} (${esc(formatDate(c.stagnant.since, false))})${
+      html: `<strong class="lead">${icon('alert')}Stagnant ${c.stagnant.days} days</strong> no new best on this set since ${esc(fmtKg(b.weight))} kg × ${b.reps} (${esc(formatDate(c.stagnant.since, false))})${
         c.stagnant.paused ? `, not counting ${c.stagnant.paused} days paused for missed workouts` : ''
       }`,
     });
@@ -2072,26 +2198,27 @@ function summarise(session) {
 function renderSummary(session) {
   const s = summarise(session);
   return `
-    <div class="totals">
-      <div class="stat"><div class="value">${s.totalSets}</div><div class="label">Sets</div></div>
-      <div class="stat"><div class="value">${esc(fmtVolume(s.totalVolume))}</div><div class="label">Volume</div></div>
-      <div class="stat"><div class="value">${esc(fmtDuration(s.duration))}</div><div class="label">Duration</div></div>
-    </div>
-    <table class="summary" style="margin-top:12px">
-      <thead><tr><th>Exercise</th><th class="num">Sets</th><th class="num">Best</th><th class="num">Volume</th></tr></thead>
-      <tbody>
-        ${s.rows
-          .map(
-            (r) => `<tr>
-          <td>${esc(r.name)}</td>
-          <td class="num">${r.sets}</td>
-          <td class="num">${esc(fmtKg(r.best.weightKg))} kg × ${r.best.toFailure && r.best.reps == null ? 'F' : r.best.reps}</td>
-          <td class="num">${esc(fmtVolume(r.volume))}</td>
-        </tr>`,
-          )
-          .join('')}
-      </tbody>
-    </table>`;
+    ${tiles([[s.totalSets, 'Sets'], [fmtVolume(s.totalVolume), 'Volume'], [fmtDuration(s.duration), 'Duration']])}
+    <div class="card flush summary-rows">${s.rows
+      .map(
+        (r) => `<div class="xrow"><div class="tx"><b>${esc(r.name)}</b><span>${r.sets} set${r.sets === 1 ? '' : 's'} · best ${esc(fmtKg(r.best.weightKg))} kg × ${
+          r.best.toFailure && r.best.reps == null ? 'F' : esc(r.best.reps)
+        }</span></div><span class="n">${esc(fmtVolume(r.volume))}</span></div>`,
+      )
+      .join('')}</div>`;
+}
+
+/** Heart rate, calories, score, the 1–5 answers and notes of a saved workout, as label / value rows. */
+function wellbeingRows(session) {
+  const rows = [];
+  if (session.score) rows.push(['How it went', `${session.score}/10`]);
+  if (session.avgHeartRate) rows.push(['Average heart rate', `${session.avgHeartRate} bpm`]);
+  if (session.activeCalories) rows.push(['Active calories', `${session.activeCalories} kcal`]);
+  for (const [q, v] of Object.entries(session.satisfaction || {})) if (v) rows.push([q, `${v}/5`]);
+  if (!rows.length && !session.notes) return '';
+  return `<div class="card kvs">${rows.map(([k, v]) => `<div class="kv"><div class="k">${esc(k)}</div><div class="v sm">${esc(v)}</div></div>`).join('')}${
+    session.notes ? `<p class="note-text">${esc(session.notes)}</p>` : ''
+  }</div>`;
 }
 
 const TREND = {
@@ -2104,8 +2231,8 @@ const TREND = {
 /** "How did this workout compare": per exercise trend, numbers in words, progression status and warnings. */
 function renderInsight(session) {
   if (inDeload(session.date)) {
-    return `<div class="insight stack"><h2 class="section-title" style="margin:0">Progress insight</h2>
-      <p class="small" style="margin:0">🟢 Lighter-week workout: not compared and not counted in progress, so it cannot set off warnings.</p></div>`;
+    return `<div class="insight stack">
+      <p class="small iline" style="margin:0">${icon('leaf')}<span>Lighter-week workout: not compared and not counted in progress, so it cannot set off warnings.</span></p></div>`;
   }
   const ctx = progressCtx();
   ctx.today = session.date || todayISO();
@@ -2129,13 +2256,11 @@ function renderInsight(session) {
   state.history = saved;
   return `
     <div class="insight stack">
-      <h2 class="section-title" style="margin:0">Progress insight</h2>
       <p class="insight-head">${esc(headline.join(' · '))}${totals.length ? `<br /><span class="small muted">vs last time: ${esc(totals.join(', '))}</span>` : ''}</p>
       ${
         rs.due
-          ? `<div class="alert recovery-due"><p class="alert-title">⚠️ Recovery: lighter week now</p>
-              <ul class="reasons">${rs.reasons.map((x) => `<li><strong class="lead">${esc(x.lead)}</strong> ${esc(x.text)}</li>`).join('')}</ul>
-              <p class="small" style="margin:0">Start it from the Home screen.</p></div>`
+          ? `<div class="alert notice warn recovery-due"><div class="nhead">${appIcon('alert', 'orange')}<div class="tx"><b class="alert-title">Time for a lighter week</b><span>Start it from Today.</span></div></div>
+              <ul class="reasons">${rs.reasons.map((x) => `<li><strong class="lead">${esc(x.lead)}</strong> ${esc(x.text)}</li>`).join('')}</ul></div>`
           : ''
       }
       ${ins.rows
@@ -2148,11 +2273,11 @@ function renderInsight(session) {
                 ? `Stalled: ${f.sessions} sessions at ${fmtKg(a.last.weight)} kg without more reps. Try a longer rest, one extra rep on one set, or a variation.`
                 : `Dropping: est. strength ${Progress.signed(f.pct)} over the last ${f.sessions} sessions. Check sleep, food and recovery.`,
             )
-            .map((x) => `<p class="flag">⚠️ ${esc(x)}</p>`)
+            .map((x) => `<p class="flag">${icon('alert')}<span>${esc(x)}</span></p>`)
             .join('');
           return `
           <div class="insight-row">
-            <div class="row between"><strong>${esc(a.exercise)}</strong><span class="trend ${t.cls}">${t.icon} ${esc(t.label)}</span></div>
+            <div class="row between"><strong>${esc(a.exercise)}</strong>${tag(`${t.icon} ${t.label}`, { up: 'ok', down: 'bad', flat: '', first: 'accent' }[a.trend])}</div>
             <p class="small" style="margin:4px 0 0">${esc(Progress.exerciseSentence(a, p))}</p>
             ${status ? `<p class="status-line ${esc(a.status.kind)}">${esc(status)}</p>` : ''}
             ${flags}
@@ -2169,9 +2294,9 @@ function renderReview() {
   const done = sub.status === 'ok' || sub.status === 'offline' || sub.status === 'rejected';
   const statusText = {
     sending: 'Sending to your Sheet…',
-    ok: `✅ ${sub.message}`,
-    offline: `⚠️ ${sub.message}`,
-    rejected: `⚠️ ${sub.message}`,
+    ok: `✓ ${sub.message}`,
+    offline: sub.message,
+    rejected: sub.message,
   }[sub.status];
   const finished = session.finishedAt ? new Date(session.finishedAt) : null;
   const missing = done || busy ? [] : reviewMissing(session);
@@ -2181,9 +2306,9 @@ function renderReview() {
     <p class="sub">${esc(session.dayType)} · ${esc(formatDate(session.date))}${
       finished ? ` · clock stopped at ${esc(`${String(finished.getHours()).padStart(2, '0')}:${String(finished.getMinutes()).padStart(2, '0')}`)}` : ''
     }</p>
-    ${group('Summary', '', `<section class="card stack">${renderSummary(session)}</section>`)}
-    ${insight ? `<section class="sgroup"><section class="card stack">${insight}</section></section>` : ''}
-    <section class="sgroup">
+    ${group('Summary', '', renderSummary(session))}
+    ${insight ? group('Progress insight', '', `<section class="card">${insight}</section>`) : ''}
+    ${group('How was it?', missing.length ? `<span class="note">${missing.length} still needed</span>` : '', `
     <section class="card stack">
       ${renderWellbeing(session, busy || done)}
       <div>
@@ -2198,8 +2323,7 @@ function renderReview() {
           : `<button type="button" class="btn primary" data-action="submitWorkout" ${busy ? 'disabled' : ''}>${busy ? 'Sending…' : 'Submit workout'}</button>
              <button type="button" class="btn secondary" data-action="reopenWorkout" ${busy ? 'disabled' : ''}>Reopen workout to log more sets</button>`
       }
-    </section>
-    </section>`;
+    </section>`)}`;
 }
 
 /** What the review still needs (v1.7: how it went, heart rate and calories are required; the watch can be
@@ -2227,7 +2351,6 @@ function renderWellbeing(session, locked) {
   const watchOff = Boolean(session.noWatch);
   return `
     <div class="stack">
-      <h2 class="section-title" style="margin:0">How was it?</h2>
       <div class="matrix-row">
         <div class="q"><strong>How was the workout?</strong> <span class="req">required</span> <span class="small muted">1 = awful · 10 = best ever</span></div>
         ${scale('score', session.score, 10, 'score')}
@@ -2242,10 +2365,10 @@ function renderWellbeing(session, locked) {
           <input id="active-kcal" class="input" type="number" inputmode="numeric" min="1" max="3000" placeholder="${watchOff ? 'not recorded' : 'e.g. 320'}" value="${esc(session.activeCalories ?? '')}" data-change="activeCalories" ${locked || watchOff ? 'disabled' : ''} />
         </div>
       </div>
-      <label class="check">
+      <div class="card flush inset"><label class="check switch">
+        <span><b>The watch did not record it</b><span>Heart rate and calories are then not needed</span></span>
         <input type="checkbox" data-action="noWatch" ${watchOff ? 'checked' : ''} ${locked ? 'disabled' : ''} />
-        The watch did not record this workout
-      </label>
+      </label></div>
       ${questions()
         .map(
           (q) => `
@@ -2258,92 +2381,72 @@ function renderWellbeing(session, locked) {
     </div>`;
 }
 
-function wellbeingSummary(session) {
-  const bits = [];
-  if (session.avgHeartRate) bits.push(`${session.avgHeartRate} bpm`);
-  if (session.activeCalories) bits.push(`${session.activeCalories} kcal`);
-  if (session.score) bits.push(`${session.score}/10`);
-  const sat = session.satisfaction || {};
-  const rated = Object.entries(sat).filter(([, v]) => v);
-  if (rated.length) bits.push(rated.map(([q, v]) => `${q} ${v}`).join(' · '));
-  return bits;
-}
-
 function renderHistory() {
   // Workouts and missed days in one list, newest first.
   const rows = [...sortedHistory().map((s) => ({ date: s.date, s })), ...state.missed.map((m) => ({ date: m.date, m }))].sort((a, b) =>
     (b.date || '').localeCompare(a.date || ''),
   );
+  const day = (iso) => `${WEEKDAYS[new Date(Date.parse(iso)).getUTCDay()]?.slice(0, 3) || ''} ${formatDate(iso, false)}`;
+  const row = ({ s, m }) =>
+    m
+      ? `<button type="button" class="lrow missed" data-action="missedReason" data-id="${esc(m.id)}" data-edit="1">${appIcon('cross', m.reason ? 'grey' : 'red')}
+          <span class="tx"><b>${esc(m.dayType)} · missed</b><span>${esc(day(m.date))} · ${m.reason ? esc(m.reason) : 'tap to add the reason'}${m.note ? ` · ${esc(m.note)}` : ''}</span></span>
+          ${m.reason ? '' : tag('No reason', 'bad')}</button>`
+      : `<button type="button" class="lrow" data-action="openSession" data-id="${esc(s.id)}">${appIcon('dumbbell', 'saffron')}
+          <span class="tx"><b>${esc(s.dayType)}</b><span>${esc(
+            [day(s.date), `${s.sets.length} set${s.sets.length === 1 ? '' : 's'}`, fmtVolume(sessionVolume(s)), s.score ? `${s.score}/10` : ''].filter(Boolean).join(' · '),
+          )}</span></span>
+          ${s.synced ? '' : tag('Not synced', 'warn')}${CHEV}</button>`;
+  // One group per month, newest first.
+  const months = [];
+  for (const r of rows) {
+    const key = (r.date || '').slice(0, 7);
+    if (!months.length || months[months.length - 1].key !== key) months.push({ key, rows: [] });
+    months[months.length - 1].rows.push(r);
+  }
+  const monthName = (key) => (/^\d{4}-\d{2}$/.test(key) ? `${MONTH_NAMES[Number(key.slice(5)) - 1]} ${key.slice(0, 4)}` : 'No date');
+  const waiting = state.history.filter((s) => !s.synced).length;
+  const open = state.missed.filter((m) => !m.reason).length;
   return `
     ${topbar('History', { href: 'more', label: 'More' })}
-    <section class="card">
-      ${
-        rows.length
-          ? `<ul class="list">${rows
-              .map(({ s, m }) =>
-                m
-                  ? `
-            <li>
-              <button type="button" class="list-item missed" data-action="missedReason" data-id="${esc(m.id)}" data-edit="1">
-                <div>
-                  <div class="primary-text">${esc(formatDate(m.date))} · ${esc(m.dayType)}</div>
-                  <div class="secondary-text">Missed · ${m.reason ? esc(m.reason) : 'tap to add the reason'}${m.note ? ` · ${esc(m.note)}` : ''}</div>
-                </div>
-                <span class="badge pending">✕ missed</span>
-              </button>
-            </li>`
-                  : `
-            <li>
-              <button type="button" class="list-item" data-action="openSession" data-id="${s.id}">
-                <div>
-                  <div class="primary-text">${esc(formatDate(s.date))} · ${esc(s.dayType)}</div>
-                  <div class="secondary-text">${s.sets.length} set${s.sets.length === 1 ? '' : 's'} · ${esc(fmtVolume(sessionVolume(s)))}${s.score ? ` · ${s.score}/10` : ''}</div>
-                </div>
-                <span class="badge ${s.synced ? 'ok' : 'pending'}">${s.synced ? '✅ synced' : '⏳ pending'}</span>
-              </button>
-            </li>`,
-              )
-              .join('')}</ul>`
-          : '<p class="empty">No workouts yet.</p>'
-      }
-    </section>
-    <section class="card stack">
-      <button type="button" class="btn secondary" data-action="syncHistory" ${state.ui.syncing ? 'disabled' : ''}>Sync history from Sheet</button>
-      ${state.ui.historySync ? `<p class="hint" style="text-align:center">${esc(state.ui.historySync)}</p>` : ''}
-    </section>`;
+    <p class="sub">${esc(
+      [`${state.history.length} workout${state.history.length === 1 ? '' : 's'}`, state.missed.length ? `${state.missed.length} missed` : '', waiting ? `${waiting} not synced` : '', open ? `${open} without a reason` : '']
+        .filter(Boolean)
+        .join(' · '),
+    )}</p>
+    ${
+      rows.length
+        ? months
+            .map((g) => {
+              const n = g.rows.filter((r) => r.s).length;
+              return group(monthName(g.key), `<span class="note">${n} workout${n === 1 ? '' : 's'}</span>`, `<div class="card flush">${g.rows.map(row).join('')}</div>`);
+            })
+            .join('')
+        : group('Workouts', '', '<div class="card"><p class="empty">No workouts yet.</p></div>')
+    }
+    <p class="hint gnote syncline">${icon('sync')}<span>${
+      state.ui.syncing ? 'Fetching from the Sheet…' : esc(state.ui.historySync || `Pulled from the Sheet automatically (last ${pulledAgo('history')})`)
+    }</span><button type="button" class="btn link small" data-action="syncHistory" ${state.ui.syncing ? 'disabled' : ''}>Sync now</button></p>`;
 }
 
 function renderHistoryDetail(id) {
   const s = state.history.find((x) => x.id === id);
   if (!s) return `${topbar('History', { href: 'history', label: 'History' })}<p class="empty">This workout is not on this phone.</p>`;
   const groups = groupByExercise(s.sets);
+  const how = wellbeingRows(s);
   return `
-    ${topbar('', { href: 'history', label: 'History' })}
-    <section class="card stack">
-      <div class="row between">
-        <div>
-          <h1 class="card-title">${esc(s.dayType)}</h1>
-          <p class="subtitle">${esc(formatDate(s.date))}</p>
-        </div>
-        <span class="badge ${s.synced ? 'ok' : 'pending'}">${s.synced ? '✅ synced' : '⏳ pending'}</span>
-      </div>
-      ${renderSummary(s)}
-      ${wellbeingSummary(s).length ? `<p class="small">${wellbeingSummary(s).map(esc).join(' · ')}</p>` : ''}
-      ${s.notes ? `<p class="small"><strong>Notes:</strong> ${esc(s.notes)}</p>` : ''}
-    </section>
-    <section class="card">${renderInsight(s) || '<p class="empty">No working sets to compare.</p>'}</section>
-    <section class="card">
-      <h2 class="section-title">Sets</h2>
-      ${[...groups.entries()]
-        .map(
-          ([name, list]) => `
-        <div class="group">
-          <h3>${esc(name)}</h3>
-          ${list.map((x) => `<div class="set-row"><div class="what">${esc(describeSet(x))}</div></div>`).join('')}
-        </div>`,
-        )
-        .join('')}
-    </section>`;
+    ${topbar(s.dayType, { href: 'history', label: 'History' })}
+    <p class="sub">${esc(WEEKDAYS[new Date(Date.parse(s.date)).getUTCDay()] || '')}, ${esc(formatDate(s.date))} · ${s.synced ? tag('✓ In the Sheet', 'ok') : tag('Not synced yet', 'warn')}</p>
+    ${group('Summary', '', renderSummary(s))}
+    ${how ? group('How it went', '', how) : ''}
+    ${group('Progress insight', '', `<section class="card">${renderInsight(s) || '<p class="empty" style="padding:8px">No working sets to compare.</p>'}</section>`)}
+    ${group(
+      'Sets',
+      `<span class="note">${s.sets.length}</span>`,
+      `<div class="card flush">${[...groups.entries()]
+        .map(([name, list]) => `<div class="xblock"><b>${esc(name)}</b>${list.map((x) => `<div class="setline">${setLine(x)}</div>`).join('')}</div>`)
+        .join('')}</div>`,
+    )}`;
 }
 
 function renderSettings() {
@@ -2352,46 +2455,65 @@ function renderSettings() {
   const day = manageDays().includes(ui.manageDay) ? ui.manageDay : manageDays()[0];
   const list = state.exercises[day] || [];
   return `
-    <section class="card stack" data-sec="sheet">
-      <h2 class="section-title" style="margin:0">Google Sheet</h2>
-      <div>
-        <label for="script-url">Apps Script web app URL</label>
-        <input id="script-url" class="input" type="url" inputmode="url" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(s.scriptUrl)}" data-change="scriptUrl" autocomplete="off" autocapitalize="off" spellcheck="false" />
-      </div>
-      <div>
-        <label for="token">Secret token</label>
-        <div class="input-row">
-          <input id="token" class="input" type="${ui.showToken ? 'text' : 'password'}" value="${esc(s.token)}" data-change="token" autocomplete="off" autocapitalize="off" spellcheck="false" />
-          <button type="button" class="btn" data-action="toggleToken" aria-pressed="${ui.showToken}">${ui.showToken ? 'Hide' : 'Show'}</button>
+    <section class="secpage" data-sec="sheet">
+      <p class="sub">Workouts, measurements and settings go to your Google Sheet through its Apps Script web app.</p>
+      ${group(
+        'Connection',
+        haveApi() ? tag('Set up', 'ok') : tag('Not set up', 'warn'),
+        `<section class="card stack">
+        <div>
+          <label for="script-url">Apps Script web app URL</label>
+          <input id="script-url" class="input" type="url" inputmode="url" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(s.scriptUrl)}" data-change="scriptUrl" autocomplete="off" autocapitalize="off" spellcheck="false" />
         </div>
-      </div>
-      <button type="button" class="btn secondary" data-action="ping" ${ui.syncing ? 'disabled' : ''}>Test connection</button>
-      ${ui.ping ? `<div class="status ${ui.ping.ok === null ? '' : ui.ping.ok ? 'ok' : 'rejected'}" role="status">${esc(ui.ping.message)}</div>` : ''}
+        <div>
+          <label for="token">Secret token</label>
+          <div class="input-row">
+            <input id="token" class="input" type="${ui.showToken ? 'text' : 'password'}" value="${esc(s.token)}" data-change="token" autocomplete="off" autocapitalize="off" spellcheck="false" />
+            <button type="button" class="btn" data-action="toggleToken" aria-pressed="${ui.showToken}">${ui.showToken ? 'Hide' : 'Show'}</button>
+          </div>
+        </div>
+        <button type="button" class="btn secondary" data-action="ping" ${ui.syncing ? 'disabled' : ''}>Test connection</button>
+        ${ui.ping ? `<div class="status ${ui.ping.ok === null ? '' : ui.ping.ok ? 'ok' : 'rejected'}" role="status">${esc(ui.ping.message)}</div>` : ''}
+      </section>`,
+      )}
     </section>
 
-    <section class="card stack" data-sec="logging">
-      <h2 class="section-title" style="margin:0">Logging</h2>
-      <div>
-        <label for="rest-seconds">Default rest (seconds)</label>
-        <input id="rest-seconds" class="input" type="number" inputmode="numeric" min="10" max="900" step="5" value="${esc(s.restSeconds)}" data-change="restSeconds" />
-      </div>
-      <fieldset>
-        <legend>Reps buttons</legend>
+    <section class="secpage" data-sec="logging">
+      <p class="sub">What the logging panel offers and how long you rest.</p>
+      ${group(
+        'Rest timer',
+        '',
+        `<div class="card flush">${frow(
+          'rest-seconds',
+          'Default rest',
+          'Seconds, after each saved set',
+          `<input id="rest-seconds" class="input fnum" type="number" inputmode="numeric" min="10" max="900" step="5" value="${esc(s.restSeconds)}" data-change="restSeconds" />`,
+        )}</div>`,
+      )}
+      ${group(
+        'Reps buttons',
+        `<span class="note">${repsChips().filter((c) => typeof c === 'number').length}</span>`,
+        `<section class="card stack">
         <div class="pills" id="reps-pills">${repsChips()
           .filter((c) => typeof c === 'number')
           .map((n) => `<span class="pill">${n}<button type="button" class="pill-x" data-action="removeRep" data-value="${n}" aria-label="Remove the ${n} reps button">×</button></span>`)
           .join('')}</div>
-        <div class="input-row" style="margin-top:8px">
+        <div class="input-row">
           <label for="rep-new" class="sr-only">New reps button</label>
           <input id="rep-new" class="input" type="number" inputmode="numeric" min="1" max="999" placeholder="Add a reps button, e.g. 11" value="${esc(ui.newRep)}" data-input="newRep" />
           <button type="button" class="btn" data-action="addRep">Add</button>
         </div>
-        <p class="hint">Shown in number order. "Other" (any number) and "Failure" always follow them.</p>
-      </fieldset>
-      <label class="check">
-        <input type="checkbox" data-change="requireRir" ${s.requireRir ? 'checked' : ''} />
-        Ask for reps in reserve (RIR) on every working set
-      </label>
+        <p class="hint" style="margin:0">Shown in number order. "Other" (any number) and "Failure" always follow them.</p>
+      </section>`,
+      )}
+      ${group(
+        'Reps in reserve',
+        '',
+        `<div class="card flush"><label class="check switch">
+          <span><b>Ask on every working set</b><span>0, 1, 2 or 3+ reps left; progression uses it</span></span>
+          <input type="checkbox" data-change="requireRir" ${s.requireRir ? 'checked' : ''} />
+        </label></div>`,
+      )}
     </section>
 
     ${renderScheduleSettings()}
@@ -2401,89 +2523,111 @@ function renderSettings() {
     ${renderCalorieSettings()}
     ${renderRecoveryScoreSettings()}
 
-    <section class="card stack" data-sec="questions">
-      <h2 class="section-title" style="margin:0">End-of-workout questions</h2>
-      <p class="hint" style="margin:0">Optional, each rated 1–5 on the Review screen. "How was the workout" (1–10), heart rate and calories are always asked and required.</p>
-      ${
-        questions().length
-          ? `<ul class="list" id="question-list">${questions()
-              .map(
-                (q, i) => `
-            <li>
-              <div class="exercise-row">
-                <div class="name">${esc(q)}</div>
-                <button type="button" class="btn icon ghost" data-action="moveQuestion" data-index="${i}" data-dir="-1" aria-label="Move ${esc(q)} up" ${i === 0 ? 'disabled' : ''}>↑</button>
-                <button type="button" class="btn icon ghost" data-action="moveQuestion" data-index="${i}" data-dir="1" aria-label="Move ${esc(q)} down" ${i === questions().length - 1 ? 'disabled' : ''}>↓</button>
-                <button type="button" class="btn icon ghost" data-action="renameQuestion" data-index="${i}" aria-label="Rename ${esc(q)}">✎</button>
-                <button type="button" class="btn icon ghost" data-action="removeQuestion" data-index="${i}" aria-label="Remove ${esc(q)}">🗑</button>
-              </div>
-            </li>`,
-              )
-              .join('')}</ul>`
-          : '<p class="empty">No questions. The score out of 10 still shows.</p>'
-      }
-      <div class="input-row">
-        <label for="question-new" class="sr-only">New question</label>
-        <input id="question-new" class="input" placeholder="New question, e.g. Sleep" value="${esc(ui.newQuestion)}" data-input="newQuestion" autocomplete="off" />
-        <button type="button" class="btn" data-action="addQuestion">Add</button>
-      </div>
+    <section class="secpage" data-sec="questions">
+      <p class="sub">Optional, each rated 1–5 after a workout. "How was the workout" (1–10), heart rate and calories are always asked.</p>
+      ${group(
+        'Questions',
+        `<span class="note">${questions().length}</span>`,
+        `<div class="card flush">
+        ${
+          questions().length
+            ? `<div id="question-list">${questions()
+                .map((q, i) =>
+                  erow(
+                    q,
+                    '',
+                    ibtn('up', `data-action="moveQuestion" data-index="${i}" data-dir="-1"`, `Move ${q} up`, i === 0) +
+                      ibtn('down', `data-action="moveQuestion" data-index="${i}" data-dir="1"`, `Move ${q} down`, i === questions().length - 1) +
+                      ibtn('edit', `data-action="renameQuestion" data-index="${i}"`, `Rename ${q}`) +
+                      ibtn('trash', `data-action="removeQuestion" data-index="${i}"`, `Remove ${q}`),
+                  ),
+                )
+                .join('')}</div>`
+            : '<p class="empty pad">No questions. The score out of 10 still shows.</p>'
+        }
+        <div class="addrow input-row">
+          <label for="question-new" class="sr-only">New question</label>
+          <input id="question-new" class="input" placeholder="New question, e.g. Sleep" value="${esc(ui.newQuestion)}" data-input="newQuestion" autocomplete="off" />
+          <button type="button" class="btn" data-action="addQuestion">Add</button>
+        </div>
+      </div>`,
+      )}
     </section>
 
-    <section class="card stack" data-sec="exercises">
-      <h2 class="section-title" style="margin:0">Exercises</h2>
-      <div>
-        <label for="manage-day">Day</label>
-        <select id="manage-day" class="select" data-change="manageDay">
+    <section class="secpage" data-sec="exercises">
+      <p class="sub">Each day's exercises in order, with the plan shown while you log.</p>
+      ${group(
+        'Day',
+        '',
+        `<div class="card flush">${frow(
+          'manage-day',
+          'Editing',
+          '',
+          `<select id="manage-day" class="select fsel" data-change="manageDay">
           ${manageDays()
             .map((d) => `<option value="${esc(d)}" ${d === day ? 'selected' : ''}>${esc(d)}</option>`)
             .join('')}
-        </select>
-      </div>
-      ${
-        list.length
-          ? `<ul class="list" id="exercise-list">${list
-              .map(
-                (name, i) => `
-            <li>
-              <div class="exercise-row">
-                <div class="name">
-                  ${esc(name)}
-                  ${state.targets[day]?.[name] ? `<span class="small muted">Plan: ${esc(state.targets[day][name])}</span>` : ''}
-                  ${
-                    muscleOf(name) || state.settings.steps?.[name]
-                      ? `<span class="small muted">${esc([muscleOf(name), state.settings.steps?.[name] ? `step ${fmtKg(state.settings.steps[name])} kg` : ''].filter(Boolean).join(' · '))}</span>`
-                      : ''
-                  }
-                </div>
-                <button type="button" class="btn icon ghost" data-action="moveExercise" data-index="${i}" data-dir="-1" aria-label="Move ${esc(name)} up" ${i === 0 ? 'disabled' : ''}>↑</button>
-                <button type="button" class="btn icon ghost" data-action="moveExercise" data-index="${i}" data-dir="1" aria-label="Move ${esc(name)} down" ${i === list.length - 1 ? 'disabled' : ''}>↓</button>
-                <button type="button" class="btn icon ghost" data-action="renameExercise" data-index="${i}" aria-label="Rename ${esc(name)}">✎</button>
-                <button type="button" class="btn icon ghost" data-action="removeExercise" data-index="${i}" aria-label="Remove ${esc(name)}">🗑</button>
-              </div>
-            </li>`,
-              )
-              .join('')}</ul>`
-          : '<p class="empty">No exercises for this day yet.</p>'
-      }
-      <div class="input-row">
-        <label for="manage-new" class="sr-only">New exercise</label>
-        <input id="manage-new" class="input" placeholder="New exercise" value="${esc(ui.manageNew)}" data-input="manageNew" autocomplete="off" />
-        <button type="button" class="btn" data-action="manageAdd">Add</button>
-      </div>
-      <div>
-        <label for="cardio-note">After lifting (cardio or finisher)</label>
+        </select>`,
+        )}</div>`,
+      )}
+      ${group(
+        `${day} exercises`,
+        `<span class="note">${list.length}</span>`,
+        `<div class="card flush">
+        ${
+          list.length
+            ? `<div id="exercise-list">${list
+                .map((name, i) =>
+                  erow(
+                    name,
+                    [
+                      state.targets[day]?.[name] ? `Plan ${state.targets[day][name]}` : '',
+                      muscleOf(name),
+                      state.settings.steps?.[name] ? `step ${fmtKg(state.settings.steps[name])} kg` : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' · '),
+                    ibtn('up', `data-action="moveExercise" data-index="${i}" data-dir="-1"`, `Move ${name} up`, i === 0) +
+                      ibtn('down', `data-action="moveExercise" data-index="${i}" data-dir="1"`, `Move ${name} down`, i === list.length - 1) +
+                      ibtn('edit', `data-action="renameExercise" data-index="${i}"`, `Rename ${name}`) +
+                      ibtn('trash', `data-action="removeExercise" data-index="${i}"`, `Remove ${name}`),
+                  ),
+                )
+                .join('')}</div>`
+            : '<p class="empty pad">No exercises for this day yet.</p>'
+        }
+        <div class="addrow input-row">
+          <label for="manage-new" class="sr-only">New exercise</label>
+          <input id="manage-new" class="input" placeholder="New exercise" value="${esc(ui.manageNew)}" data-input="manageNew" autocomplete="off" />
+          <button type="button" class="btn" data-action="manageAdd">Add</button>
+        </div>
+      </div>`,
+      )}
+      ${group(
+        'After lifting',
+        '',
+        `<section class="card stack">
+        <label for="cardio-note" class="sr-only">After lifting (cardio or finisher)</label>
         <input id="cardio-note" class="input" placeholder="e.g. Incline walk, 15 min" value="${esc(state.cardio[day] || '')}" data-change="cardioNote" autocomplete="off" />
-      </div>
+        <p class="hint" style="margin:0">Cardio or a finisher, shown at the end of the ${esc(day)} workout.</p>
+      </section>`,
+      )}
     </section>
 
     ${renderSettingsCopy()}
 
-    <section class="card stack" data-sec="backup">
-      <h2 class="section-title" style="margin:0">Backup</h2>
-      <button type="button" class="btn secondary" data-action="exportData">Export local data (JSON)</button>
-      <button type="button" class="btn secondary" data-action="importData">Import from JSON…</button>
-      <input id="import-file" type="file" accept="application/json,.json" class="sr-only" data-change="importFile" />
-      <p class="hint">The export includes workouts, measurements, settings, your script URL and token so a new phone can be set up from it. Keep the file private. Photos are not in it: they have their own encrypted backup on the Photos screen.</p>
+    <section class="secpage" data-sec="backup">
+      <p class="sub">A file with everything except photos, for moving to a new phone.</p>
+      ${group(
+        'Export and import',
+        '',
+        `<section class="card stack">
+        <button type="button" class="btn secondary" data-action="exportData">Export local data (JSON)</button>
+        <button type="button" class="btn secondary" data-action="importData">Import from JSON…</button>
+        <input id="import-file" type="file" accept="application/json,.json" class="sr-only" data-change="importFile" />
+        <p class="hint" style="margin:0">The export includes workouts, measurements, settings, your script URL and token so a new phone can be set up from it. Keep the file private. Photos are not in it: they have their own encrypted backup on the Photos screen.</p>
+      </section>`,
+      )}
       <p class="version">Bhimlekha v${esc(APP_VERSION)} · भीमलेखा</p>
     </section>`;
 }
@@ -2494,37 +2638,41 @@ function renderScheduleSettings() {
   const days = [1, 2, 3, 4, 5, 6, 0];
   const options = [...new Set([...manageDays().filter((d) => d !== 'Custom'), ...Object.values(sched).filter(Boolean)])];
   return `
-    <section class="card stack" data-sec="schedule">
-      <div>
-        <h2 class="section-title" style="margin:0">Schedule & missed workouts</h2>
-        <p class="hint">Home suggests the day's workout. A scheduled day that passes with no workout is marked missed (you don't make it up; the next day's workout follows), asks for a reason, and goes to the Sheet's Missed tab.</p>
-      </div>
-      <div class="two">
-        ${days
-          .map(
-            (d) => `<div>
-              <label for="sched-${d}">${WEEKDAYS[d]}</label>
-              <select id="sched-${d}" class="select" data-change="scheduleDay" data-dow="${d}">
+    <section class="secpage" data-sec="schedule">
+      <p class="sub">Today suggests the day's workout. A scheduled day that passes with no workout is marked missed (you don't make it up; the next day's workout follows), asks for a reason, and goes to the Sheet's Missed tab.</p>
+      ${group(
+        'Week',
+        `<span class="note">${days.filter((d) => sched[d]).length} training days</span>`,
+        `<div class="card flush">${days
+          .map((d) =>
+            frow(
+              `sched-${d}`,
+              WEEKDAYS[d],
+              '',
+              `<select id="sched-${d}" class="select fsel" data-change="scheduleDay" data-dow="${d}">
                 <option value="" ${!sched[d] ? 'selected' : ''}>Rest</option>
                 ${options.map((o) => `<option value="${esc(o)}" ${sched[d] === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}
-              </select>
-            </div>`,
+              </select>`,
+            ),
           )
-          .join('')}
-      </div>
-      <p class="hint" style="margin:0">Missed days are counted from ${esc(formatDate(state.settings.scheduleFrom || todayISO()))}. Each one pauses its exercises' clocks and pushes the lighter week back (Progression below).</p>
-      <fieldset>
-        <legend>Reasons for a missed day</legend>
+          .join('')}</div>
+        <p class="hint gnote">Missed days are counted from ${esc(formatDate(state.settings.scheduleFrom || todayISO()))}. Each one pauses its exercises' clocks and pushes the lighter week back (see Progression).</p>`,
+      )}
+      ${group(
+        'Reasons for a missed day',
+        '',
+        `<section class="card stack">
         <div class="pills">${missReasons()
           .map((r, i) => `<span class="pill">${esc(r)}<button type="button" class="pill-x" data-action="removeReason" data-index="${i}" aria-label="Remove ${esc(r)}">×</button></span>`)
           .join('')}</div>
-        <div class="input-row" style="margin-top:8px">
+        <div class="input-row">
           <label for="reason-new" class="sr-only">New reason</label>
           <input id="reason-new" class="input" placeholder="e.g. Exams" value="${esc(state.ui.newReason)}" data-input="newReason" autocomplete="off" />
           <button type="button" class="btn" data-action="addReason">Add</button>
         </div>
-        <p class="hint">"Other" asks for your own words. Changing the list never changes reasons already given.</p>
-      </fieldset>
+        <p class="hint" style="margin:0">"Other" asks for your own words. Changing the list never changes reasons already given.</p>
+      </section>`,
+      )}
     </section>`;
 }
 
@@ -2545,19 +2693,22 @@ function renderSettingsCopy() {
   const b = state.backup;
   const status = settingsCopyStatus();
   return `
-    <section class="card stack" data-sec="copy">
-      <div>
-        <h2 class="section-title" style="margin:0">Settings copy in the Sheet</h2>
-        <p class="hint">Exercises, plans, schedule, buttons, questions, progression, recovery and lighter weeks are saved to the Sheet's Settings tab after every change, so a new phone gets them back. The Sheet URL and token are not in it; photos never are.</p>
-      </div>
-      <p class="small" style="margin:0" id="backup-status">${status}</p>
-      ${
-        !b.linked && b.remoteAt
-          ? `<button type="button" class="btn primary" data-action="restoreSettings">Use the Sheet's settings</button>
-             <button type="button" class="btn secondary" data-action="keepPhoneSettings">Keep this phone's settings</button>`
-          : `<button type="button" class="btn secondary" data-action="backupSettingsNow" ${haveApi() ? '' : 'disabled'}>Save to Sheet now</button>
-             <button type="button" class="btn secondary" data-action="restoreSettings" ${haveApi() ? '' : 'disabled'}>Restore from the Sheet…</button>`
-      }
+    <section class="secpage" data-sec="copy">
+      <p class="sub">Exercises, plans, schedule, buttons, questions, progression, recovery and lighter weeks are saved to the Sheet's Settings tab after every change, so a new phone gets them back. The Sheet URL and token are not in it; photos never are.</p>
+      ${group(
+        'Status',
+        b.linked && !b.dirty && b.sentAt ? tag('Saved', 'ok') : b.dirty ? tag('Waiting', 'warn') : '',
+        `<section class="card stack">
+        <p class="small" style="margin:0" id="backup-status">${status}</p>
+        ${
+          !b.linked && b.remoteAt
+            ? `<button type="button" class="btn primary" data-action="restoreSettings">Use the Sheet's settings</button>
+               <button type="button" class="btn secondary" data-action="keepPhoneSettings">Keep this phone's settings</button>`
+            : `<button type="button" class="btn secondary" data-action="backupSettingsNow" ${haveApi() ? '' : 'disabled'}>Save to Sheet now</button>
+               <button type="button" class="btn secondary" data-action="restoreSettings" ${haveApi() ? '' : 'disabled'}>Restore from the Sheet…</button>`
+        }
+      </section>`,
+      )}
     </section>`;
 }
 
@@ -2567,7 +2718,7 @@ const PROGRESSION_FIELDS = [
   ['topTolerance', 'Reps below the top still counted', '1 means 11 of 12 counts as reaching the top.', 1],
   ['readySessions', 'Sessions in a row at the target', 'How many times the target must be hit before adding weight.', 1],
   ['readyMinDays', 'Week timer (days)', 'The first and last of those sessions must be at least this far apart.', 1],
-  ['stepUpper', 'Weight step, upper body (kg)', 'Override per exercise in Exercises below.', 0.5],
+  ['stepUpper', 'Weight step, upper body (kg)', 'An exercise’s own step (Exercises & plans) overrides it.', 0.5],
   ['stepLower', 'Weight step, lower body (kg)', 'Legs, glutes, calves, lower back.', 0.5],
   ['maintainBand', 'Maintained band (± %)', 'Changes in estimated max smaller than this count as maintained.', 0.5],
   ['avgWindow', 'Sessions in the rolling average', 'Each workout is also compared with this many earlier sessions.', 1],
@@ -2583,24 +2734,25 @@ const PROGRESSION_FIELDS = [
   ['neglectDays', 'Flag a muscle not trained for over (days)', 'Shown on Home. 0 turns it off.', 1],
 ];
 
+// The progression fields in groups on their settings page.
+const PROGRESSION_GROUPS = [
+  ['Adding weight', ['readyRir', 'topTolerance', 'readySessions', 'readyMinDays', 'stepUpper', 'stepLower', 'watchDays']],
+  ['Comparing workouts', ['maintainBand', 'avgWindow']],
+  ['Warnings', ['shortfallDays', 'stagnantDays', 'stallSessions', 'dropSessions', 'neglectDays']],
+  ['Weekly hard sets per muscle', ['muscleSetsMin', 'muscleSetsMax']],
+  ['Missed workouts', ['missedPauseDays', 'missedSchedDays']],
+];
+
 function renderProgressionSettings() {
   const p = state.settings.progression;
+  const byKey = Object.fromEntries(PROGRESSION_FIELDS.map((f) => [f[0], f]));
+  const field = ([key, label, hint, step]) =>
+    frow(`prog-${key}`, label, hint, `<input id="prog-${key}" class="input fnum" type="number" inputmode="decimal" min="0" step="${step}" value="${esc(p[key])}" data-change="progression" data-key="${key}" />`);
   return `
-    <section class="card stack" data-sec="progression">
-      <div>
-        <h2 class="section-title" style="margin:0">Progression</h2>
-        <p class="hint">Double progression: keep the weight until every set reaches the top of the plan's rep range with reps in reserve, in enough sessions spread over the week timer, then add a step. Rep ranges come from each exercise's plan (Exercises below).</p>
-      </div>
-      <div class="two">
-        ${PROGRESSION_FIELDS.map(
-          ([key, label, hint, step]) => `<div>
-            <label for="prog-${key}">${esc(label)}</label>
-            <input id="prog-${key}" class="input" type="number" inputmode="decimal" min="0" step="${step}" value="${esc(p[key])}" data-change="progression" data-key="${key}" />
-            ${hint ? `<p class="hint">${esc(hint)}</p>` : ''}
-          </div>`,
-        ).join('')}
-      </div>
-      <button type="button" class="btn secondary" data-action="resetProgression">Restore the defaults</button>
+    <section class="secpage" data-sec="progression">
+      <p class="sub">Double progression: keep the weight until every set reaches the top of the plan's rep range with reps in reserve, in enough sessions spread over the week timer, then add a step. Rep ranges come from each exercise's plan (Exercises &amp; plans).</p>
+      ${PROGRESSION_GROUPS.map(([title, keys]) => group(title, '', `<div class="card flush">${keys.map((k) => field(byKey[k])).join('')}</div>`)).join('')}
+      <div class="sgroup"><button type="button" class="btn secondary" data-action="resetProgression">Restore the defaults</button></div>
     </section>`;
 }
 
@@ -2614,27 +2766,23 @@ const RECOVERY_TRIGGERS = [
 
 function renderRecoverySettings() {
   const r = state.settings.recovery;
-  const num = (key, label, step) => `<div>
-      <label for="rec-${key}">${esc(label)}</label>
-      <input id="rec-${key}" class="input" type="number" inputmode="decimal" min="0" step="${step}" value="${esc(r[key])}" data-change="recoveryNum" data-key="${key}" />
-    </div>`;
+  const num = (key, label, step) =>
+    frow(`rec-${key}`, label, '', `<input id="rec-${key}" class="input fnum" type="number" inputmode="decimal" min="0" step="${step}" value="${esc(r[key])}" data-change="recoveryNum" data-key="${key}" />`);
   return `
-    <section class="card stack" data-sec="recovery">
-      <div>
-        <h2 class="section-title" style="margin:0">Recovery (lighter week)</h2>
-        <p class="hint">The alert fires when any switched-on trigger is met. Workouts during a lighter week are left out of progress, so they never set off warnings.</p>
-      </div>
-      ${RECOVERY_TRIGGERS.map(
-        ([on, title, fields]) => `<fieldset class="trigger">
-          <label class="check"><input type="checkbox" data-change="recoveryToggle" data-key="${on}" ${r[on] ? 'checked' : ''} /> ${esc(title)}</label>
-          <div class="two">${fields.map(([k, l, s]) => num(k, l, s)).join('')}</div>
-        </fieldset>`,
+    <section class="secpage" data-sec="recovery">
+      <p class="sub">The lighter-week alert fires when any switched-on trigger is met. Workouts during a lighter week are left out of progress, so they never set off warnings.</p>
+      ${RECOVERY_TRIGGERS.map(([on, title, fields]) =>
+        group(
+          title,
+          '',
+          `<div class="card flush ${r[on] ? '' : 'off'}">
+            <label class="check switch"><span><b>${r[on] ? 'On' : 'Off'}</b></span><input type="checkbox" data-change="recoveryToggle" data-key="${on}" ${r[on] ? 'checked' : ''} aria-label="${esc(title)}" /></label>
+            ${fields.map(([k, l, s]) => num(k, l, s)).join('')}
+          </div>`,
+        ),
       ).join('')}
-      <div class="two">
-        ${num('lengthDays', 'Lighter week length (days)', 1)}
-        ${num('snoozeDays', '"Not now" hides it for (days)', 1)}
-      </div>
-      <button type="button" class="btn secondary" data-action="resetRecovery">Restore the defaults</button>
+      ${group('Lighter week', '', `<div class="card flush">${num('lengthDays', 'Length (days)', 1)}${num('snoozeDays', '"Not now" hides it for (days)', 1)}</div>`)}
+      <div class="sgroup"><button type="button" class="btn secondary" data-action="resetRecovery">Restore the defaults</button></div>
     </section>`;
 }
 
@@ -2642,62 +2790,73 @@ function renderBodySettings() {
   const s = state.settings;
   const ui = state.ui;
   const listEditor = (items, removeAction, moveAction) =>
-    `<ul class="list">${items
-      .map(
-        (f, i) => `<li><div class="exercise-row">
-          <div class="name">${esc(f)}</div>
-          <button type="button" class="btn icon ghost" data-action="${moveAction}" data-index="${i}" data-dir="-1" aria-label="Move ${esc(f)} up" ${i === 0 ? 'disabled' : ''}>↑</button>
-          <button type="button" class="btn icon ghost" data-action="${moveAction}" data-index="${i}" data-dir="1" aria-label="Move ${esc(f)} down" ${i === items.length - 1 ? 'disabled' : ''}>↓</button>
-          <button type="button" class="btn icon ghost" data-action="${removeAction}" data-index="${i}" aria-label="Remove ${esc(f)}">🗑</button>
-        </div></li>`,
+    items
+      .map((f, i) =>
+        erow(
+          f,
+          '',
+          ibtn('up', `data-action="${moveAction}" data-index="${i}" data-dir="-1"`, `Move ${f} up`, i === 0) +
+            ibtn('down', `data-action="${moveAction}" data-index="${i}" data-dir="1"`, `Move ${f} down`, i === items.length - 1) +
+            ibtn('trash', `data-action="${removeAction}" data-index="${i}"`, `Remove ${f}`),
+        ),
       )
-      .join('')}</ul>`;
+      .join('');
   return `
-    <section class="card stack" data-sec="body">
-      <h2 class="section-title" style="margin:0">Body & photos</h2>
-      <div>
-        <label for="checkin-day">Check-in day</label>
-        <select id="checkin-day" class="select" data-change="checkinDay">
+    <section class="secpage" data-sec="body">
+      <p class="sub">The weekly check-in, its measurements and the progress photo poses.</p>
+      ${group(
+        'Weekly check-in',
+        '',
+        `<div class="card flush">
+        ${frow(
+          'checkin-day',
+          'Check-in day',
+          'Photo folders run to this day: Sunday makes each week Monday to Sunday',
+          `<select id="checkin-day" class="select fsel" data-change="checkinDay">
           ${WEEKDAYS.map((d, i) => `<option value="${i}" ${Number(s.checkinDay) === i ? 'selected' : ''}>${d}</option>`).join('')}
-        </select>
-        <p class="hint">Photo folders run to this day: a Sunday check-in makes each week Monday to Sunday.</p>
-      </div>
-      <div>
-        <label for="program-start">Week 1 starts in the week of</label>
-        <input id="program-start" class="input" type="date" value="${esc(s.programStart || '')}" data-change="programStart" />
-        <p class="hint">${
-          s.programStart ? 'Clear it to count from your first logged workout.' : `Blank: your first logged workout${programStart() ? ` (${esc(formatDate(programStart()))})` : ''}.`
-        } Names the Files folders, e.g. "${esc(photoWeek(todayISO()).folder)}".</p>
-      </div>
-      <fieldset>
-        <legend>Measurements</legend>
+        </select>`,
+        )}
+        ${frow(
+          'program-start',
+          'Week 1 starts',
+          `${s.programStart ? 'Clear it to count from your first logged workout.' : `Blank: your first logged workout${programStart() ? ` (${formatDate(programStart())})` : ''}.`} Names the Files folders, e.g. "${photoWeek(todayISO()).folder}".`,
+          `<input id="program-start" class="input fdate" type="date" value="${esc(s.programStart || '')}" data-change="programStart" />`,
+        )}
+      </div>`,
+      )}
+      ${group(
+        'Measurements',
+        `<span class="note">${measureFields().length}</span>`,
+        `<div class="card flush">
         ${listEditor(measureFields(), 'removeField', 'moveField')}
-        <div class="input-row" style="margin-top:8px">
+        <div class="addrow input-row">
           <label for="field-new" class="sr-only">New measurement</label>
           <input id="field-new" class="input" placeholder="e.g. Calf (cm)" value="${esc(ui.newField)}" data-input="newField" autocomplete="off" />
           <button type="button" class="btn" data-action="addField">Add</button>
         </div>
-        <p class="hint">Put the unit in brackets. A field with "weight" in its name is the bodyweight. Each one becomes a column in the Sheet's Measurements tab.</p>
-      </fieldset>
-      <fieldset>
-        <legend>Photo poses</legend>
+      </div>
+      <p class="hint gnote">Put the unit in brackets. A field with "weight" in its name is the bodyweight. Each one becomes a column in the Sheet's Measurements tab.</p>`,
+      )}
+      ${group(
+        'Photo poses',
+        `<span class="note">${poses().length}</span>`,
+        `<div class="card flush">
         ${listEditor(poses(), 'removePose', 'movePose')}
-        <div class="input-row" style="margin-top:8px">
+        <div class="addrow input-row">
           <label for="pose-new" class="sr-only">New pose</label>
           <input id="pose-new" class="input" placeholder="e.g. Front flexed" value="${esc(ui.newPose)}" data-input="newPose" autocomplete="off" />
           <button type="button" class="btn" data-action="addPose">Add</button>
         </div>
-      </fieldset>
-      <div class="two">
-        <div>
-          <label for="cam-timer">Camera timer (s)</label>
-          <input id="cam-timer" class="input" type="number" inputmode="numeric" min="0" max="30" value="${esc(s.cameraTimer)}" data-change="cameraTimer" />
-        </div>
-        <div>
-          <label for="auto-lock">Vault auto-lock (min)</label>
-          <input id="auto-lock" class="input" type="number" inputmode="numeric" min="1" max="60" value="${esc(s.autoLockMinutes)}" data-change="autoLockMinutes" />
-        </div>
-      </div>
+      </div>`,
+      )}
+      ${group(
+        'Camera & vault',
+        '',
+        `<div class="card flush">
+        ${frow('cam-timer', 'Camera timer', 'Seconds, 0 = off', `<input id="cam-timer" class="input fnum" type="number" inputmode="numeric" min="0" max="30" value="${esc(s.cameraTimer)}" data-change="cameraTimer" />`)}
+        ${frow('auto-lock', 'Vault auto-lock', 'Minutes without a tap', `<input id="auto-lock" class="input fnum" type="number" inputmode="numeric" min="1" max="60" value="${esc(s.autoLockMinutes)}" data-change="autoLockMinutes" />`)}
+      </div>`,
+      )}
     </section>`;
 }
 
@@ -2715,44 +2874,55 @@ function renderCalorieSettings() {
   const p = state.settings.profile || {};
   const c = state.settings.calories;
   return `
-    <section class="card stack" data-sec="calories">
-      <h2 class="section-title" style="margin:0">Calories &amp; body fat</h2>
-      <p class="hint" style="margin:0">Body fat: US Navy tape method from the check-in (men: neck and abdomen at the navel; women: neck, waist and hips). Calories: Katch-McArdle with a recent body fat reading, else Mifflin-St Jeor.</p>
-      <div class="two">
-        <div>
-          <label for="pf-sex">Sex (for the formulas)</label>
-          <select id="pf-sex" class="select" data-change="profileSex">
+    <section class="secpage" data-sec="calories">
+      <p class="sub">Body fat: US Navy tape method from the check-in (men: neck and abdomen at the navel; women: neck, waist and hips). Calories: Katch-McArdle with a recent body fat reading, else Mifflin-St Jeor.</p>
+      ${group(
+        'About you',
+        '',
+        `<div class="card flush">
+        ${frow(
+          'pf-sex',
+          'Sex',
+          'For the formulas',
+          `<select id="pf-sex" class="select fsel" data-change="profileSex">
             <option value="male" ${p.sex !== 'female' ? 'selected' : ''}>Male</option>
             <option value="female" ${p.sex === 'female' ? 'selected' : ''}>Female</option>
-          </select>
-        </div>
-        <div>
-          <label for="pf-height">Height (cm)</label>
-          <input id="pf-height" class="input" type="number" inputmode="decimal" step="0.5" min="120" max="230" value="${esc(p.heightCm ?? '')}" data-change="profileHeight" />
-        </div>
-      </div>
-      <div>
-        <label for="pf-dob">Date of birth</label>
-        <input id="pf-dob" class="input" type="date" value="${esc(p.dob || '')}" data-change="profileDob" />
-      </div>
-      <div>
-        <label for="cal-goal">Goal</label>
-        <select id="cal-goal" class="select" data-change="calorieGoal">
+          </select>`,
+        )}
+        ${frow('pf-height', 'Height', 'cm', `<input id="pf-height" class="input fnum" type="number" inputmode="decimal" step="0.5" min="120" max="230" value="${esc(p.heightCm ?? '')}" data-change="profileHeight" />`)}
+        ${frow('pf-dob', 'Date of birth', '', `<input id="pf-dob" class="input fdate" type="date" value="${esc(p.dob || '')}" data-change="profileDob" />`)}
+      </div>`,
+      )}
+      ${group(
+        'Goal',
+        '',
+        `<div class="card flush">
+        ${frow(
+          'cal-goal',
+          'Goal',
+          '',
+          `<select id="cal-goal" class="select fsel" data-change="calorieGoal">
           ${['lose', 'maintain', 'gain'].map((g) => `<option value="${g}" ${c.goal === g ? 'selected' : ''}>${g[0].toUpperCase() + g.slice(1)} weight</option>`).join('')}
-        </select>
-      </div>
-      ${CALORIE_FIELDS.map(
-        ([key, label, step, min, max, hint]) => `<div>
-          <label for="cal-${key}">${esc(label)}</label>
-          <input id="cal-${key}" class="input" type="number" inputmode="decimal" step="${step}" min="${min}" max="${max}" value="${esc(c[key])}" data-key="${key}" data-min="${min}" data-max="${max}" data-change="calorieNum" />
-          ${hint ? `<p class="hint">${esc(hint)}</p>` : ''}
-        </div>`,
-      ).join('')}
-      <label class="check">
-        <input type="checkbox" data-change="calorieFloor" ${c.floorBmr !== false ? 'checked' : ''} />
-        Never below my resting burn (else never below 1,200 kcal)
-      </label>
-      <button type="button" class="btn secondary" data-action="resetCalories">Reset to defaults</button>
+        </select>`,
+        )}
+        ${CALORIE_FIELDS.slice(0, 1)
+          .map(([key, label, step, min, max, hint]) =>
+            frow(`cal-${key}`, label, hint, `<input id="cal-${key}" class="input fnum" type="number" inputmode="decimal" step="${step}" min="${min}" max="${max}" value="${esc(c[key])}" data-key="${key}" data-min="${min}" data-max="${max}" data-change="calorieNum" />`),
+          )
+          .join('')}
+        <label class="check switch"><span><b>Never below my resting burn</b><span>Off: never below 1,200 kcal</span></span><input type="checkbox" data-change="calorieFloor" ${c.floorBmr !== false ? 'checked' : ''} /></label>
+      </div>`,
+      )}
+      ${group(
+        'How it is worked out',
+        '',
+        `<div class="card flush">${CALORIE_FIELDS.slice(1)
+          .map(([key, label, step, min, max, hint]) =>
+            frow(`cal-${key}`, label, hint, `<input id="cal-${key}" class="input fnum" type="number" inputmode="decimal" step="${step}" min="${min}" max="${max}" value="${esc(c[key])}" data-key="${key}" data-min="${min}" data-max="${max}" data-change="calorieNum" />`),
+          )
+          .join('')}</div>`,
+      )}
+      <div class="sgroup"><button type="button" class="btn secondary" data-action="resetCalories">Reset to defaults</button></div>
     </section>`;
 }
 
@@ -2771,18 +2941,28 @@ const RECOVERY_SCORE_FIELDS = [
 function renderRecoveryScoreSettings() {
   const r = state.settings.recoveryScore;
   return `
-    <section class="card stack" data-sec="recoveryScore">
-      <h2 class="section-title" style="margin:0">Recovery score</h2>
-      <p class="hint" style="margin:0">Each morning: sleep, HRV and resting HR come from an iPhone Shortcut; soreness and the Watch sleep score you tap on Home. HRV and resting HR are judged against your own last ${esc(r.baselineDays)} days, not fixed numbers. Advice only: nothing is locked.</p>
-      <div class="two">
-        ${RECOVERY_SCORE_FIELDS.map(
-          ([key, label, step, min, max]) => `<div>
-            <label for="rs-${key}">${esc(label)}</label>
-            <input id="rs-${key}" class="input" type="number" inputmode="decimal" step="${step}" min="${min}" max="${max}" value="${esc(r[key])}" data-key="${key}" data-min="${min}" data-max="${max}" data-change="recoveryScoreNum" />
-          </div>`,
-        ).join('')}
-      </div>
-      <button type="button" class="btn secondary" data-action="resetRecoveryScore">Reset to defaults</button>
+    <section class="secpage" data-sec="recoveryScore">
+      <p class="sub">Each morning: sleep, HRV and resting HR come from an iPhone Shortcut; soreness and the Watch sleep score you tap on Today. HRV and resting HR are judged against your own last ${esc(r.baselineDays)} days, not fixed numbers. Advice only: nothing is locked.</p>
+      ${[
+        ['Sleep', ['sleepTargetH']],
+        ['Weights', ['wSleep', 'wHrv', 'wRhr', 'wSoreness']],
+        ['Bands', ['green', 'amber']],
+        ['Baseline', ['baselineDays', 'minBaseline']],
+      ]
+        .map(([title, keys]) =>
+          group(
+            title,
+            title === 'Weights' ? '<span class="note">rescaled to what is present</span>' : '',
+            `<div class="card flush">${RECOVERY_SCORE_FIELDS.filter((f) => keys.includes(f[0]))
+              .map(([key, label, step, min, max]) =>
+                frow(`rs-${key}`, label.replace(/^Weight: /, ''), '', `<input id="rs-${key}" class="input fnum" type="number" inputmode="decimal" step="${step}" min="${min}" max="${max}" value="${esc(r[key])}" data-key="${key}" data-min="${min}" data-max="${max}" data-change="recoveryScoreNum" />`),
+              )
+              .join('')}</div>`,
+          ),
+        )
+        .join('')}
+      <div class="sgroup"><button type="button" class="btn secondary" data-action="resetRecoveryScore">Reset to defaults</button></div>
+      ${group('Morning Shortcut', '', `<div class="card">
       <details class="shortcut-help">
         <summary><strong>Set up the morning Shortcut (once)</strong></summary>
         <p class="small">Shortcuts app → <strong>Automation</strong> → <strong>+</strong> → <strong>Time of Day</strong> (e.g. 9:00 AM, Daily) → <strong>Run Immediately</strong> → New Blank Automation. Add these actions in order:</p>
@@ -2792,11 +2972,11 @@ function renderRecoveryScoreSettings() {
           <li>After the repeat: <strong>Combine Text</strong> <code>Spans</code> with Custom separator <code>;</code></li>
           <li><strong>Find Health Samples</strong>: Type <em>Resting Heart Rate</em>, Start Date <em>is in the last 1 day</em>, Sort by Start Date Latest First, Limit 1.</li>
           <li><strong>Find Health Samples</strong>: Type <em>Heart Rate Variability</em>, Start Date <em>is in the last 12 hours</em>. Then <strong>Calculate Statistics</strong>: Average of those samples.</li>
-          <li><strong>Get Contents of URL</strong>: your Apps Script URL (Settings above), Method <em>POST</em>, Request Body <em>JSON</em> with fields:
+          <li><strong>Get Contents of URL</strong>: your Apps Script URL (More → Google Sheet), Method <em>POST</em>, Request Body <em>JSON</em> with fields:
             <code>token</code> (Text, your token) · <code>action</code> (Text: <code>recovery</code>) · <code>sleep</code> (Text: Combined Text) · <code>rhr</code> (Number: the Resting Heart Rate sample) · <code>hrv</code> (Number: the Average).</li>
         </ol>
         <p class="small">Run it once by hand and allow Health access. The Sheet's <strong>Recovery</strong> tab gets today's row and Home shows "From your Watch". The Watch and the iPhone often both record a night; the overlap is counted once.</p>
-      </details>
+      </details></div>`)}
     </section>`;
 }
 
@@ -3100,6 +3280,20 @@ const actions = {
   },
 
   /** Today's "Start <day>": the scheduled day for today, no questions asked. */
+  /** One tap on a day on the Workout tab starts it on the chosen date (today unless changed). */
+  quickStart(el) {
+    const st = state.ui.start;
+    state.ui.start = { ...st, dayType: el.dataset.day, custom: '', date: /^\d{4}-\d{2}-\d{2}$/.test(st.date) ? st.date : todayISO() };
+    state.ui.startPicked = true;
+    return actions.startWorkout();
+  },
+
+  startCustomDay() {
+    state.ui.start.dayType = 'Custom';
+    state.ui.startPicked = true;
+    return actions.startWorkout();
+  },
+
   startToday() {
     const today = todayISO();
     const planned = scheduledDay(today);
@@ -3137,10 +3331,13 @@ const actions = {
     render();
   },
 
+  /** One tap answers the morning check: the soreness is saved at once, with any sleep score typed above it. */
   morningSoreness(el) {
     const v = Number(el.dataset.value);
-    state.ui.morning.soreness = state.ui.morning.soreness === v ? null : v;
-    render();
+    const box = document.getElementById('sleep-score');
+    if (box) state.ui.morning.sleepScore = box.value;
+    state.ui.morning.soreness = v;
+    actions.morningSave();
   },
 
   morningSave() {
@@ -3615,6 +3812,12 @@ const actions = {
 };
 
 const changes = {
+  /** The weigh-in saves when the keyboard closes (Done), so the Save button is only a fallback. */
+  weighInCommit(el) {
+    state.ui.body.weighIn = el.value;
+    const v = Number(el.value);
+    if (el.value !== '' && Number.isFinite(v) && v > 0) actions.saveWeighIn();
+  },
   startDay(el) {
     state.ui.start.dayType = el.value;
     state.ui.startPicked = true;
@@ -3681,6 +3884,7 @@ const changes = {
   recoveryToggle(el) {
     state.settings.recovery = { ...state.settings.recovery, [el.dataset.key]: el.checked };
     save(KEYS.settings, state.settings);
+    render(); // the trigger's card shows On / Off
   },
   recoveryNum(el) {
     const key = el.dataset.key;
@@ -4199,11 +4403,11 @@ async function syncOutbox({ manual = false } = {}) {
   render();
 }
 
-async function syncHistoryFromSheet() {
-  if (!haveApi()) return toast('Add the script URL and token in Settings', 'error');
+async function syncHistoryFromSheet(quiet = false) {
+  if (!haveApi()) return toast('Add the script URL and token in More → Google Sheet', 'error');
   if (state.ui.syncing) return;
   state.ui.syncing = true;
-  state.ui.historySync = 'Fetching from the Sheet…';
+  state.ui.historySync = quiet ? '' : 'Fetching from the Sheet…';
   render();
   try {
     const data = await apiGet({ action: 'history', days: 400 });
@@ -4225,17 +4429,17 @@ async function syncHistoryFromSheet() {
     await syncMissedFromSheet();
     await syncSmallFromSheet();
     detectMissed();
-    state.ui.historySync = `Loaded ${incoming.length} workout${incoming.length === 1 ? '' : 's'} from the last 400 days.`;
+    state.ui.historySync = quiet ? '' : `Loaded ${incoming.length} workout${incoming.length === 1 ? '' : 's'} from the last 400 days.`;
   } catch (err) {
-    state.ui.historySync = describeError(err);
+    state.ui.historySync = quiet ? '' : describeError(err);
   } finally {
     state.ui.syncing = false;
   }
   render();
 }
 
-async function syncMeasurementsFromSheet() {
-  if (!haveApi()) return toast('Add the script URL and token in Settings', 'error');
+async function syncMeasurementsFromSheet(quiet = false) {
+  if (!haveApi()) return toast('Add the script URL and token in More → Google Sheet', 'error');
   if (state.ui.syncing) return;
   state.ui.syncing = true;
   render();
@@ -4251,9 +4455,9 @@ async function syncMeasurementsFromSheet() {
     }
     state.measurements = [...byId.values()];
     save(KEYS.measurements, state.measurements);
-    toast(`Loaded ${incoming.length} measurement entr${incoming.length === 1 ? 'y' : 'ies'}`);
+    if (!quiet) toast(`Loaded ${incoming.length} measurement entr${incoming.length === 1 ? 'y' : 'ies'}`);
   } catch (err) {
-    toast(describeError(err), 'error');
+    if (!quiet) toast(describeError(err), 'error');
   } finally {
     state.ui.syncing = false;
   }

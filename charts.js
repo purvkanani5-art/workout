@@ -77,6 +77,7 @@ const Charts = (() => {
         ${opts.title ? `<figcaption class="chart-title">${esc(opts.title)}</figcaption>` : ''}
         <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(`${opts.title || 'Chart'}: ${points.length} points, latest ${lastLabel}`)}">
           ${grid.join('')}
+          ${xy.length > 1 ? `<path class="area" d="${path} L${xy[xy.length - 1][0].toFixed(1)},${H - PAD.b} L${xy[0][0].toFixed(1)},${H - PAD.b} Z" />` : ''}
           <path class="series" d="${path}" />
           ${xy.map(([a, b]) => `<circle class="dot" cx="${a.toFixed(1)}" cy="${b.toFixed(1)}" r="4" />`).join('')}
           <text class="direct" x="${Math.min(last[0], W - PAD.r)}" y="${last[1] - PAD.t < 22 ? last[1] + 20 : last[1] - 10}" text-anchor="end">${esc(lastLabel)}</text>

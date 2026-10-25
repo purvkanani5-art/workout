@@ -403,3 +403,15 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     action `openExercise` → the panel's action is `openLog`). `topbar()` now draws the back link + large title, so
     History, Progress, Photos and exercise pages share the new header; Review is "Workout finished" with Summary,
     Progress insight and How was it? cards; settings sections hide their own title (the page title shows it).
+27. **v2.1.0: every inner page in the new design, fewer taps** (owner: "modern, intuitive, automated, less buttons
+    pressing and typing"). Shared pieces in app.js: `tag()` status pills, `tiles()`, `frow()` settings form rows (label
+    left, compact field right), `erow()` + `ibtn()` edit rows with line icons (no ✎/🗑 emoji), `setLine()`, `notice()`
+    for Needs-attention items (still class `banner`), `icon()` line icons in place of emoji, `ringGauge()`. Settings
+    sections are `section.secpage[data-sec]` holding groups; checkboxes in settings are iOS switches
+    (`label.check.switch`). History groups by month; Progress, exercise, Body and Photos pages use groups, tiles and
+    rows; chart switches are a segmented control (`.segctl`); dialogs are bottom panels with a grab handle.
+    Automation: tapping a soreness number saves the morning check (no Save; sleep score is typed first); the weigh-in
+    saves when its field is left; the Workout tab starts a day with one tap (`quickStart`, date chip defaults to
+    today; Custom day folds open); History and Body pull from the Sheet by themselves at most every 6 h
+    (`autoPull`, quiet, `wt.pulledAt.*`), Sync now stays as a link; the check-in's bodyweight is prefilled from
+    today's weigh-in. The "next lighter week" line sits under Training on Today (not counted as attention).

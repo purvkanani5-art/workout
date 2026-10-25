@@ -23,9 +23,10 @@ function inRange(date, rangeKey) {
 }
 
 function segmented(name, options, value, change) {
-  return `<div class="segments compact" role="radiogroup" aria-label="${esc(name)}">${options
+  // An iOS-style segmented control; it scrolls sideways when there are more options than fit.
+  return `<div class="segctl" role="radiogroup" aria-label="${esc(name)}">${options
     .map(
-      (o) => `<label class="seg ${o.key === value ? 'selected' : ''}">
+      (o) => `<label class="${o.key === value ? 'on' : ''}">
         <input type="radio" name="${esc(name)}" value="${esc(o.key)}" data-change="${change}" ${o.key === value ? 'checked' : ''} />${esc(o.label)}</label>`,
     )
     .join('')}</div>`;
@@ -35,12 +36,13 @@ function segmented(name, options, value, change) {
 
 const STATUS_ORDER = { increase: 0, watch: 1, ready: 2, building: 3, untracked: 4 };
 const STATUS_BADGE = {
-  increase: ['Add weight', 'ok'],
+  increase: ['Add weight', 'accent'],
   ready: ['Ready', 'ok'],
-  watch: ['New weight', 'pending'],
+  watch: ['New weight', 'warn'],
   building: ['Building', ''],
   untracked: ['No rep plan', ''],
 };
+const TREND_ICON = { up: ['trend', 'green'], flat: ['trend', 'grey'], down: ['trend', 'red'], first: ['trend', 'sky'] };
 
 function renderProgress() {
   const analyses = trackedExercises()
@@ -52,36 +54,42 @@ function renderProgress() {
   const assigned = Object.values(state.settings.muscles || {});
   const muscles = [...new Set([...MUSCLE_GROUPS, ...assigned, ...Object.keys(counts)])].filter((m) => counts[m] || assigned.includes(m));
   const maxCount = Math.max(p.muscleSetsMax, ...Object.values(counts));
+  const due = analyses.filter((a) => a.status.kind === 'increase').length;
+  const ups = analyses.filter((a) => a.trend === 'up').length;
+  const downs = analyses.filter((a) => a.trend === 'down').length;
   return `
-    ${topbar('Progress')}
-    ${recoveryCard('progress')}
+    <h1 class="large">Progress</h1>
+    <p class="sub">${
+      analyses.length
+        ? esc([`${analyses.length} exercises tracked`, ups ? `${ups} improving` : '', downs ? `${downs} dropping` : '', due ? `${due} ready for more weight` : ''].filter(Boolean).join(' · '))
+        : 'Strength, volume and weekly sets'
+    }</p>
+    <div class="sgroup">${recoveryCard('progress')}</div>
     ${renderWeekSummaries()}
     ${renderWeeklyStrength()}
-    <section class="card">
-      <h2 class="section-title">Exercises</h2>
-      ${
+    ${group(
+      'Exercises',
+      `<span class="note">${analyses.length}</span>`,
+      `<div class="card flush">${
         analyses.length
-          ? `<ul class="list">${analyses
+          ? analyses
               .map((a) => {
                 const [label, cls] = STATUS_BADGE[a.status.kind];
                 const t = TREND[a.trend];
-                return `<li><button type="button" class="list-item" data-action="openExercise" data-name="${esc(a.exercise)}">
-                  <div>
-                    <div class="primary-text">${esc(a.exercise)}</div>
-                    <div class="secondary-text">${esc(a.last.reps.join('-'))} @ ${esc(fmtKg(a.last.weight))} kg · <span class="trend ${t.cls}">${t.icon} ${esc(t.label)}</span>${a.flags.length ? ' · ⚠️' : ''}</div>
-                  </div>
-                  <span class="badge ${cls}">${esc(label)}</span>
-                </button></li>`;
+                const [g, bg] = TREND_ICON[a.trend] || TREND_ICON.flat;
+                return `<button type="button" class="lrow" data-action="openExercise" data-name="${esc(a.exercise)}">${appIcon(g, bg)}
+                  <span class="tx"><b>${esc(a.exercise)}</b><span>${esc(a.last.reps.join('-'))} @ ${esc(fmtKg(a.last.weight))} kg · <span class="trend ${t.cls}">${t.icon} ${esc(t.label)}</span>${a.flags.length ? ' · ⚠️' : ''}</span></span>
+                  ${tag(label, cls)}${CHEV}</button>`;
               })
-              .join('')}</ul>`
-          : '<p class="empty">Submit a workout to start tracking.</p>'
-      }
-    </section>
-    <section class="card stack">
-      <div>
-        <h2 class="section-title" style="margin:0">Hard sets per muscle, last 7 days</h2>
-        <p class="hint">Useful range ${p.muscleSetsMin}–${p.muscleSetsMax} working sets a week (More → Progression).</p>
-      </div>
+              .join('')
+          : '<p class="empty pad">Submit a workout to start tracking.</p>'
+      }</div>`,
+    )}
+    ${group(
+      'Hard sets per muscle',
+      '<a class="btn link small" href="#muscles">Muscle map ›</a>',
+      `<section class="card stack">
+      <p class="hint" style="margin:0">Last 7 days. Useful range ${p.muscleSetsMin}–${p.muscleSetsMax} working sets a week (More → Progression).</p>
       ${
         muscles.length
           ? `<div class="bars">${muscles
@@ -96,9 +104,10 @@ function renderProgress() {
                 </div>`;
               })
               .join('')}</div>`
-          : '<p class="empty">Set muscle groups per exercise in Settings → Exercises.</p>'
+          : '<p class="empty">Set muscle groups per exercise in More → Exercises &amp; plans.</p>'
       }
-    </section>`;
+    </section>`,
+    )}`;
 }
 
 /** Overall strength per week (each exercise vs its own previous 4 weeks), the number trigger B watches. */
@@ -109,13 +118,16 @@ function renderWeeklyStrength() {
   const last = weeks[weeks.length - 1];
   const below = [...weeks].reverse().findIndex((w) => w.pct >= -r.strengthPct);
   const run = below === -1 ? weeks.length : below;
-  return `<section class="card stack">
-      <h2 class="section-title" style="margin:0">Overall strength by week</h2>
+  return group(
+    'Overall strength by week',
+    tag(Progress.signed(last.pct), last.pct >= 0 ? 'ok' : 'bad'),
+    `<section class="card stack">
       ${Charts.line(weeks.map((w) => ({ date: w.week, y: w.pct, label: `${w.n} exercise${w.n === 1 ? '' : 's'}` })), { title: 'Change vs each exercise’s previous 4 weeks', unit: '%', digits: 1 })}
       <p class="small" style="margin:0">This week ${esc(Progress.signed(last.pct))} over ${last.n} exercise${last.n === 1 ? '' : 's'}.${
         run ? ` Below −${esc(r.strengthPct)}% for ${run} week${run === 1 ? '' : 's'} in a row; the recovery alert fires at ${esc(r.strengthWeeks)}.` : ''
       }</p>
-    </section>`;
+    </section>`,
+  );
 }
 
 /* ------------------------------------------------------ weekly summary */
@@ -198,7 +210,7 @@ function renderWeekSummary(w) {
   const rows = [];
   rows.push(
     `<li><span>Workouts</span><strong>${w.done} of ${w.planned} planned</strong>${w.sessions.length ? ` <span class="muted">(${esc([...new Set(w.sessions.map((s) => s.dayType))].join(', '))})</span>` : ''}${
-      w.deload ? ' · 🟢 lighter week' : ''
+      w.deload ? ' · lighter week' : ''
     }</li>`,
   );
   if (w.missed.length) {
@@ -219,7 +231,7 @@ function renderWeekSummary(w) {
   rows.push(`<li><span>Sets per muscle</span>${esc(setsText)} <span class="muted">(${esc(state.settings.progression.muscleSetsMin)}–${esc(state.settings.progression.muscleSetsMax)})</span></li>`);
   if (w.weight) rows.push(`<li><span>Bodyweight</span><strong>${esc(fmtKg(Math.round(w.weight.now * 10) / 10))} kg</strong> avg${w.weight.delta !== null ? ` · ${esc(Progress.signed(w.weight.delta, 1, ' kg'))} vs last week` : ''}</li>`);
   if (w.waist) rows.push(`<li><span>Waist</span><strong>${esc(fmtKg(w.waist.now))} cm</strong>${w.waist.delta !== null ? ` · ${esc(Progress.signed(w.waist.delta, 1, ' cm'))}` : ''}</li>`);
-  if (w.feel !== null) rows.push(`<li><span>Energy & Strength</span><strong>${w.feel.toFixed(1)} / 5</strong> average</li>`);
+  if (w.feel !== null) rows.push(`<li><span>How you felt</span><strong>${w.feel.toFixed(1)} / 5</strong> average</li>`);
   rows.push(`<li><span>Photos</span>${w.photos === 'saved' ? '✓ saved to Files' : w.photos === 'unsaved' ? '<strong class="down">not saved to Files yet</strong>' : 'none this week'}</li>`);
   return `<ul class="summary-list">${rows.join('')}</ul>`;
 }
@@ -232,12 +244,19 @@ function weekSummaryHome() {
   const end = weekBounds(today).end === today ? today : weekBounds(yesterday).end === yesterday ? yesterday : null;
   if (!end) return '';
   const w = weekSummary(end);
-  return `<div class="banner week-summary">
-      <p class="title">📋 ${esc(w.week.folder.split(' - ')[0])} summary${w.running ? ' (ends today)' : ''}</p>
-      <p class="small muted" style="margin:0">${esc(formatDate(w.start, false))} to ${esc(formatDate(w.end, false))}</p>
-      ${renderWeekSummary(w)}
-      <div class="actions"><a class="btn" href="#progress">All weeks</a></div>
-    </div>`;
+  return notice(
+    'week-summary',
+    'trend',
+    'green',
+    `${w.week.folder.split(' - ')[0]} summary${w.running ? ' (ends today)' : ''}`,
+    `${esc(formatDate(w.start, false))} to ${esc(formatDate(w.end, false))}${w.missed.length ? ` · ${w.missed.length} missed` : ''}${w.best ? ` · best ${esc(w.best.name)} ${esc(Progress.signed(w.best.pct))}` : ''}`,
+    tiles([
+      [`${w.done}/${w.planned}`, 'Workouts'],
+      [w.strength ? Progress.signed(w.strength.pct) : '–', 'Strength'],
+      [w.weight ? `${fmtKg(Math.round(w.weight.now * 10) / 10)} kg` : '–', 'Bodyweight'],
+    ]),
+    '<a class="btn small pill" href="#progress">Full summary ›</a>',
+  );
 }
 
 /** Progress: pick any week back to the first workout. */
@@ -248,13 +267,21 @@ function renderWeekSummaries() {
   for (let e = weekBounds(todayISO()).end; e >= weekBounds(first).end && ends.length < 52; e = Progress.addDays(e, -7)) ends.push(e);
   const pick = ends.includes(state.ui.summaryWeek) ? state.ui.summaryWeek : ends[0];
   const w = weekSummary(pick);
-  return `<section class="card stack">
-      <h2 class="section-title" style="margin:0">Weekly summary</h2>
+  return group(
+    'Weekly summary',
+    w.running ? tag('This week', 'accent') : '',
+    `<section class="card stack">
       <select class="select" data-change="summaryWeek" aria-label="Week">${ends
         .map((e) => `<option value="${esc(e)}" ${e === pick ? 'selected' : ''}>${esc(photoWeek(e).folder)}</option>`)
         .join('')}</select>
+      ${tiles([
+        [`${w.done}/${w.planned}`, 'Workouts'],
+        [w.strength ? Progress.signed(w.strength.pct) : '–', 'Strength'],
+        [w.weight ? `${fmtKg(Math.round(w.weight.now * 10) / 10)} kg` : '–', 'Bodyweight'],
+      ])}
       ${renderWeekSummary(w)}
-    </section>`;
+    </section>`,
+  );
 }
 
 function renderExerciseProgress(name) {
@@ -266,44 +293,54 @@ function renderExerciseProgress(name) {
   const p = state.settings.progression;
   const w = Progress.analyseWindow(snaps, p);
   const status = a.status.kind === 'untracked' ? '' : Progress.statusLine(a.status, todayISO());
+  const [label, cls] = STATUS_BADGE[a.status.kind];
+  const best = Math.max(...a.snaps.map((s) => s.perf));
   return `
-    ${topbar('', { href: 'progress', label: 'Progress' })}
-    <section class="card stack">
-      <div>
-        <h1 class="card-title">${esc(name)}</h1>
-        <p class="subtitle">${a.snaps.length} session${a.snaps.length === 1 ? '' : 's'} logged${planText('', name) ? ` · Plan ${esc(planText(a.last.dayType, name))}` : ''}</p>
-      </div>
-      ${status ? `<p class="status-line ${esc(a.status.kind)}" style="margin:0">${esc(status)}</p>` : ''}
+    ${topbar(name, { href: 'progress', label: 'Progress' })}
+    <p class="sub">${a.snaps.length} session${a.snaps.length === 1 ? '' : 's'} logged${planText(a.last.dayType, name) ? ` · Plan ${esc(planText(a.last.dayType, name))}` : ''} · ${tag(label, cls)}</p>
+    <div class="sgroup">${tiles([
+      [`${fmtKg(a.last.weight)} kg`, 'Working weight'],
+      [a.last.reps.join('-'), 'Last reps'],
+      [`${fmtKg(Math.round(best * 10) / 10)} kg`, 'Best est. 1RM'],
+    ])}</div>
+    ${status ? `<p class="status-line ${esc(a.status.kind)}">${esc(status)}</p>` : ''}
+    ${a.flags.map((f) => `<p class="flag">${icon('alert')}<span>${esc(f.kind === 'stall' ? `Stalled for ${f.sessions} sessions at ${fmtKg(a.last.weight)} kg.` : `Est. strength ${Progress.signed(f.pct)} over the last ${f.sessions} sessions.`)}</span></p>`).join('')}
+    ${group(
+      'Chart',
+      '',
+      `<section class="card stack">
       ${segmented('metric', METRICS, metric.key, 'progressMetric')}
       ${segmented('range', RANGES, ui.range, 'progressRange')}
       ${Charts.line(
         snaps.map((s) => ({ date: s.date, y: metric.get(s), label: `${s.reps.join('-')} @ ${fmtKg(s.weight)} kg` })),
         { title: metric.title, unit: metric.unit, digits: metric.digits },
       )}
-      ${
-        w
-          ? `<div class="analysis">
-              <h2 class="section-title">What the chart says</h2>
-              ${w.quant.length ? `<ul class="quant">${w.quant.map((q) => `<li>${esc(q)}</li>`).join('')}</ul>` : ''}
-              <p>${esc(w.words)}</p>
-            </div>`
-          : '<p class="empty">No sessions in this range.</p>'
-      }
-      ${a.flags.map((f) => `<p class="flag">⚠️ ${esc(f.kind === 'stall' ? `Stalled for ${f.sessions} sessions at ${fmtKg(a.last.weight)} kg.` : `Est. strength ${Progress.signed(f.pct)} over the last ${f.sessions} sessions.`)}</p>`).join('')}
-    </section>
-    <section class="card">
-      <h2 class="section-title">Sessions</h2>
-      <table class="summary">
-        <thead><tr><th>Date</th><th>Sets</th><th class="num">Strength</th><th class="num">Volume</th></tr></thead>
-        <tbody>${[...snaps]
-          .reverse()
-          .map(
-            (s) => `<tr><td>${esc(formatDate(s.date, false))}</td><td>${esc(s.reps.join('-'))} @ ${esc(fmtKg(s.weight))}${s.rirs.some((r) => r !== null) ? `<br /><span class="small muted">RIR ${esc(s.rirs.map((r) => (r === null ? '?' : rirLabel(r))).join('-'))}</span>` : ''}</td>
-              <td class="num">${esc(fmtKg(Math.round(s.perf * 10) / 10))}</td><td class="num">${esc(fmtVolume(s.volume))}</td></tr>`,
-          )
-          .join('')}</tbody>
-      </table>
-    </section>`;
+    </section>`,
+    )}
+    ${group(
+      'What the chart says',
+      '',
+      w
+        ? `<section class="card">
+            ${w.quant.length ? `<ul class="quant">${w.quant.map((q) => `<li>${esc(q)}</li>`).join('')}</ul>` : ''}
+            <p class="note-text">${esc(w.words)}</p>
+          </section>`
+        : '<div class="card"><p class="empty" style="padding:8px">No sessions in this range.</p></div>',
+    )}
+    ${group(
+      'Sessions',
+      `<span class="note">${snaps.length}</span>`,
+      `<div class="card flush">${[...snaps]
+        .reverse()
+        .map(
+          (s) => `<div class="xrow"><div class="tx"><b>${esc(s.reps.join('-'))} @ ${esc(fmtKg(s.weight))} kg</b><span>${esc(
+            [`${WEEKDAYS[new Date(Date.parse(s.date)).getUTCDay()].slice(0, 3)} ${formatDate(s.date, false)}`, s.rirs.some((r) => r !== null) ? `RIR ${s.rirs.map((r) => (r === null ? '?' : rirLabel(r))).join('-')}` : '']
+              .filter(Boolean)
+              .join(' · '),
+          )}</span></div><span class="n"><b>${esc(fmtKg(Math.round(s.perf * 10) / 10))} kg</b><span>${esc(fmtVolume(s.volume))}</span></span></div>`,
+        )
+        .join('')}</div>`,
+    )}`;
 }
 
 /* ============================================================== Body */
@@ -349,19 +386,21 @@ function renderCalories() {
       Math.abs(diff) < 0.25 ? 'On plan.' : (c.goal === 'gain' ? diff < 0 : diff > 0) ? 'Slower than planned: check what you log in MyFitnessPal is accurate before eating less.' : 'Faster than planned: if strength is dropping, eat a little more.'
     }`;
   }
-  return `
-    <section class="card stack">
-      <h2 class="section-title" style="margin:0">Body fat &amp; calories</h2>
+  const kv = (k, v, h, d = '') => `<div class="kv"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div><div class="h">${esc(h)}</div><div class="d">${esc(d)}</div></div>`;
+  return group(
+    'Body fat & calories',
+    '<a class="btn link small" href="#settings/calories">Settings ›</a>',
+    `<section class="card stack">
       ${
         bf
-          ? `<p style="margin:0"><strong class="big">${esc(fmtKg(bf.bf))}%</strong> body fat (US Navy) · ${esc(formatDate(bf.date))}${
-              prev ? ` · <span class="small">${esc(Progress.signed(Math.round((bf.bf - prev.bf) * 10) / 10, 1, '%'))} since ${esc(formatDate(prev.date, false))}</span>` : ''
-            }${bf.lbm ? `<br /><span class="small muted">Lean mass ${esc(fmtKg(bf.lbm))} kg${prev?.lbm ? ` (${esc(Progress.signed(Math.round((bf.lbm - prev.lbm) * 10) / 10, 1, ' kg'))})` : ''}. Accurate to about ±3%: follow the trend, not one reading.</span>` : ''}</p>`
+          ? `<div class="kvs">${kv('Body fat', `${fmtKg(bf.bf)}%`, `US Navy · ${formatDate(bf.date, false)}`, prev ? `${Progress.signed(Math.round((bf.bf - prev.bf) * 10) / 10, 1, '%')} since ${formatDate(prev.date, false)}` : '')}${
+              bf.lbm ? kv('Lean mass', `${fmtKg(bf.lbm)} kg`, 'Accurate to about ±3%: follow the trend', prev?.lbm ? Progress.signed(Math.round((bf.lbm - prev.lbm) * 10) / 10, 1, ' kg') : '') : ''
+            }</div>`
           : `<p class="small muted" style="margin:0">${
               !p.heightCm
-                ? 'Add your height in Settings → Calories & body fat to get body fat from the check-in.'
+                ? 'Add your height in More → Calories & body fat to get body fat from the check-in.'
                 : missingFields.length
-                  ? `Body fat needs these check-in fields: ${esc(missingFields.join(', '))}. Add them in Settings → Body & photos.`
+                  ? `Body fat needs these check-in fields: ${esc(missingFields.join(', '))}. Add them in More → Measurements & photos.`
                   : `Body fat appears after a check-in with ${p.sex === 'female' ? 'neck, waist and hips' : 'neck and abdomen'}.`
             }</p>`
       }
@@ -372,17 +411,28 @@ function renderCalories() {
                <p style="margin:2px 0"><strong class="big">${esc((lock?.target ?? calc.target).toLocaleString('en-IN'))}</strong> kcal a day</p>
                ${lock ? `<p class="small muted" style="margin:0">Set ${esc(formatDate(lock.date))} (${esc(TARGET_REASON[lock.reason] || lock.reason)})${lock.target !== calc.target ? ` · today's calculation ${esc(calc.target.toLocaleString('en-IN'))}: it moves after a week if the gap is ${c.changeKcal}+ kcal, at once with a new body fat reading or ${c.recalcKg} kg of weight change` : ''}.</p>` : ''}
              </div>
-             <ul class="quant">${rows.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
-             <p class="small muted" style="margin:0">Weight used: ${esc(fmtKg(weight.kg))} kg (${weight.n >= 3 ? `average of ${weight.n} weigh-ins this week` : `entry of ${esc(formatDate(weight.date))}`}).</p>`
-          : `<p class="small muted" style="margin:0">For a calorie target, add ${esc(calc.missing.join(', '))}${calc.missing.includes('bodyweight') ? ' (a weigh-in or check-in)' : ' in Settings → Calories & body fat'}.</p>`
+             ${rateLine ? `<p class="small" style="margin:0">${esc(rateLine)}</p>` : ''}
+             <details class="workings">
+               <summary>How the target is worked out</summary>
+               <ul class="quant">${rows.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
+               <p class="small muted" style="margin:8px 0 0">Weight used: ${esc(fmtKg(weight.kg))} kg (${weight.n >= 3 ? `average of ${weight.n} weigh-ins this week` : `entry of ${esc(formatDate(weight.date))}`}).</p>
+             </details>`
+          : `<p class="small muted" style="margin:0">For a calorie target, add ${esc(calc.missing.join(', '))}${calc.missing.includes('bodyweight') ? ' (a weigh-in or check-in)' : ' in More → Calories & body fat'}.</p>
+             ${rateLine ? `<p class="small" style="margin:0">${esc(rateLine)}</p>` : ''}`
       }
-      ${rateLine ? `<p class="small" style="margin:0">${esc(rateLine)}</p>` : ''}
-    </section>`;
+    </section>`,
+  );
 }
 
 function bodyDraft() {
   const b = state.ui.body;
   if (!b.draft) b.draft = { date: todayISO(), values: {}, notes: '' };
+  // Less typing: today's weigh-in fills the check-in's bodyweight.
+  const wf = weightField();
+  if (wf && b.draft.values[wf] === undefined && b.draft.date === todayISO()) {
+    const w = state.measurements.filter((m) => m.date === todayISO() && m.kind === 'weighin' && Number.isFinite(m.values?.[wf])).pop();
+    if (w) b.draft.values[wf] = w.values[wf];
+  }
   return b.draft;
 }
 
@@ -417,9 +467,10 @@ function nowTime() {
 function renderSmallWorkout() {
   const ui = state.ui.body;
   const list = [...state.small].sort((a, b) => `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`));
-  return `
-    <section class="card stack">
-      <h2 class="section-title" style="margin:0">Small workout</h2>
+  return group(
+    'Small workouts',
+    `<span class="note">${list.length} in total</span>`,
+    `<section class="card stack">
       <div class="two">
         <div>
           <label for="small-date">Date</label>
@@ -435,22 +486,23 @@ function renderSmallWorkout() {
         <input id="small-note" class="input" value="${esc(ui.smallNote || '')}" placeholder="e.g. 50 push-ups, 20 min walk" data-input="smallNote" autocomplete="off" />
       </div>
       <button type="button" class="btn primary" data-action="smallCheckIn">Check in</button>
-      ${
-        list.length
-          ? `<ul class="list">${list
-              .slice(0, 5)
-              .map(
-                (s) => `<li><div class="exercise-row">
-                  <div class="name">${esc(formatDate(s.date))} · ${esc(s.time)}${s.note ? `<span class="small muted">${esc(s.note)}</span>` : ''}</div>
-                  <button type="button" class="btn icon ghost" data-action="editSmall" data-id="${esc(s.id)}" aria-label="Change date or time">✎</button>
-                  <button type="button" class="btn icon ghost" data-action="deleteSmall" data-id="${esc(s.id)}" aria-label="Delete">🗑</button>
-                </div></li>`,
-              )
-              .join('')}</ul>
-             <p class="hint" style="margin:0">${list.length} in total${list.length > 5 ? ' (latest 5 shown)' : ''}.</p>`
-          : ''
-      }
-    </section>`;
+    </section>
+    ${
+      list.length
+        ? `<div class="card flush" style="margin-top:10px">${list
+            .slice(0, 5)
+            .map((s) =>
+              erow(
+                `${WEEKDAYS[new Date(Date.parse(s.date)).getUTCDay()].slice(0, 3)} ${formatDate(s.date, false)} · ${s.time}`,
+                s.note,
+                ibtn('edit', `data-action="editSmall" data-id="${esc(s.id)}"`, 'Change date or time') + ibtn('trash', `data-action="deleteSmall" data-id="${esc(s.id)}"`, 'Delete'),
+              ),
+            )
+            .join('')}</div>
+           ${list.length > 5 ? '<p class="hint gnote">Latest 5 shown.</p>' : ''}`
+        : ''
+    }`,
+  );
 }
 
 function renderBody() {
@@ -473,11 +525,11 @@ function renderBody() {
     <h1 class="large">Body</h1>
     <p class="sub">Log daily, measure weekly</p>
     ${group('Log today', `<span class="freq">Daily · ${log.done} of ${log.total} done</span>`, log.html)}
-    <section class="card stack" style="margin-top:24px">
-      <div>
-        <h2 class="section-title" style="margin:0">Weekly check-in</h2>
-        <p class="hint">${esc(WEEKDAYS[Number(state.settings.checkinDay) || 0])}s, same time each week: morning, before food, after the toilet, relaxed (not flexed).${check.last ? ` Last: ${esc(formatDate(check.last))}.` : ''}</p>
-      </div>
+    ${group(
+      'Weekly check-in',
+      check.due ? '<span class="freq">Due today</span>' : check.last ? `<span class="note">Last ${esc(formatDate(check.last, false))}</span>` : '',
+      `<section class="card stack">
+      <p class="hint" style="margin:0">${esc(WEEKDAYS[Number(state.settings.checkinDay) || 0])}s, same time each week: morning, before food, after the toilet, relaxed (not flexed).</p>
       <div>
         <label for="m-date">Date</label>
         <input id="m-date" type="date" class="input" value="${esc(d.date)}" data-change="mDate" />
@@ -499,23 +551,27 @@ function renderBody() {
         <textarea id="m-notes" class="textarea" data-input="mNotes" placeholder="Sleep, food, how you feel">${esc(d.notes)}</textarea>
       </div>
       <button type="button" class="btn primary" data-action="saveCheckin">Save check-in</button>
-      <a class="btn secondary" href="#photos">🔒 Progress photos${v.lastPhotoAt ? ` · last ${esc(formatDate(v.lastPhotoAt.slice(0, 10)))}` : ''}</a>
     </section>
+    <div class="card flush" style="margin-top:10px">
+      <a class="lrow" href="#photos">${appIcon('lock', 'purple')}<span class="tx"><b>Progress photos</b><span>Encrypted on this phone${
+        v.lastPhotoAt ? ` · last ${esc(formatDate(v.lastPhotoAt.slice(0, 10), false))}` : ''
+      }</span></span>${unsavedWeeks().length ? tag('Not in Files', 'warn') : ''}${CHEV}</a>
+    </div>`,
+    )}
 
     ${renderCalories()}
 
-    ${renderSmallWorkout()}
-
-
-    <section class="card stack">
-      <h2 class="section-title" style="margin:0">Trends</h2>
+    ${group(
+      'Trends',
+      '',
+      `<section class="card stack">
       ${
         withData.length
           ? `${segmented('bodyField', withData.map((f) => ({ key: f, label: f.replace(/\s*\([^)]*\)/, '') })), field, 'bodyField')}
              ${segmented('bodyRange', RANGES, ui.range, 'bodyRange')}
              ${Charts.line(series.points, { title: series.label, unit: unit(field), digits: 1 })}
              <div class="analysis">
-               <h2 class="section-title">What changed</h2>
+               <p class="sublabel" style="margin-top:0">What changed</p>
                ${
                  Object.keys(body.fields).length
                    ? `<ul class="quant">${Object.entries(body.fields)
@@ -527,31 +583,36 @@ function renderBody() {
              </div>`
           : '<p class="empty">Save your first check-in to see trends.</p>'
       }
-    </section>
+    </section>`,
+    )}
 
-    <section class="card">
-      <h2 class="section-title">Entries</h2>
-      ${
+    ${renderSmallWorkout()}
+
+    ${group(
+      'Entries',
+      `<span class="note">${entries.length}</span>`,
+      `${
         entries.length
-          ? `<ul class="list">${entries
-              .map(
-                (m) => `<li><div class="exercise-row">
-                  <div class="name"><strong>${esc(formatDate(m.date))}</strong> · ${m.kind === 'weighin' ? 'weigh-in' : 'check-in'}
-                    <span class="small muted">${esc(
-                      Object.entries(m.values || {})
-                        .filter(([, x]) => Number.isFinite(x))
-                        .map(([k, x]) => `${k.replace(/\s*\([^)]*\)/, '')} ${fmtKg(x)}`)
-                        .join(' · '),
-                    )}</span></div>
-                  <span class="badge ${m.synced ? 'ok' : 'pending'}">${m.synced ? '✅' : '⏳'}</span>
-                  <button type="button" class="btn icon ghost" data-action="deleteMeasurement" data-id="${esc(m.id)}" aria-label="Delete entry of ${esc(formatDate(m.date))}">🗑</button>
-                </div></li>`,
-              )
-              .join('')}</ul>`
-          : '<p class="empty">No entries yet.</p>'
+          ? (() => {
+              const row = (m) =>
+                erow(
+                  `${formatDate(m.date)} · ${m.kind === 'weighin' ? 'weigh-in' : 'check-in'}`,
+                  Object.entries(m.values || {})
+                    .filter(([, x]) => Number.isFinite(x))
+                    .map(([k, x]) => `${k.replace(/\s*\([^)]*\)/, '')} ${fmtKg(x)}`)
+                    .join(' · '),
+                  (m.synced ? '' : tag('Not synced', 'warn')) + ibtn('trash', `data-action="deleteMeasurement" data-id="${esc(m.id)}"`, `Delete entry of ${formatDate(m.date)}`),
+                );
+              return `<div class="card flush">${entries.slice(0, 8).map(row).join('')}</div>${
+                entries.length > 8
+                  ? `<details class="more-rows"><summary>Show ${entries.length - 8} older</summary><div class="card flush">${entries.slice(8).map(row).join('')}</div></details>`
+                  : ''
+              }`;
+            })()
+          : '<div class="card"><p class="empty" style="padding:8px">No entries yet.</p></div>'
       }
-      <button type="button" class="btn secondary" style="margin-top:12px" data-action="syncMeasurements" ${state.ui.syncing ? 'disabled' : ''}>Sync measurements from Sheet</button>
-    </section>`;
+      <p class="hint gnote syncline">${icon('sync')}<span>${state.ui.syncing ? 'Fetching from the Sheet…' : `Pulled from the Sheet automatically (last ${pulledAgo('measurements')})`}</span><button type="button" class="btn link small" data-action="syncMeasurements" ${state.ui.syncing ? 'disabled' : ''}>Sync now</button></p>`,
+    )}`;
 }
 
 function newMeasurement(kind, date, values, notes = '') {
@@ -693,8 +754,10 @@ function openWeek() {
 
 function renderPhotos() {
   const v = state.ui.vault;
-  const head = topbar('Photos', { href: 'body', label: 'Body' });
-  if (v.status === 'unknown') return `${head}<p class="empty">Opening the vault…</p>`;
+  const head = `${topbar('Photos', { href: 'body', label: 'Body' })}<p class="sub">${
+    v.status === 'unlocked' ? `Unlocked · ${v.items.length} photo${v.items.length === 1 ? '' : 's'} · locks when you leave` : 'Encrypted on this phone, never uploaded'
+  }</p>`;
+  if (v.status === 'unknown') return `${head}<p class="empty"><span class="spin"></span>Opening the vault…</p>`;
   if (v.status === 'error') return `${head}<p class="empty">This browser blocked private storage, so the photo vault cannot open here.</p>`;
   if (v.status === 'none') return `${head}${renderVaultSetup()}`;
   if (v.status === 'locked') return `${head}${renderVaultLocked()}${renderBackupCard()}`;
@@ -707,9 +770,8 @@ const PRIVACY_NOTE = `Photos are encrypted on this phone with AES-256 using a ke
 function renderVaultSetup() {
   const v = state.ui.vault;
   return `
-    <section class="card stack">
-      <h2 class="section-title" style="margin:0">Create your photo vault</h2>
-      <p class="small" style="margin:0">${esc(PRIVACY_NOTE)}</p>
+    <div class="hero">${appIcon('lock', 'purple')}<b>Create your photo vault</b><p>${esc(PRIVACY_NOTE)}</p></div>
+    ${group('Passcode', '', `<section class="card stack">
       <div>
         <label for="vault-p1">Passcode (at least 6 characters)</label>
         <input id="vault-p1" class="input" type="password" autocomplete="new-password" value="${esc(v.pass1 || '')}" data-input="vaultPass1" />
@@ -718,22 +780,21 @@ function renderVaultSetup() {
         <label for="vault-p2">Repeat passcode</label>
         <input id="vault-p2" class="input" type="password" autocomplete="new-password" value="${esc(v.pass2 || '')}" data-input="vaultPass2" />
       </div>
-      <p class="flag">⚠️ A forgotten passcode cannot be reset. Save it in the iPhone Passwords app.</p>
+      <p class="flag">${icon('alert')}<span>A forgotten passcode cannot be reset. Save it in the iPhone Passwords app.</span></p>
       <button type="button" class="btn primary" data-action="vaultCreate" ${v.busy ? 'disabled' : ''}>${v.busy ? esc(v.busy) : 'Create vault'}</button>
-    </section>
-    <section class="card stack">
-      <h2 class="section-title" style="margin:0">Have a backup?</h2>
+    </section>`)}
+    ${group('Have a backup?', '', `<section class="card stack">
       <p class="hint" style="margin:0">Restore a .bhimvault file from the Files app. You will need the passcode it was made with.</p>
       <button type="button" class="btn secondary" data-action="vaultRestorePick">Restore from backup file…</button>
-    </section>`;
+    </section>`)}`;
 }
 
 function renderVaultLocked() {
   const v = state.ui.vault;
   const face = v.faceId?.on;
   return `
-    <section class="card stack">
-      <h2 class="section-title" style="margin:0">🔒 Vault locked</h2>
+    <div class="hero">${appIcon('lock', 'purple')}<b>Vault locked</b><p>Unlock to add, view or save photos.</p></div>
+    <section class="card stack" style="margin-top:16px">
       ${
         face
           ? `<button type="button" class="btn primary" data-action="vaultFaceUnlock" ${v.busy ? 'disabled' : ''}>${v.busy ? esc(v.busy) : 'Unlock with Face ID'}</button>
@@ -763,22 +824,18 @@ function renderVaultOpen() {
   const pose = poses().includes(v.pose) ? v.pose : poses()[0];
   const target = photoWeek(v.date || todayISO());
   return `
-    <section class="card stack">
-      <div class="row between">
-        <h2 class="section-title" style="margin:0">Add photos</h2>
-        <button type="button" class="btn small" data-action="vaultLock">🔒 Lock</button>
-      </div>
+    ${group('Add photos', '<button type="button" class="btn small pill" data-action="vaultLock">Lock</button>', `<section class="card stack">
       <div>
         <label for="photo-date">Date</label>
         <input id="photo-date" type="date" class="input" value="${esc(v.date || todayISO())}" data-change="photoDate" />
-        <p class="hint" id="photo-target">📁 Goes in <strong>${esc(target.folder)}</strong> as “${esc(photoFileName(target, pose))}”</p>
+        <p class="hint" id="photo-target">${icon('folder')} Goes in <strong>${esc(target.folder)}</strong> as “${esc(photoFileName(target, pose))}”</p>
       </div>
-      <button type="button" class="btn primary" data-action="openCamera">📷 ${Number(state.settings.cameraTimer) ? `Camera with ${esc(state.settings.cameraTimer)} s timer` : 'Open camera'}</button>
+      <button type="button" class="btn primary" data-action="openCamera">${icon('camera')} ${Number(state.settings.cameraTimer) ? `Camera with ${esc(state.settings.cameraTimer)} s timer` : 'Open camera'}</button>
       <p class="hint" style="margin:0">Takes ${esc(poses().join(', '))} in order, with last week's photo faintly overlaid so you can match the pose and distance.</p>
       <button type="button" class="btn secondary" data-action="pickPhoto">Use the iPhone camera instead…</button>
       ${segmented('pose', poses().map((p) => ({ key: p, label: p })), pose, 'photoPose')}
       ${v.busy ? `<p class="status" role="status">${esc(v.busy)}</p>` : ''}
-    </section>
+    </section>`)}
 
     ${renderWeekFolders()}
 
@@ -786,14 +843,13 @@ function renderVaultOpen() {
 
     ${renderFaceIdCard()}
 
-    <section class="card stack">
-      <h2 class="section-title" style="margin:0">Passcode</h2>
+    ${group('Change passcode', '', `<section class="card stack">
       <input class="input" type="password" placeholder="Current passcode" autocomplete="current-password" aria-label="Current passcode" value="${esc(v.pass1 || '')}" data-input="vaultPass1" />
       <input class="input" type="password" placeholder="New passcode" autocomplete="new-password" aria-label="New passcode" value="${esc(v.pass2 || '')}" data-input="vaultPass2" />
       <input class="input" type="password" placeholder="Repeat new passcode" autocomplete="new-password" aria-label="Repeat new passcode" value="${esc(v.pass3 || '')}" data-input="vaultPass3" />
       <button type="button" class="btn secondary" data-action="vaultChangePass">Change passcode</button>
       <p class="hint" style="margin:0">Old backup files keep the old passcode. Make a new backup after changing it.${v.faceId?.on ? ' Face ID turns off and needs turning on again.' : ''}</p>
-    </section>
+    </section>`)}
     ${v.viewing ? '<div class="viewer" id="viewer"><img id="viewer-img" alt="" /><div class="viewer-bar"><button type="button" class="btn" data-action="closePhoto">Close</button><button type="button" class="btn danger" data-action="deletePhoto">Delete</button></div></div>' : ''}
     ${renderSlider()}`;
 }
@@ -812,7 +868,7 @@ const photoIn = (week, pose) => (week ? week.items.filter((i) => i.pose === pose
 /** Every pose of two weeks side by side; tap a row for the full-screen slider. */
 function renderCompareWeeks() {
   const { weeks, a, b } = compareWeeks();
-  if (weeks.length < 2) return `<section class="card stack"><h2 class="section-title" style="margin:0">Compare weeks</h2><p class="empty">Photos from two different weeks are needed to compare.</p></section>`;
+  if (weeks.length < 2) return group('Compare weeks', '', '<div class="card"><p class="empty" style="padding:8px">Photos from two different weeks are needed to compare.</p></div>');
   const pick = (k, sel) =>
     `<select class="select" data-change="compareWeek" data-k="${k}" aria-label="${k === 'a' ? 'Before' : 'After'} week">${[...weeks]
       .reverse()
@@ -833,12 +889,15 @@ function renderCompareWeeks() {
     )
     .join('');
   const gap = Progress.daysBetween(a.end, b.end);
-  return `<section class="card stack">
-      <h2 class="section-title" style="margin:0">Compare weeks</h2>
+  return group(
+    'Compare weeks',
+    gap ? `<span class="note">${esc(weeksLater(a.end, b.end))}</span>` : '',
+    `<section class="card stack">
       <div class="two">${pick('a', a)}${pick('b', b)}</div>
-      <p class="hint" style="margin:0">Week ${a.n} (${esc(formatDate(a.start, false))} to ${esc(formatDate(a.end, false))}) → Week ${b.n} (${esc(formatDate(b.start, false))} to ${esc(formatDate(b.end, false))})${gap ? `, ${weeksLater(a.end, b.end)}` : ''}. Tap a pose to slide between the two.</p>
+      <p class="hint" style="margin:0">Week ${a.n} (${esc(formatDate(a.start, false))} to ${esc(formatDate(a.end, false))}) → Week ${b.n} (${esc(formatDate(b.start, false))} to ${esc(formatDate(b.end, false))}). Tap a pose to slide between the two.</p>
       ${rows}
-    </section>`;
+    </section>`,
+  );
 }
 
 /** Full screen: the "after" photo over the "before" one, revealed by dragging the slider. */
@@ -866,24 +925,25 @@ const fileSize = (bytes) => (bytes < 1048576 ? `${Math.max(1, Math.round(bytes /
 function renderWeekFolders() {
   const v = state.ui.vault;
   const weeks = weekFolders(v.items);
-  if (!weeks.length) return `<section class="card"><h2 class="section-title">Week folders</h2><p class="empty">No photos yet.</p></section>`;
+  if (!weeks.length) return group('Week folders', '', '<div class="card"><p class="empty" style="padding:8px">No photos yet.</p></div>');
   const open = openWeek();
   const unsaved = unsavedWeeks();
   const saved = state.vaultInfo.weeksSaved || {};
-  return `
-    <section class="card stack">
-      <h2 class="section-title" style="margin:0">Week folders (${v.items.length} photo${v.items.length === 1 ? '' : 's'})</h2>
-      <p class="hint" style="margin:0">Save a week, then in the share sheet tap <strong>Save to Files</strong> → iCloud Drive → <strong>Bhimlekha</strong>. In Files, tap the saved .zip once and it becomes the week's folder (then delete the .zip).</p>
+  return group(
+    'Week folders',
+    `<span class="note">${v.items.length} photo${v.items.length === 1 ? '' : 's'}</span>`,
+    `<div class="card flush">
       ${weeks
         .map((w) => {
           const isOpen = w.folder === open;
           const pending = unsaved.includes(w.folder);
           const file = v.weekFiles[w.folder];
-          const state_ = pending ? '<span class="badge pending">Not saved</span>' : saved[w.folder] ? `<span class="badge ok">✓ Saved ${esc(formatDate(saved[w.folder].slice(0, 10), false))}</span>` : '';
+          const state_ = pending ? tag('Not saved', 'warn') : saved[w.folder] ? tag(`✓ Saved ${formatDate(saved[w.folder].slice(0, 10), false)}`, 'ok') : '';
           return `<div class="folder ${isOpen ? 'open' : ''}">
             <button type="button" class="folder-head" data-action="toggleWeek" data-folder="${esc(w.folder)}" aria-expanded="${isOpen}">
-              <span class="folder-name">📁 ${esc(w.folder)}</span>
-              <span class="small muted">${w.items.length} photo${w.items.length === 1 ? '' : 's'} ${state_}</span>
+              ${appIcon('folder', 'sky')}
+              <span class="tx"><b class="folder-name">${esc(w.folder)}</b><span>${w.items.length} photo${w.items.length === 1 ? '' : 's'}</span></span>
+              ${state_}<svg class="chev fold" width="9" height="15" viewBox="0 0 10 16" aria-hidden="true"><path d="M2 2l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
             </button>
             ${
               isOpen
@@ -894,14 +954,16 @@ function renderWeekFolders() {
                     )
                     .join('')}</div>
                    <button type="button" class="btn ${pending ? 'primary' : 'secondary'}" data-action="saveWeek" data-folder="${esc(w.folder)}" ${file ? '' : 'disabled'}>${
-                     file ? `📁 Save Week ${w.n} to Files (${fileSize(file.size)})` : file === false ? 'Could not prepare this week' : 'Preparing…'
+                     file ? `${icon('folder')} Save Week ${w.n} to Files (${fileSize(file.size)})` : file === false ? 'Could not prepare this week' : '<span class="spin"></span>Preparing…'
                    }</button>`
                 : ''
             }
           </div>`;
         })
         .join('')}
-    </section>`;
+    </div>
+    <p class="hint gnote">Save a week, then in the share sheet tap <strong>Save to Files</strong> → iCloud Drive → <strong>Bhimlekha</strong>. In Files, tap the saved .zip once and it becomes the week's folder (then delete the .zip).</p>`,
+  );
 }
 
 function renderFaceIdCard() {
@@ -909,7 +971,7 @@ function renderFaceIdCard() {
   const f = v.faceId || {};
   let body;
   if (f.on) {
-    body = `<p class="small" style="margin:0">✅ Face ID is on. The passcode still works too.</p>
+    body = `<p class="small" style="margin:0">Face ID is on. The passcode still works too.</p>
       <button type="button" class="btn secondary" data-action="vaultFaceOff">Turn off Face ID</button>`;
   } else if (v.faceStep === 'confirm') {
     body = `<p class="small" style="margin:0">The passkey is made. One more Face ID scan finishes it.</p>
@@ -920,7 +982,7 @@ function renderFaceIdCard() {
     body = `<p class="small" style="margin:0">Unlock with your face instead of typing the passcode. iOS saves a passkey named “Bhimlekha photo vault” in the Passwords app; Face ID releases the vault key from it, so it is as safe as the passcode.</p>
       <button type="button" class="btn secondary" data-action="vaultFaceOn">Turn on Face ID</button>`;
   }
-  return `<section class="card stack"><h2 class="section-title" style="margin:0">Face ID</h2>${body}</section>`;
+  return group('Face ID', f.on ? tag('On', 'ok') : '', `<section class="card stack">${body}</section>`);
 }
 
 function renderBackupCard() {
@@ -928,22 +990,24 @@ function renderBackupCard() {
   const info = state.vaultInfo;
   const behind = info.lastPhotoAt && (!info.lastBackupAt || info.lastBackupAt < info.lastPhotoAt);
   const size = v.backup ? fileSize(v.backup.file.size) : '';
-  return `
-    <section class="card stack">
-      <h2 class="section-title" style="margin:0">Full encrypted backup</h2>
+  return group(
+    'Full encrypted backup',
+    behind ? tag(info.lastBackupAt ? 'New photos since' : 'None yet', 'warn') : info.lastBackupAt ? tag(`✓ ${formatDate(info.lastBackupAt.slice(0, 10), false)}`, 'ok') : '',
+    `<section class="card stack">
       <p class="small" style="margin:0">${
         info.lastBackupAt ? `Last one ${esc(formatDate(info.lastBackupAt.slice(0, 10)))}.` : 'None yet.'
       } ${behind && info.lastBackupAt ? 'New photos since then.' : ''}</p>
       <p class="hint" style="margin:0">For moving the vault to a new phone: one file with every photo, encrypted with your passcode, that Bhimlekha can restore. The week folders are for looking at in Files.</p>
       <button type="button" class="btn secondary" data-action="saveBackup" ${v.backup && v.backup.photos ? '' : 'disabled'}>${
-        v.backup ? (v.backup.photos ? `Save encrypted backup (${v.backup.photos} photo${v.backup.photos === 1 ? '' : 's'}, ${size})` : 'Nothing to back up yet') : 'Preparing backup…'
+        v.backup ? (v.backup.photos ? `Save encrypted backup (${v.backup.photos} photo${v.backup.photos === 1 ? '' : 's'}, ${size})` : 'Nothing to back up yet') : '<span class="spin"></span>Preparing backup…'
       }</button>
       ${
         v.status === 'unlocked'
           ? `<button type="button" class="btn secondary" data-action="vaultRestorePick">Restore photos from a backup…</button>`
           : ''
       }
-    </section>`;
+    </section>`,
+  );
 }
 
 /** Fill the comparison and viewer images (decrypted on demand, revoked on lock). */
@@ -1025,7 +1089,7 @@ async function renderCamera() {
           ? `<button type="button" class="btn" data-cam="retake">Retake</button>
              <button type="button" class="btn primary" data-cam="keep">Keep ${esc(pose)}</button>`
           : `<button type="button" class="btn" data-cam="close">Done</button>
-             <button type="button" class="btn" data-cam="timer">⏱ ${cam.timer ? cam.timer + ' s' : 'Off'}</button>
+             <button type="button" class="btn" data-cam="timer">${icon('timer')}${cam.timer ? cam.timer + ' s' : 'Off'}</button>
              <button type="button" class="btn shutter" data-cam="shoot" aria-label="Take ${esc(pose)} photo"></button>
              <button type="button" class="btn" data-cam="ghost" aria-pressed="${cam.ghost}">Overlay</button>
              <button type="button" class="btn" data-cam="flip">Flip</button>`
