@@ -465,3 +465,19 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     week's list is **Behind** (under half the target) / **Close** (below) / **Done** (reached); each row reads
     `done / target` with the bar against the target and a tick where the plan gets it. Every group (and the banner)
     folds: tap its heading (`musGroup`, `musUi().open`; Done and the banner start folded). Everything else unchanged.
+32. **v2.6.0** (owner 2026-10-26, "do 1-5"; auto HR/kcal from Shortcuts dropped, owner types them).
+    - **Recovery page** `#recovery` (More → Recovery history; Today's Recovery "History ›"): tiles (today, 7/30-day
+      average, sleep/HRV/RHR 7 days), chart Score / 7-day avg / Sleep / Sleep score / HRV / Resting HR / Soreness over
+      4w/12w/All, history by month; tap a day to change sleep score and soreness (saves and sends like the morning
+      card). A day without a saved score is scored from its own numbers (`recoveryDayScore`, baseline = earlier days).
+      `wt.recovery` keeps 400 days; the page reads 400 days from the Sheet (`autoPull('recovery')`, every 6 h).
+    - **Reps from last time**: the panel preselects the same set's reps last session (`prefillReps`, `repsAuto`), noted
+      "set N last time, tap to change"; a value not on the chips goes to Other. Any tap wins; warm-ups and failure
+      sets are not prefilled.
+    - **Low recovery → lighter day** (`lightDayCard` on the workout screen when today's open workout scores amber/red):
+      amber "One set fewer today" (`draft.light='amber'`, still counted); red "Make it a light day" (`'red'`: half
+      the sets, weights start 10% lighter to the step, comparisons paused, left out of `statsHistory` like a lighter
+      week). Undo puts the plan back. `light` lives on the phone's copy only (not a Sheet column).
+    - **Weekly summary**: Recovery row (average score, vs last week, sleep, HRV, RHR) and Records row.
+    - **PRs**: a set beating every earlier set of the exercise (heaviest weight, or best Epley 1-rep max; at bodyweight
+      most reps) shows "🏆 New PR" on save; the review lists the workout's records; Progress → Personal records.

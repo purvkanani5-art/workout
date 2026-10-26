@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '2.5.0';
+const APP_VERSION = '2.6.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -458,13 +458,36 @@ function recoveryEntry(date) {
 function putRecovery(date, values) {
   const e = recoveryEntry(date) || { date };
   for (const k of RECOVERY_KEYS) if (values[k] !== undefined) e[k] = values[k];
-  state.recovery = [...state.recovery.filter((x) => x.date !== date), e].sort((a, b) => a.date.localeCompare(b.date)).slice(-120);
+  state.recovery = [...state.recovery.filter((x) => x.date !== date), e].sort((a, b) => a.date.localeCompare(b.date)).slice(-400); // v2.6: a year+ for the Recovery page
   save(KEYS.recovery, state.recovery);
   return e;
 }
 
 function recoveryResult(date = todayISO()) {
   return Body.recoveryScore(state.recovery, date, state.settings.recoveryScore);
+}
+
+/** v2.6: a day's recovery score: the one saved that morning, else worked out from that day's numbers (the baseline
+    only uses earlier days, so an old day scores as it would have then). null when the day has nothing to score. */
+function recoveryDayScore(date) {
+  const e = recoveryEntry(date);
+  if (!e) return null;
+  if (Number.isFinite(e.score)) return e.score;
+  const r = recoveryResult(date);
+  return r && r.score !== null ? r.score : null;
+}
+
+/** green / amber / red for a score, with the thresholds in Settings → Recovery score. */
+function recoveryBand(score) {
+  if (score === null || score === undefined) return '';
+  const r = state.settings.recoveryScore;
+  return score >= r.green ? 'green' : score >= r.amber ? 'amber' : 'red';
+}
+
+/** v2.6: today's band when the open workout is today's (the lighter-day offer on the workout screen). */
+function todayRecoveryBand() {
+  if (!state.draft || state.draft.date !== todayISO()) return '';
+  return recoveryBand(recoveryDayScore(todayISO()));
 }
 
 /** Queue the app's own fields for the Sheet; one item per date, newest values win. */
@@ -498,12 +521,12 @@ function storeRecoveryScore(date) {
 
 /** The Shortcut's sleep, resting HR and HRV from the Sheet (at most every 20 minutes unless forced). Values this
     phone has not sent yet win over the Sheet's. */
-async function fetchRecovery({ force = false } = {}) {
+async function fetchRecovery({ force = false, days = 60 } = {}) {
   if (!haveApi()) return false;
   const last = load(KEYS.recoveryFetchedAt, 0);
   if (!force && Date.now() - last < 20 * 60000) return false;
   try {
-    const data = await apiGet({ action: 'recovery', days: 60 });
+    const data = await apiGet({ action: 'recovery', days });
     save(KEYS.recoveryFetchedAt, Date.now());
     for (const e of Array.isArray(data.entries) ? data.entries : []) {
       if (!e || !/^\d{4}-\d{2}-\d{2}$/.test(String(e.date))) continue;
@@ -964,9 +987,15 @@ function inDeload(date) {
   return Boolean(date) && deloadWindows().some((w) => date >= w.start && date <= w.end);
 }
 
-/** Saved workouts that count for progress: lighter-week workouts are left out so they cannot trigger warnings. */
+/** Saved workouts that count for progress: lighter-week workouts (and v2.6 light days, 10% less weight on a red
+    recovery morning) are left out so they cannot trigger warnings. */
 function statsHistory() {
-  return state.history.filter((s) => !inDeload(s.date));
+  return state.history.filter((s) => !inDeload(s.date) && s.light !== 'red');
+}
+
+/** v2.6: the open workout is a light day (red recovery: lighter weights, half the sets) or an easier one (amber). */
+function lightDay() {
+  return state.draft && !inDeload(state.draft.date) ? state.draft.light || '' : '';
 }
 
 /** Analysis of one exercise over the saved workouts that count. */
@@ -1338,6 +1367,90 @@ function lastTimeHint(exercise) {
   return '';
 }
 
+/** v2.6: the weight a new exercise starts at: last time's, or about 10% lighter (to the exercise's step) on a light day
+    until a set of it is logged today. */
+function startWeight(exercise) {
+  const last = lastWeight(exercise);
+  if (lightDay() !== 'red' || last === '' || state.draft.sets.some((s) => s.exercise === exercise)) return last;
+  const step = Number(state.settings.steps?.[exercise]) || 2.5;
+  return fmtKg(Math.max(0, Math.round((Number(last) * 0.9) / step) * step));
+}
+
+/** v2.6: reps of the same set last time (that set number, else the last working set), or null (none, or to failure). */
+function lastReps(exercise, setNo) {
+  for (const session of sortedHistory()) {
+    if (state.draft && session.id === state.draft.id) continue;
+    const mine = session.sets.filter((s) => s.exercise === exercise && !s.warmup).sort((a, b) => a.setNo - b.setNo);
+    if (!mine.length) continue;
+    const s = mine.find((x) => x.setNo === setNo) || mine[mine.length - 1];
+    return s.toFailure || !Number.isInteger(s.reps) || s.reps < 1 ? null : s.reps;
+  }
+  return null;
+}
+
+/** v2.6: preselect last time's reps for this set (marked "from last time"); a tap of the owner's always wins. */
+function prefillReps(f) {
+  if (!f || f.editingId) return f;
+  if (f.reps !== null && !f.repsAuto) return f;
+  const r = f.warmup || !f.exercise ? null : lastReps(f.exercise, f.setNo);
+  if (r === null) {
+    if (f.repsAuto) Object.assign(f, { reps: null, otherReps: '', repsAuto: false });
+    return f;
+  }
+  const chip = repsChips().includes(r);
+  return Object.assign(f, { reps: chip ? r : 'other', otherReps: chip ? '' : String(r), repsAuto: true });
+}
+
+/* ---------- v2.6: personal records ---------- */
+
+/** Best working sets of an exercise in `sessions`: heaviest weight (with its reps) and best estimated 1-rep max
+    (Epley; at bodyweight, the most reps). null when none. */
+function exerciseBests(exercise, sessions) {
+  let heaviest = null;
+  let best = null;
+  for (const s of sessions) {
+    for (const x of s.sets) {
+      if (x.exercise !== exercise || x.warmup || !(Number(x.reps) >= 1)) continue;
+      const w = Number(x.weightKg) || 0;
+      const e = Progress.e1rm(w, x.reps);
+      if (w > 0 && (!heaviest || w > heaviest.weight || (w === heaviest.weight && x.reps > heaviest.reps))) heaviest = { weight: w, reps: x.reps, date: s.date };
+      if (!best || e > best.e1rm) best = { e1rm: e, weight: w, reps: x.reps, date: s.date };
+    }
+  }
+  return best ? { heaviest, best } : null;
+}
+
+/** What a set beats among `before` (sessions): [] or ['weight'] / ['e1rm'] / both. Needs earlier sets to beat. */
+function setPRs(set, before) {
+  if (set.warmup || !(Number(set.reps) >= 1)) return [];
+  const b = exerciseBests(set.exercise, before);
+  if (!b) return [];
+  const w = Number(set.weightKg) || 0;
+  const out = [];
+  if (w > 0 && b.heaviest && w > b.heaviest.weight) out.push('weight');
+  if (Progress.e1rm(w, set.reps) > b.best.e1rm + 0.05) out.push('e1rm');
+  return out;
+}
+
+/** The records a workout set (each exercise once, its best set): [{ exercise, set, kinds }]. Light and lighter-week
+    days count too: a record is a record. */
+function sessionPRs(session) {
+  const before = state.history.filter((s) => s.id !== session.id && (s.date || '') <= (session.date || ''));
+  const out = new Map();
+  const done = [];
+  for (const x of [...session.sets].sort((a, b) => (a.loggedAt || '').localeCompare(b.loggedAt || ''))) {
+    const kinds = setPRs(x, [...before, { date: session.date, sets: done }]);
+    done.push(x);
+    if (kinds.length) out.set(x.exercise, { exercise: x.exercise, set: x, kinds: [...new Set([...(out.get(x.exercise)?.kinds || []), ...kinds])] });
+  }
+  return [...out.values()];
+}
+
+/** "100 kg × 5" / "12 reps" (bodyweight). */
+function prSetText(x) {
+  return Number(x.weightKg ?? x.weight) > 0 ? `${fmtKg(x.weightKg ?? x.weight)} kg × ${x.reps}` : `${x.reps} reps`;
+}
+
 function defaultExercise() {
   const d = state.draft;
   if (d.sets.length) return d.sets[d.sets.length - 1].exercise;
@@ -1348,19 +1461,20 @@ function defaultExercise() {
 function newForm(exercise) {
   const ex = exercise ?? defaultExercise();
   const setNo = nextSetNo(ex);
-  return {
+  return prefillReps({
     exercise: ex,
     setNo,
     visibleSets: Math.max(4, setNo),
     reps: null, // number | 'other' | 'failure' | null
+    repsAuto: false, // v2.6: reps preselected from last time (not tapped)
     otherReps: '',
     failureReps: '',
     rir: null, // 0–3 (3 = 3+), null until tapped
     warmup: false,
-    weight: lastWeight(ex),
+    weight: startWeight(ex),
     editingId: null,
     addingExercise: false,
-  };
+  });
 }
 
 function form() {
@@ -1411,6 +1525,9 @@ function render() {
     case 'body':
       html = renderBody();
       break;
+    case 'recovery':
+      html = renderRecovery();
+      break;
     case 'photos':
       html = renderPhotos();
       break;
@@ -1444,6 +1561,7 @@ function render() {
   }
   if (name === 'history' && !arg) autoPull('history');
   if (name === 'body') autoPull('measurements');
+  if (name === 'recovery') autoPull('recovery');
   if (name === 'muscles' || (name === 'settings' && arg === 'exercises')) refreshExercises(false, 5 * 60000); // the Sheet's latest exercises
   // Your own exercise names are matched to the database by themselves (no manual step), on these pages.
   if (['home', 'muscles'].includes(name) || (name === 'settings' && arg === 'exercises')) setTimeout(autoAliasUnknown, 0);
@@ -1468,6 +1586,8 @@ function autoPull(kind) {
   } catch {
     return;
   }
+  // v2.6: the Recovery page reads up to 400 days of the Sheet's Recovery tab (the morning card reads 60).
+  if (kind === 'recovery') return setTimeout(() => fetchRecovery({ force: true, days: 400 }).then((got) => got && route().name === 'recovery' && render()), 0);
   setTimeout(() => (kind === 'history' ? syncHistoryFromSheet(true) : syncMeasurementsFromSheet(true)), 0);
 }
 
@@ -1563,7 +1683,7 @@ function tabBar(tab) {
 function tabOf(name) {
   if (name === 'entry' || name === 'review' || name === 'workout') return 'workout';
   if (name === 'photos') return 'body'; // opened from Body, and its back link goes there
-  if (name === 'history' || name === 'settings' || name === 'more') return 'more';
+  if (name === 'history' || name === 'settings' || name === 'more' || name === 'recovery') return 'more';
   return ['progress', 'body', 'muscles'].includes(name) ? name : 'home';
 }
 
@@ -1694,7 +1814,7 @@ function renderHome() {
     </div>
     <p class="sub">${esc(WEEKDAYS[new Date().getDay()])}, ${esc(formatDate(today))}</p>
     ${group('Log today', `<span class="freq">Daily · ${log.done} of ${log.total} done</span>`, log.html)}
-    ${morningDone ? group('Recovery', '', morningCard()) : ''}
+    ${morningDone ? group('Recovery', '<a class="btn link small" href="#recovery">History ›</a>', morningCard()) : ''}
     ${group('Training', '', trainingCard() + (rcInfo ? `<div style="margin-top:10px">${rcInfo}</div>` : ''))}
     ${group('Nutrition & body', '<a class="btn link small" href="#body">Body ›</a>', nutritionCard())}
     ${attention.length ? group('Needs attention', `<span class="count">${attention.length}</span>`, `<div class="attention">${attention.join('')}</div>`) : ''}`;
@@ -1833,6 +1953,7 @@ function renderMore() {
     </div>`)}
     ${group('Body & health', '', `<div class="card flush">
       ${sec('calories', s.calorieLock ? `${s.calorieLock.target.toLocaleString('en-IN')} kcal a day` : 'Height, goal, rate')}
+      ${row('recovery', 'heart', 'red', 'Recovery history', recoveryAvgText())}
       ${sec('recoveryScore', 'Weights, baseline, morning Shortcut')}
       ${sec('body', `${measureFields().length} measurements · ${poses().length} poses`)}
       ${row('photos', 'lock', 'purple', 'Progress photos', 'Encrypted on this phone')}
@@ -2106,7 +2227,32 @@ function entryExercises() {
 function plannedSets(name) {
   const p = Progress.parsePlan(planText(state.draft.dayType, name));
   const done = state.draft.sets.filter((s) => s.exercise === name && !s.warmup).length;
-  return Math.max(p ? p.sets : 0, done, 1);
+  // v2.6: an easier day plans one set fewer, a light day about half (at least 1).
+  const light = lightDay();
+  const plan = p ? (light === 'red' ? Math.ceil(p.sets / 2) : light === 'amber' ? p.sets - 1 : p.sets) : 0;
+  return Math.max(plan, done, 1);
+}
+
+/** v2.6: on a low-recovery morning, the workout screen offers an easier or light day (one tap; Undo puts it back). */
+function lightDayCard() {
+  const d = state.draft;
+  if (!d || inDeload(d.date)) return '';
+  const light = d.light || '';
+  if (light) {
+    const text = light === 'red'
+      ? 'Light day: about half the sets, weights about 10% lighter, 3–4 reps in reserve. Not counted in progress.'
+      : 'Easier day: one set fewer per exercise, same weights, stop with 1–2 reps in reserve.';
+    return `<div class="banner notice ok lightday"><div class="nhead">${appIcon('leaf', 'green')}<div class="tx"><b class="title">${light === 'red' ? 'Light day on' : 'Easier day on'}</b><span>${esc(text)}</span></div></div>
+      <div class="actions"><button type="button" class="btn small pill" data-action="lightDay" data-level="">Undo</button></div></div>`;
+  }
+  const band = todayRecoveryBand();
+  if (band !== 'amber' && band !== 'red') return '';
+  const score = recoveryDayScore(todayISO());
+  return `<div class="banner notice warn lightday"><div class="nhead">${appIcon('heart', band === 'red' ? 'red' : 'orange')}<div class="tx"><b class="title">Recovery ${esc(score)} · ${esc(RECOVERY_TITLE[band])}</b><span>${esc(RECOVERY_ADVICE[band])}</span></div></div>
+    <div class="actions">
+      <button type="button" class="btn small pill" data-action="lightDay" data-level="${band}">${band === 'red' ? 'Make it a light day' : 'One set fewer today'}</button>
+      ${band === 'red' ? '<button type="button" class="btn small pill" data-action="lightDay" data-level="amber">Just one set fewer</button>' : ''}
+    </div></div>`;
 }
 
 function workingSetsDone(name) {
@@ -2119,7 +2265,7 @@ function exerciseCard(name) {
   const done = workingSetsDone(name);
   const total = plannedSets(name);
   const today = d.sets.filter((s) => s.exercise === name);
-  const a = inDeload(d.date) ? null : analyse(name);
+  const a = inDeload(d.date) || lightDay() === 'red' ? null : analyse(name);
   const badge = a && a.status.kind === 'increase' ? `<span class="badge">+${esc(fmtKg(a.status.nextWeight - a.status.weight))} kg</span>` : '';
   const dots = Array.from({ length: total }, (_, i) => `<i class="${i < done ? 'on' : ''}"></i>`).join('');
   const plan = planText(d.dayType, name);
@@ -2152,6 +2298,7 @@ function renderEntry() {
       <div class="progress" aria-hidden="true"><div style="width:${Math.min(100, total ? (done / total) * 100 : 0)}%"></div></div>
     </div>
     ${recoveryCard('entry')}
+    ${lightDayCard()}
     <p class="sub" style="margin-top:12px">Tap an exercise to log a set.</p>
     ${inProgress.length ? list('In progress', inProgress, '') : ''}
     ${list('Up next', next, 'Every exercise has been started.')}
@@ -2230,7 +2377,7 @@ function renderSetSheet() {
           </div>
         </div>
         <fieldset>
-          <legend>Reps</legend>
+          <legend>Reps${f.repsAuto ? ` <span class="small muted prefill">· set ${esc(f.setNo)} last time, tap to change</span>` : ''}</legend>
           <div class="chips" id="reps-grid">${chips}</div>
           ${
             f.reps === 'other'
@@ -2295,6 +2442,7 @@ function setCompareHtml() {
   const f = state.ui.form;
   if (!f || !f.exercise || f.warmup || !state.draft) return '';
   if (inDeload(state.draft.date)) return `<div class="set-compare"><div class="small iline">${icon('leaf')}<span>Lighter week: comparisons are paused. Go easy, with 3–4 reps in reserve.</span></div></div>`;
+  if (lightDay() === 'red') return `<div class="set-compare"><div class="small iline">${icon('leaf')}<span>Light day: comparisons are paused. About 10% lighter, 3–4 reps in reserve.</span></div></div>`;
   const weight = f.weight === '' ? NaN : Number(f.weight);
   const sessions = statsHistory().filter((s) => s.id !== state.draft.id);
   const c = Progress.setComparison(sessions, f.exercise, f.setNo, { weight, reps: formReps(f) }, state.draft.date || todayISO(), state.settings.progression, (from, to) =>
@@ -2344,7 +2492,7 @@ function refreshSetCompare() {
 
 /** Progression status for the exercise on the entry screen, from saved workouts only (what today should aim for). */
 function entryStatus(exercise) {
-  if (state.draft && inDeload(state.draft.date)) return '';
+  if (state.draft && (inDeload(state.draft.date) || lightDay() === 'red')) return '';
   const a = analyse(exercise);
   if (!a || a.status.kind === 'untracked') return '';
   const line = Progress.statusLine(a.status, todayISO());
@@ -2440,6 +2588,26 @@ const TREND = {
 
 /** "How did this workout compare": per exercise trend, numbers in words, progression status and warnings. */
 function renderInsight(session) {
+  return prsHtml(session) + insightBody(session);
+}
+
+/** v2.6: personal records set in this workout, on the review. */
+function prsHtml(session) {
+  const prs = sessionPRs(session);
+  if (!prs.length) return '';
+  return `<div class="insight stack prs">
+    <p class="insight-head">🏆 ${prs.length} personal record${prs.length === 1 ? '' : 's'}</p>
+    ${prs
+      .map((p) => `<p class="small" style="margin:0"><strong>${esc(p.exercise)}</strong> ${esc(prSetText(p.set))} · ${esc(p.kinds.map((k) => (k === 'weight' ? 'heaviest' : Number(p.set.weightKg) > 0 ? 'best est. 1-rep max' : 'most reps')).join(', '))}</p>`)
+      .join('')}
+  </div>`;
+}
+
+function insightBody(session) {
+  if (session.light === 'red') {
+    return `<div class="insight stack">
+      <p class="small iline" style="margin:0">${icon('leaf')}<span>Light day: not compared and not counted in progress.</span></p></div>`;
+  }
   if (inDeload(session.date)) {
     return `<div class="insight stack">
       <p class="small iline" style="margin:0">${icon('leaf')}<span>Lighter-week workout: not compared and not counted in progress, so it cannot set off warnings.</span></p></div>`;
@@ -3309,7 +3477,9 @@ const actions = {
     const f = form();
     const v = el.dataset.value;
     const value = v === 'other' || v === 'failure' ? v : Number(v);
-    f.reps = f.reps === value ? null : value;
+    // A preselected chip tapped again is confirmed (not cleared); any tap makes the reps the owner's own.
+    f.reps = f.reps === value && !f.repsAuto ? null : value;
+    f.repsAuto = false;
     render();
     if (f.reps === 'other') document.getElementById('other-reps')?.focus();
   },
@@ -3324,6 +3494,7 @@ const actions = {
   toggleWarmup() {
     const f = form();
     f.warmup = !f.warmup;
+    prefillReps(f); // a warm-up has no "last time" reps
     render();
   },
 
@@ -3331,6 +3502,7 @@ const actions = {
     const f = form();
     f.visibleSets += 1;
     f.setNo = f.visibleSets;
+    prefillReps(f);
     render();
   },
 
@@ -3349,7 +3521,8 @@ const actions = {
     f.exercise = name;
     f.setNo = nextSetNo(name);
     f.visibleSets = Math.max(4, f.setNo);
-    f.weight = lastWeight(name);
+    f.weight = startWeight(name);
+    prefillReps(f);
     render();
   },
 
@@ -3396,6 +3569,11 @@ const actions = {
     }
 
     const existing = f.editingId ? state.draft.sets.find((s) => s.id === f.editingId) : null;
+    // v2.6: a new set that beats every earlier set of the exercise (heaviest, or best estimated 1-rep max).
+    const prBefore = [
+      ...state.history.filter((s) => s.id !== state.draft.id && (s.date || '') <= (state.draft.date || '')),
+      { date: state.draft.date, sets: state.draft.sets },
+    ];
     const set = {
       id: existing ? existing.id : uuid(),
       exercise: f.exercise,
@@ -3407,26 +3585,31 @@ const actions = {
       weightKg: weight,
       loggedAt: existing ? existing.loggedAt : nowISO(),
     };
+    const prs = existing ? [] : setPRs(set, prBefore);
     if (existing) Object.assign(existing, set);
     else state.draft.sets.push(set);
     saveDraft();
 
     // Keep exercise and weight, advance the set number, clear the reps, start resting.
     const next = nextSetNo(f.exercise);
-    state.ui.form = {
+    state.ui.form = prefillReps({
       ...f,
       setNo: next,
       visibleSets: Math.max(4, next),
       reps: null,
+      repsAuto: false,
       otherReps: '',
       failureReps: '',
       rir: null,
       warmup: false,
       editingId: null,
-    };
+    });
     if (!existing) startTimer();
     state.ui.sheet = false; // back to the list, with the rest timer running
-    toast(existing ? `Set ${set.setNo} updated` : `Set ${set.setNo} saved`);
+    if (prs.length) {
+      const what = prs.includes('weight') ? 'heaviest ever' : Number(set.weightKg) > 0 ? `best est. 1-rep max (${fmtKg(Math.round(Progress.e1rm(set.weightKg, set.reps)))} kg)` : 'most reps ever';
+      toast(`🏆 New PR: ${f.exercise} ${prSetText(set)}, ${what}`);
+    } else toast(existing ? `Set ${set.setNo} updated` : `Set ${set.setNo} saved`);
     render();
   },
 
@@ -3605,6 +3788,17 @@ const actions = {
 
   morningEdit() {
     state.ui.morning = { soreness: null, sleepScore: '', editing: true };
+    render();
+  },
+
+  /** v2.6: easier ('amber') or light ('red') day for the open workout; '' undoes it. */
+  lightDay(el) {
+    if (!state.draft) return;
+    state.draft.light = el.dataset.level || '';
+    if (!state.draft.light) delete state.draft.light;
+    saveDraft();
+    if (state.ui.form && !state.ui.form.editingId) state.ui.form = null; // the next panel starts at the right weight
+    toast(state.draft.light === 'red' ? 'Light day: weights start about 10% lighter' : state.draft.light ? 'Easier day: one set fewer' : 'Back to the full plan');
     render();
   },
 
@@ -4098,12 +4292,14 @@ const changes = {
     f.exercise = el.value;
     f.setNo = nextSetNo(el.value);
     f.visibleSets = Math.max(4, f.setNo);
-    f.weight = lastWeight(el.value);
+    f.weight = startWeight(el.value);
     f.editingId = null;
+    prefillReps(f);
     render();
   },
   setNo(el) {
     form().setNo = Number(el.value);
+    prefillReps(form());
     render();
   },
   scriptUrl(el) {
@@ -4295,6 +4491,7 @@ const inputs = {
   },
   otherReps(el) {
     form().otherReps = el.value;
+    form().repsAuto = false;
     refreshSetCompare();
   },
   failureReps(el) {

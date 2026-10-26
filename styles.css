@@ -2099,6 +2099,16 @@ details.customday[open] > summary .chev { transform: rotate(90deg); }
 .mrow .mtx b .tag { margin-left: 4px; vertical-align: 1px; font-size: 11px; padding: 2px 7px; }
 .mrow.gap .sw { background: repeating-linear-gradient(45deg, var(--gap-stripe) 0 1.5px, var(--c) 1.5px 4.5px); }
 
+/* v2.6: Recovery page, light day, reps from last time, records */
+.recmonth { margin-top: 10px; }
+.recmonth > summary { cursor: pointer; list-style: none; min-height: 36px; display: flex; align-items: center; margin: 0 4px; }
+.recmonth > summary::-webkit-details-marker { display: none; }
+.recrow .tag { flex: none; margin-left: 8px; min-width: 38px; text-align: center; }
+.recedit { padding: 12px 14px; border-top: 1px solid var(--border); }
+.banner.notice.lightday { margin-top: 12px; }
+.legend .prefill, legend .prefill { font-weight: 400; }
+.insight.prs { border-left: 3px solid var(--ok); }
+
 /* v2.5: Muscles tab: Show menu in the title row, Front/Back, foldable groups, plan tick on the bars */
 .mhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .mhead h1 { margin-bottom: 0; }

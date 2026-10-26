@@ -88,6 +88,7 @@ function renderProgress() {
           : '<p class="empty pad">Submit a workout to start tracking.</p>'
       }</div>`,
     )}
+    ${renderRecords()}
     ${group(
       'Hard sets per muscle',
       '<a class="btn link small" href="#muscles">Muscle map ›</a>',
@@ -112,6 +113,29 @@ function renderProgress() {
       }
     </section>`,
     )}`;
+}
+
+/** v2.6: each exercise's personal records (best estimated 1-rep max, heaviest), newest record first. */
+function renderRecords() {
+  const names = [...new Set(state.history.flatMap((s) => s.sets.filter((x) => !x.warmup).map((x) => x.exercise)))];
+  const recs = names
+    .map((n) => ({ name: n, b: exerciseBests(n, state.history) }))
+    .filter((r) => r.b)
+    .map((r) => ({ ...r, date: [r.b.best.date, r.b.heaviest?.date].filter(Boolean).sort().pop() }))
+    .sort((a, b) => b.date.localeCompare(a.date) || a.name.localeCompare(b.name));
+  if (!recs.length) return '';
+  const row = ({ name, b }) => {
+    const best = b.best.weight > 0 ? `Best ${prSetText(b.best)} (est. 1RM ${fmtKg(Math.round(b.best.e1rm))} kg) · ${formatDate(b.best.date, false)}` : `Most reps ${b.best.reps} · ${formatDate(b.best.date, false)}`;
+    const heavy = b.heaviest && (b.heaviest.weight !== b.best.weight || b.heaviest.reps !== b.best.reps) ? ` · heaviest ${prSetText(b.heaviest)}` : '';
+    return `<button type="button" class="lrow" data-action="openExercise" data-name="${esc(name)}">${appIcon('trend', 'yellow')}<span class="tx"><b>${esc(name)}</b><span>${esc(best + heavy)}</span></span>${CHEV}</button>`;
+  };
+  return group(
+    'Personal records',
+    `<span class="note">${recs.length}</span>`,
+    `<div class="card flush">${recs.slice(0, 6).map(row).join('')}</div>${
+      recs.length > 6 ? `<details class="more-rows"><summary>Show ${recs.length - 6} more</summary><div class="card flush">${recs.slice(6).map(row).join('')}</div></details>` : ''
+    }`,
+  );
 }
 
 /** Overall strength per week (each exercise vs its own previous 4 weeks), the number trigger B watches. */
@@ -206,7 +230,22 @@ function weekSummary(endIso) {
   const info = state.vaultInfo;
   const photos = info.weeksChanged?.[week.folder] ? (unsavedWeeks().includes(week.folder) ? 'unsaved' : 'saved') : 'none';
 
+  // v2.6: recovery over the week (averages of the mornings recorded) vs the week before, and records set.
+  const prevStart = Progress.addDays(start, -7);
+  const prevEnd = Progress.addDays(start, -1);
+  const recovery = {
+    score: recAverage('score', start, end),
+    before: recAverage('score', prevStart, prevEnd),
+    sleep: recAverage('sleepHours', start, end),
+    hrv: recAverage('hrv', start, end),
+    hrvBefore: recAverage('hrv', prevStart, prevEnd),
+    rhr: recAverage('rhr', start, end),
+    days: state.recovery.filter((e) => inWeek(e.date)).length,
+  };
+  const prs = sessions.flatMap((s) => sessionPRs(s));
+
   return {
+    recovery, prs,
     week, start, end, running: end >= today, planned, done: new Set(sessions.map((s) => s.date)).size, sessions, missed, deload,
     counts, low, high, strength, best: changes[0] || null, worst: changes.length > 1 ? changes[changes.length - 1] : null,
     weight: weightNow !== null ? { now: weightNow, delta: weightBefore !== null ? weightNow - weightBefore : null } : null,
@@ -241,6 +280,17 @@ function renderWeekSummary(w) {
   if (w.weight) rows.push(`<li><span>Bodyweight</span><strong>${esc(fmtKg(Math.round(w.weight.now * 10) / 10))} kg</strong> avg${w.weight.delta !== null ? ` · ${esc(Progress.signed(w.weight.delta, 1, ' kg'))} vs last week` : ''}</li>`);
   if (w.waist) rows.push(`<li><span>Waist</span><strong>${esc(fmtKg(w.waist.now))} cm</strong>${w.waist.delta !== null ? ` · ${esc(Progress.signed(w.waist.delta, 1, ' cm'))}` : ''}</li>`);
   if (w.feel !== null) rows.push(`<li><span>How you felt</span><strong>${w.feel.toFixed(1)} / 5</strong> average</li>`);
+  const rc = w.recovery;
+  if (rc && rc.score !== null) {
+    const bits = [
+      rc.before !== null ? `${Progress.signed(rc.score - rc.before, 0, '')} vs last week` : '',
+      rc.sleep !== null ? `sleep ${rc.sleep.toFixed(1)} h` : '',
+      rc.hrv !== null ? `HRV ${Math.round(rc.hrv)} ms${rc.hrvBefore !== null ? ` (${Progress.signed(rc.hrv - rc.hrvBefore, 0, '')})` : ''}` : '',
+      rc.rhr !== null ? `resting HR ${Math.round(rc.rhr)}` : '',
+    ].filter(Boolean);
+    rows.push(`<li><span>Recovery</span><strong class="${rc.before !== null && rc.score < rc.before - 2 ? 'down' : ''}">${Math.round(rc.score)}</strong> average of ${rc.days} morning${rc.days === 1 ? '' : 's'}${bits.length ? ` · ${esc(bits.join(' · '))}` : ''}</li>`);
+  }
+  if (w.prs && w.prs.length) rows.push(`<li><span>Records</span><strong>🏆 ${w.prs.length}</strong> ${esc(w.prs.map((p) => `${p.exercise} ${prSetText(p.set)}`).join(', '))}</li>`);
   rows.push(`<li><span>Photos</span>${w.photos === 'saved' ? '✓ saved to Files' : w.photos === 'unsaved' ? '<strong class="down">not saved to Files yet</strong>' : 'none this week'}</li>`);
   return `<ul class="summary-list">${rows.join('')}</ul>`;
 }
@@ -622,6 +672,146 @@ function renderBody() {
       }
       <p class="hint gnote syncline">${icon('sync')}<span>${state.ui.syncing ? 'Fetching from the Sheet…' : `Pulled from the Sheet automatically (last ${pulledAgo('measurements')})`}</span><button type="button" class="btn link small" data-action="syncMeasurements" ${state.ui.syncing ? 'disabled' : ''}>Sync now</button></p>`,
     )}`;
+}
+
+/* ============================================================ Recovery (v2.6) */
+// Every morning's numbers (the Shortcut's sleep, resting HR and HRV, the owner's sleep score and soreness) and the
+// recovery score over time. The data is the same as before (wt.recovery, the Sheet's Recovery tab); this is a page
+// for it. A day without a saved score is scored from its own numbers (Body.recoveryScore, baseline = earlier days).
+
+const REC_METRICS = [
+  { key: 'score', label: 'Score', title: 'Recovery score', unit: '', digits: 0 },
+  { key: 'avg7', label: '7-day avg', title: 'Recovery score, 7-day average', unit: '', digits: 0 },
+  { key: 'sleepHours', label: 'Sleep', title: 'Sleep', unit: 'h', digits: 1 },
+  { key: 'sleepScore', label: 'Sleep score', title: 'Watch sleep score', unit: '', digits: 0 },
+  { key: 'hrv', label: 'HRV', title: 'Heart rate variability', unit: 'ms', digits: 0 },
+  { key: 'rhr', label: 'Resting HR', title: 'Resting heart rate', unit: 'bpm', digits: 0 },
+  { key: 'soreness', label: 'Soreness', title: 'Soreness (1 none – 10 very sore)', unit: '', digits: 0 },
+];
+
+function recUi() {
+  return (state.ui.recovery ||= { metric: 'score', range: '12w', edit: null });
+}
+
+/** The value of a metric on a day (score / 7-day average worked out; the rest as recorded), or null. */
+function recValue(key, date) {
+  if (key === 'score') return recoveryDayScore(date);
+  if (key === 'avg7') return recAverage('score', Progress.addDays(date, -6), date);
+  const v = recoveryEntry(date)?.[key];
+  return Number.isFinite(v) ? v : null;
+}
+
+/** Average of a metric over the days from `from` to `to` that have it, or null. */
+function recAverage(key, from, to) {
+  const vals = state.recovery.filter((e) => e.date >= from && e.date <= to).map((e) => recValue(key === 'avg7' ? 'score' : key, e.date)).filter((v) => v !== null);
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+}
+
+const recRound = (v, digits = 0) => (v === null ? '–' : digits ? v.toFixed(digits) : String(Math.round(v)));
+
+/** "7-day average 72" for More. */
+function recoveryAvgText() {
+  const t = todayISO();
+  const a = recAverage('score', Progress.addDays(t, -6), t);
+  return a === null ? 'Sleep, HRV, resting HR, score over time' : `7-day average ${Math.round(a)}`;
+}
+
+function bandTag(score) {
+  if (score === null) return '';
+  return tag(String(score), { green: 'ok', amber: 'warn', red: 'bad' }[recoveryBand(score)] || '');
+}
+
+function renderRecovery() {
+  const ui = recUi();
+  const today = todayISO();
+  const days = (n) => Progress.addDays(today, -(n - 1));
+  const m = REC_METRICS.find((x) => x.key === ui.metric) || REC_METRICS[0];
+  const points = state.recovery
+    .filter((e) => inRange(e.date, ui.range))
+    .map((e) => ({ date: e.date, y: recValue(m.key, e.date) }))
+    .filter((p) => p.y !== null);
+  const avg30 = recAverage('score', days(30), today);
+  const prev30 = recAverage('score', Progress.addDays(today, -59), Progress.addDays(today, -30));
+  const entries = [...state.recovery].sort((a, b) => b.date.localeCompare(a.date));
+  const months = new Map();
+  for (const e of entries) {
+    const key = e.date.slice(0, 7);
+    if (!months.has(key)) months.set(key, []);
+    months.get(key).push(e);
+  }
+  const monthName = (k) => new Date(`${k}-15T00:00:00`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const row = (e) => {
+    const score = recoveryDayScore(e.date);
+    const bits = [
+      Number.isFinite(e.sleepHours) ? `${e.sleepHours.toFixed(1)} h` : '',
+      Number.isFinite(e.sleepScore) ? `sleep ${e.sleepScore}` : '',
+      Number.isFinite(e.hrv) ? `HRV ${Math.round(e.hrv)}` : '',
+      Number.isFinite(e.rhr) ? `RHR ${Math.round(e.rhr)}` : '',
+      Number.isFinite(e.soreness) ? `sore ${e.soreness}` : '',
+    ].filter(Boolean);
+    const when = `${WEEKDAYS[new Date(Date.parse(e.date)).getUTCDay()].slice(0, 3)} ${formatDate(e.date, false)}`;
+    if (ui.edit === e.date) return recEditHtml(e, when);
+    return `<button type="button" class="lrow recrow" data-action="recEdit" data-date="${esc(e.date)}"><span class="tx"><b>${esc(when)}</b><span>${esc(bits.join(' · ') || 'no numbers')}</span></span>${score !== null ? bandTag(score) : tag('–')}${CHEV}</button>`;
+  };
+  let shown = 0;
+  const list = [...months.entries()]
+    .map(([k, list]) => {
+      const open = shown < 31;
+      shown += list.length;
+      const avg = list.map((e) => recoveryDayScore(e.date)).filter((v) => v !== null);
+      const head = `${monthName(k)}${avg.length ? ` · average ${Math.round(avg.reduce((a, b) => a + b, 0) / avg.length)}` : ''}`;
+      return `<details class="recmonth" ${open ? 'open' : ''}><summary class="sublabel">${esc(head)}</summary><div class="card flush">${list.map(row).join('')}</div></details>`;
+    })
+    .join('');
+  return `
+    ${topbar('Recovery', { href: 'more', label: 'More' })}
+    <p class="sub">Every morning's sleep, HRV, resting HR and soreness, and your score over time</p>
+    <div class="sgroup">${tiles([
+      [recRound(recoveryDayScore(today)), 'Today'],
+      [recRound(recAverage('score', days(7), today)), '7-day average'],
+      [recRound(avg30), '30-day average'],
+    ])}
+    ${tiles([
+      [`${recRound(recAverage('sleepHours', days(7), today), 1)} h`, 'Sleep, 7 days'],
+      [`${recRound(recAverage('hrv', days(7), today))} ms`, 'HRV, 7 days'],
+      [`${recRound(recAverage('rhr', days(7), today))}`, 'Resting HR, 7 days'],
+    ])}
+    ${avg30 !== null && prev30 !== null ? `<p class="hint gnote">30-day average ${esc(Progress.signed(avg30 - prev30, 0, ''))} vs the 30 days before (${esc(Math.round(prev30))}).</p>` : ''}</div>
+    ${group(
+      'Trends',
+      '',
+      `<section class="card stack">
+        ${segmented('recMetric', REC_METRICS, m.key, 'recMetric')}
+        ${segmented('recRange', RANGES, ui.range, 'recRange')}
+        ${Charts.line(points, { title: m.title, unit: m.unit, digits: m.digits })}
+        <p class="hint" style="margin:0">Score bands: ${esc(state.settings.recoveryScore.green)}+ ready to train · ${esc(state.settings.recoveryScore.amber)}–${esc(state.settings.recoveryScore.green - 1)} go a little easier · below ${esc(state.settings.recoveryScore.amber)} take it light. A day without a saved score is scored from its own numbers.</p>
+      </section>`,
+    )}
+    ${group(
+      'History',
+      `<span class="note">${entries.length} day${entries.length === 1 ? '' : 's'}</span>`,
+      `${entries.length ? list : '<div class="card"><p class="empty" style="padding:8px">No mornings recorded yet. Do the morning check on Today.</p></div>'}
+      <p class="hint gnote syncline">${icon('sync')}<span>Pulled from the Sheet's Recovery tab automatically (last ${pulledAgo('recovery')}). Tap a day to change its sleep score or soreness.</span></p>`,
+    )}`;
+}
+
+/** One day opened for editing: the Watch sleep score and soreness (tapping a soreness number saves). */
+function recEditHtml(e, when) {
+  const ui = recUi();
+  const sore = ui.soreness ?? (Number.isFinite(e.soreness) ? e.soreness : null);
+  return `<div class="recedit stack">
+    <div class="row between"><b>${esc(when)}</b><button type="button" class="btn link small" data-action="recEdit" data-date="">Cancel</button></div>
+    <div class="frow inset">
+      <label for="rec-sleep"><b>Watch sleep score</b><span>Optional, 0–100</span></label>
+      <input id="rec-sleep" class="input fnum" type="number" inputmode="numeric" min="0" max="100" placeholder="–" value="${esc(Number.isFinite(e.sleepScore) ? e.sleepScore : '')}" />
+    </div>
+    <div class="matrix-row">
+      <div class="q">Soreness <span class="small muted">1 = none · 10 = very sore · tap to save</span></div>
+      <div class="chips ten" role="group" aria-label="Soreness">${Array.from({ length: 10 }, (_, i) => i + 1)
+        .map((n) => `<button type="button" class="chip" data-action="recSoreness" data-value="${n}" aria-pressed="${sore === n}">${n}</button>`)
+        .join('')}</div>
+    </div>
+  </div>`;
 }
 
 function newMeasurement(kind, date, values, notes = '') {
@@ -1754,6 +1944,27 @@ function afterMusclesRender() {
 }
 
 const trackActions = {
+  // v2.6 Recovery page: open a day for editing ('' closes), then tap soreness to save it with the sleep score.
+  recEdit(el) {
+    Object.assign(recUi(), { edit: el.dataset.date || null, soreness: null });
+    render();
+  },
+  recSoreness(el) {
+    const ui = recUi();
+    const date = ui.edit;
+    if (!date) return;
+    const soreness = Number(el.dataset.value);
+    const raw = String(document.getElementById('rec-sleep')?.value ?? '').trim();
+    const sleepScore = raw === '' ? null : Number(raw);
+    if (sleepScore !== null && !(sleepScore >= 0 && sleepScore <= 100)) return toast('Sleep score is 0–100', 'error');
+    putRecovery(date, { soreness, ...(sleepScore !== null ? { sleepScore } : {}) });
+    const r = recoveryResult(date);
+    if (r && r.score !== null) putRecovery(date, { score: r.score });
+    queueRecovery(date, { soreness, ...(sleepScore !== null ? { sleepScore } : {}), ...(r && r.score !== null ? { score: r.score } : {}) });
+    Object.assign(ui, { edit: null, soreness: null });
+    toast(`Saved ${formatDate(date, false)}`);
+    render();
+  },
   musMode(el) {
     musUi().mode = el.dataset.mode === 'all' ? 'all' : 'mine';
     render();
@@ -2100,6 +2311,14 @@ const trackActions = {
 };
 
 const trackChanges = {
+  recMetric(el) {
+    recUi().metric = el.value;
+    render();
+  },
+  recRange(el) {
+    recUi().range = el.value;
+    render();
+  },
   // v2.5: one "Show" menu for This week / One day / My plan.
   musShow(el) {
     const u = musUi();
