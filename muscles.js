@@ -171,8 +171,8 @@ const Muscles = (() => {
     ],
   };
 
-  // Which view shows a muscle best (for jumping there from a list).
-  const VIEW_OF = { sideDelts: 'left', obliques: 'left' };
+  // Which view shows a muscle best (for jumping there from a list). v2.5: the tab shows front and back only.
+  const VIEW_OF = {};
   for (const k of ['upperTraps', 'middleTraps', 'lowerTraps', 'rotatorCuff', 'lats', 'lowerBack', 'rearDelts', 'triceps', 'glutes', 'hamstrings',
     'calfInner', 'calfOuter', 'calfLower', 'forearmBack']) VIEW_OF[k] = 'back';
 

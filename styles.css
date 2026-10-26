@@ -2099,6 +2099,24 @@ details.customday[open] > summary .chev { transform: rotate(90deg); }
 .mrow .mtx b .tag { margin-left: 4px; vertical-align: 1px; font-size: 11px; padding: 2px 7px; }
 .mrow.gap .sw { background: repeating-linear-gradient(45deg, var(--gap-stripe) 0 1.5px, var(--c) 1.5px 4.5px); }
 
+/* v2.5: Muscles tab: Show menu in the title row, Front/Back, foldable groups, plan tick on the bars */
+.mhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.mhead h1 { margin-bottom: 0; }
+.mhead .mshow { width: auto; min-width: 128px; flex: none; font-weight: 600; }
+.views4.two { grid-template-columns: 1fr 1fr; }
+.gtoggle { width: 100%; background: none; border: 0; padding: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; min-height: 44px; }
+.ghead.gtoggle { margin-bottom: 0; }
+.mgrp.open .ghead.gtoggle { margin-bottom: 8px; }
+.ghead.gtoggle h2 { flex: 1; }
+.gtoggle .chev { transition: transform .2s; }
+.mgrp.open .gtoggle .chev, .gapcard.open .gtoggle .chev { transform: rotate(90deg); }
+.gaphead.gtoggle { min-height: 28px; color: var(--text); }
+.gaphead.gtoggle b { flex: 1; font-size: 15px; }
+.gaphead.gtoggle .ico { color: var(--warn-border); width: 18px; height: 18px; flex: none; }
+.mrow .bar { position: relative; overflow: visible; height: 6px; border-radius: 3px; }
+.mrow .bar i { border-radius: 3px; }
+.mrow .bar .plantick { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; border-radius: 1px; background: var(--text); opacity: .55; }
+
 /* v2.2: rest timer "next up" */
 .timer.floating { flex-direction: column; align-items: stretch; gap: 10px; }
 .timer .trow { display: flex; align-items: center; justify-content: space-between; gap: 10px; }

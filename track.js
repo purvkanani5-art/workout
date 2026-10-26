@@ -1346,13 +1346,30 @@ function targetAnalysisHtml(d, key) {
 function gapsHtml(d) {
   if (!d.gaps.size) return `<div class="gapcard ok">${icon('check')}<span>Every muscle has at least one main exercise in your plan.</span></div>`;
   const list = Muscles.MUSCLES.filter((m) => d.gaps.has(m.key));
-  return `<div class="gapcard">
-    <div class="gaphead"><span class="gapkey" aria-hidden="true"></span><b>Not in your plan · ${list.length}</b></div>
-    <p class="hint" style="margin:2px 0 8px">No exercise in your schedule trains these as a main muscle. Striped on the body; tap one for exercises to add.</p>
+  // v2.5: one banner; tapping it opens the list.
+  const open = musOpen('gaps');
+  return `<div class="gapcard${open ? ' open' : ''}">
+    <button type="button" class="gaphead gtoggle" data-action="musGroup" data-grp="gaps" aria-expanded="${open}">${icon('alert')}<b>${list.length} muscle${list.length === 1 ? ' isn’t' : 's aren’t'} in your plan</b>${CHEV}</button>
+    ${open ? `<p class="hint" style="margin:6px 0 8px">No exercise in your schedule trains these as a main muscle. Tap one for exercises to add.</p>
     <div class="pills">${list
       .map((m) => `<button type="button" class="pill-btn gap${d.cov.mine[m.key].helps.length ? ' helped' : ''}" data-action="musPick" data-key="${m.key}">${esc(m.name)}${d.cov.mine[m.key].helps.length ? ' · helped' : ''}</button>`)
-      .join('')}</div>
+      .join('')}</div>` : ''}
   </div>`;
+}
+
+/** v2.5: whether a Muscles group is open (Done and the plan-gap list start closed). */
+function musOpen(id) {
+  const o = (musUi().open ||= {});
+  return id in o ? o[id] : id !== 'done' && id !== 'gaps';
+}
+
+/** A collapsible group on the Muscles tab: tap the heading to fold it. */
+function musGroupHtml(id, title, note, body) {
+  const open = musOpen(id);
+  return `<section class="sgroup mgrp${open ? ' open' : ''}">
+    <button type="button" class="ghead gtoggle" data-action="musGroup" data-grp="${esc(id)}" aria-expanded="${open}"><h2>${esc(title)}</h2><span class="note">${esc(note)}</span>${CHEV}</button>
+    ${open ? body : ''}
+  </section>`;
 }
 
 const fmtSets = (n) => `${Number.isInteger(n) ? n : n.toFixed(1)} set${n === 1 ? '' : 's'}`;
@@ -1361,17 +1378,14 @@ function figureSvg(view, d) {
   const layers = Muscles.FIG[view === 'right' ? 'left' : view];
   const mir = 'transform="matrix(-1 0 0 1 200 0)"';
   const picked = musUi().picked;
-  // A muscle not in the plan gets stripes over its colour (the stripes ignore taps, so the muscle still picks).
+  // v2.5: colour only (plan gaps are the banner under the body, not stripes).
   const one = ([type, key, path], extra = '') =>
     type === 'm'
-      ? `<path class="m${key === picked ? ' on' : ''}" d="${path}" data-m="${key}" style="fill:var(--m${d.lv(key)})" ${extra}/>${
-          d.gaps.has(key) ? `<path class="nocov" d="${path}" fill="url(#mhatch)" ${extra}/>` : ''
-        }`
+      ? `<path class="m${key === picked ? ' on' : ''}" d="${path}" data-m="${key}" style="fill:var(--m${d.lv(key)})" ${extra}/>`
       : `<path class="${type}" d="${path}" ${extra}/>`;
   let inner = layers.map((l) => one(l) + (l[3] ? one(l, mir) : '')).join('');
   if (view === 'right') inner = `<g ${mir}>${inner}</g>`;
-  const defs = '<defs><pattern id="mhatch" width="3.2" height="3.2" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1.1" height="3.2" class="hatch"/></pattern></defs>';
-  return `${defs}<g class="fig-in">${inner}</g>`;
+  return `<g class="fig-in">${inner}</g>`;
 }
 
 function pickedHtml(d) {
@@ -1443,39 +1457,47 @@ function muscleListsHtml(d) {
   const u = musUi();
   const rows = Muscles.MUSCLES.map((m) => ({ m, n: d.value[m.key], lv: d.lv(m.key) }));
   const max = Math.max(...rows.map((r) => r.n), 1);
-  const rowHtml = ({ m, n, lv }, sub) =>
-    `<button type="button" class="mrow${d.gaps.has(m.key) ? ' gap' : ''}" data-action="musPick" data-key="${m.key}" style="--c:var(--m${lv})"><span class="sw"></span><span class="mtx"><b>${esc(m.name)}${
+  const r1 = (x) => Math.round(x * 10) / 10;
+  // Week scale (v2.5): the bar is done against the muscle's target, with a tick where the plan gets it; the number is
+  // "done / target". A muscle with no target keeps the old bar (against the most-trained muscle).
+  const rowHtml = ({ m, n, lv }, sub) => {
+    const t = muscleTarget(m.key);
+    const week = d.scale === 'week' && t.sets;
+    const has = week ? towardTarget(m.key, d) : n;
+    const fill = week ? Math.min(1, has / t.sets) : n / max;
+    const plan = week && d.mode === 'mine' ? Math.min(1, towardTarget(m.key, d.planW) / t.sets) : null;
+    const num = week ? `${esc(r1(has))} / ${esc(t.sets)}` : d.mode === 'mine' ? esc(fmtSets(n)) : `${esc(r1(n))}/wk`;
+    return `<button type="button" class="mrow${d.gaps.has(m.key) ? ' gap' : ''}" data-action="musPick" data-key="${m.key}" style="--c:var(--m${lv})"><span class="sw"></span><span class="mtx"><b>${esc(m.name)}${
       d.gaps.has(m.key) ? ` ${tag('Not in plan', 'warn')}` : ''
-    }</b><span>${esc(sub)}</span></span><span class="n">${
-      d.scale === 'week' && muscleTarget(m.key).sets
-        ? `${esc(Math.round(towardTarget(m.key, d) * 10) / 10)}/${esc(muscleTarget(m.key).sets)}${muscleTarget(m.key).direct ? ' d' : ''}`
-        : d.mode === 'mine' ? esc(fmtSets(n)) : `${esc(Math.round(n * 10) / 10)}/wk`
-    }</span><span class="bar"><i style="width:${(n / max) * 100}%"></i></span></button>`;
+    }</b><span>${esc(sub)}${week && t.direct ? ' · main-muscle sets only' : ''}</span></span><span class="n">${num}</span><span class="bar"><i style="width:${fill * 100}%"></i>${
+      plan !== null ? `<b class="plantick" style="left:${plan * 100}%" title="Your plan"></b>` : ''
+    }</span></button>`;
+  };
   let groups;
   if (d.mode === 'mine' && d.scale === 'week') {
     groups = [
-      ['Needs more work', 'under half its target', rows.filter((r) => r.lv <= 1).sort((a, b) => a.n - b.n)],
-      ['Some work', 'below its target', rows.filter((r) => r.lv === 2).sort((a, b) => b.n - a.n)],
-      ['On target', 'target reached', rows.filter((r) => r.lv >= 3).sort((a, b) => b.n - a.n)],
+      ['behind', 'Behind', 'under half its target', rows.filter((r) => r.lv <= 1).sort((a, b) => a.n - b.n)],
+      ['close', 'Close', 'below its target', rows.filter((r) => r.lv === 2).sort((a, b) => b.n - a.n)],
+      ['done', 'Done', 'target reached', rows.filter((r) => r.lv >= 3).sort((a, b) => b.n - a.n)],
     ];
   } else if (d.mode === 'mine') {
     const day = formatDate(u.day || todayISO(), false);
     groups = [
-      [`Trained on ${day}`, '', rows.filter((r) => r.n > 0).sort((a, b) => b.n - a.n)],
-      [`Not trained on ${day}`, '', rows.filter((r) => r.n === 0)],
+      ['dayOn', `Trained on ${day}`, '', rows.filter((r) => r.n > 0).sort((a, b) => b.n - a.n)],
+      ['dayOff', `Not trained on ${day}`, '', rows.filter((r) => r.n === 0)],
     ];
   } else {
     // All exercises: the gaps first, then every muscle by body area.
     const areas = [...new Set(Muscles.MUSCLES.map((m) => m.area))];
     groups = [
-      ['Not in your plan', `${d.gaps.size} muscle${d.gaps.size === 1 ? '' : 's'} · no main exercise`, rows.filter((r) => d.gaps.has(r.m.key))],
-      ...areas.map((a) => [a, '', rows.filter((r) => r.m.area === a)]),
+      ['planGaps', 'Not in your plan', `${d.gaps.size} muscle${d.gaps.size === 1 ? '' : 's'} · no main exercise`, rows.filter((r) => d.gaps.has(r.m.key))],
+      ...areas.map((a) => [`area:${a}`, a, '', rows.filter((r) => r.m.area === a)]),
     ];
   }
   const html = groups
-    .filter(([, , list]) => list.length)
-    .map(([title, note, list]) =>
-      group(title, `<span class="note">${esc(note || `${list.length} muscle${list.length === 1 ? '' : 's'}`)}</span>`, `<div class="card flush">${list
+    .filter(([, , , list]) => list.length)
+    .map(([id, title, note, list]) =>
+      musGroupHtml(id, `${title} (${list.length})`, note, `<div class="card flush">${list
         .map((r) => {
           if (d.mode === 'mine') return rowHtml(r, r.m.area);
           const c = d.cov.mine[r.m.key];
@@ -1495,22 +1517,22 @@ function renderMuscles() {
   const today = todayISO();
   if (!u.day) u.day = today;
   const days = Array.from({ length: 7 }, (_, i) => Progress.addDays(today, i - 6));
-  const views = [['front', 'Front'], ['back', 'Back'], ['left', 'Left side'], ['right', 'Right side']];
+  // v2.5: front and back only (a muscle seen only from the side before is on one of them).
+  if (u.view !== 'back') u.view = 'front';
+  const views = [['front', 'Front'], ['back', 'Back']];
   const ex = state.exdb;
+  const show = d.mode === 'all' ? 'plan' : u.period === 'day' ? 'day' : 'week';
   return `
-    <h1 class="large">Muscles</h1>
-    <p class="sub">${d.mode === 'mine' ? 'Sets you logged (not your plan) · a helping muscle counts half a set, a tertiary one a quarter · warm-ups not counted' : 'Hard sets a week your plan gives each muscle (planned sets × days on the schedule), and every exercise in the database'}</p>
-    <div class="seg2" role="tablist" aria-label="Show">
-      <button type="button" role="tab" data-action="musMode" data-mode="mine" aria-selected="${d.mode === 'mine'}">Logged sets</button>
-      <button type="button" role="tab" data-action="musMode" data-mode="all" aria-selected="${d.mode === 'all'}">My plan</button>
+    <div class="mhead">
+      <h1 class="large">Muscles</h1>
+      <select class="select mshow" data-change="musShow" aria-label="Show">${[['week', 'This week'], ['day', 'One day'], ['plan', 'My plan']]
+        .map(([v, l]) => `<option value="${v}" ${v === show ? 'selected' : ''}>${l}</option>`)
+        .join('')}</select>
     </div>
+    <p class="sub">${d.mode === 'mine' ? 'Sets you logged (not your plan) · a helping muscle counts half a set, a tertiary one a quarter · warm-ups not counted' : 'Hard sets a week your plan gives each muscle (planned sets × days on the schedule), and every exercise in the database'}</p>
     ${
       d.mode === 'mine'
-        ? `<div class="seg2 slim" role="tablist" aria-label="Period">
-            <button type="button" role="tab" data-action="musPeriod" data-period="week" aria-selected="${u.period !== 'day'}">Last 7 days</button>
-            <button type="button" role="tab" data-action="musPeriod" data-period="day" aria-selected="${u.period === 'day'}">One day</button>
-          </div>
-          ${
+        ? `${
             u.period === 'day'
               ? `<div class="days7">${days
                   .map(
@@ -1522,7 +1544,7 @@ function renderMuscles() {
         : ''
     }
     <div class="card flush mcard">
-      <div class="views4" role="tablist" aria-label="View">${views
+      <div class="views4 two" role="tablist" aria-label="View">${views
         .map(([v, l]) => `<button type="button" role="tab" data-action="musView" data-view="${v}" aria-selected="${u.view === v}">${l}</button>`)
         .join('')}</div>
       <div class="mstage" id="mstage">
@@ -1537,7 +1559,6 @@ function renderMuscles() {
       </div>
       <div class="picked" id="mpicked">${pickedHtml(d)}</div>
       <div class="scale">${Muscles.LEVELS[d.scale === 'week' ? 'target' : d.scale].map(([, label], i) => `<div style="--c:var(--m${i})">${esc(label)}</div>`).join('')}</div>
-      ${d.gaps.size ? '<div class="nocov-key"><span class="gapkey" aria-hidden="true"></span>Striped: not in your plan (no main exercise in your schedule)</div>' : ''}
     </div>
     <div class="sgroup">${gapsHtml(d)}</div>
     ${muscleListsHtml(d)}
@@ -1702,9 +1723,7 @@ function afterMusclesRender() {
     const dx = e.clientX - g.x0;
     const dy = e.clientY - g.y0;
     if (g.kind === 'swipe' && Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
-      const order = ['front', 'left', 'back', 'right'];
-      const i = order.indexOf(musUi().view);
-      musSetView(order[(i + (dx < 0 ? 1 : 3)) % 4]);
+      musSetView(musUi().view === 'back' ? 'front' : 'back');
       return;
     }
     if (g.kind !== 'tap' || e.type === 'pointercancel') return;
@@ -1749,6 +1768,12 @@ const trackActions = {
   },
   musView(el) {
     musSetView(el.dataset.view);
+  },
+  // v2.5: fold or unfold a Muscles group (Behind / Close / Done, the plan-gap banner…); kept while the app is open.
+  musGroup(el) {
+    const id = el.dataset.grp;
+    musUi().open = { ...musUi().open, [id]: !musOpen(id) };
+    render();
   },
   // A muscle tapped in a list: show it on the figure (turning to a view that has it) and in the panel.
   musPick(el) {
@@ -2075,6 +2100,13 @@ const trackActions = {
 };
 
 const trackChanges = {
+  // v2.5: one "Show" menu for This week / One day / My plan.
+  musShow(el) {
+    const u = musUi();
+    u.mode = el.value === 'plan' ? 'all' : 'mine';
+    if (el.value !== 'plan') u.period = el.value === 'day' ? 'day' : 'week';
+    render();
+  },
   summaryWeek(el) {
     state.ui.summaryWeek = el.value;
     render();

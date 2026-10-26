@@ -458,3 +458,10 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     muscles clear in the Sheet too) and, when renamed, keeps the new name as another name. The Muscles views are
     "Logged sets" (last 7 days, logged, not the plan) and "My plan" (planned sets a week); a picked muscle shows
     where its number comes from (each exercise, day, sets, × ½ for a helper).
+31. **v2.5.0: Muscles tab made easier to read** (owner 2026-10-26: "muscles tab is too confusing", approved this
+    mockup only, "no changes to amount of data and structure"). One **Show** menu in the title row (This week / One
+    day / My plan) replaces the two toggles; views are **Front / Back** only (swipe flips; `VIEW_OF` now empty);
+    no stripes on the body, plan gaps are one banner ("N muscles aren't in your plan ›", opens the chips). This
+    week's list is **Behind** (under half the target) / **Close** (below) / **Done** (reached); each row reads
+    `done / target` with the bar against the target and a tick where the plan gets it. Every group (and the banner)
+    folds: tap its heading (`musGroup`, `musUi().open`; Done and the banner start folded). Everything else unchanged.
