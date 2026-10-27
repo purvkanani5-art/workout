@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '2.6.0';
+const APP_VERSION = '2.7.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -212,6 +212,8 @@ const state = {
     profile: { sex: 'male', dob: '', heightCm: null }, // for body fat and calories (v1.7)
     calorieLock: null, // { target, weightKg, date, bfDate, reason, prev, seen } the number to enter in MyFitnessPal
     ...savedSettings,
+    // v2.7: a missed day is made up in the next workout, `count` exercises from each day; `picks` = the owner's choice per day.
+    merge: { count: 4, picks: {}, ...(savedSettings.merge || {}) },
     calories: { ...Body.CALORIE_DEFAULTS, ...(savedSettings.calories || {}) },
     recoveryScore: { ...Body.RECOVERY_SCORE_DEFAULTS, ...(savedSettings.recoveryScore || {}) },
     progression: { ...Progress.PROGRESSION_DEFAULTS, ...(savedSettings.progression || {}) },
@@ -403,6 +405,168 @@ function setMissedReason(id, reason, note) {
   save(KEYS.missed, state.missed);
   queueMissed(m);
   syncOutbox();
+}
+
+/* ------------------------------------------------ v2.7: missed-day merge */
+
+/** How many exercises each day contributes to a merged workout (More → Missed-day merge; owner's rule: 4). */
+function mergeCount() {
+  return Math.max(1, Math.round(Number(state.settings.merge?.count)) || 4);
+}
+
+/** The owner's picked exercises for a day in a merged workout (only names still in that day's plan, plan order). */
+function mergePicks(day) {
+  const picked = state.settings.merge?.picks?.[day] || [];
+  return dayExercises(day).filter((n) => picked.includes(n));
+}
+
+function setMergePicks(day, names) {
+  state.settings.merge = { count: mergeCount(), picks: { ...(state.settings.merge?.picks || {}), [day]: names } };
+  save(KEYS.settings, state.settings);
+}
+
+/** Does a workout count as this day? A merged workout counts for both of its days. */
+function sessionHasDay(s, day) {
+  return s.dayType === day || (s.merge?.parts || []).some((p) => p.day === day);
+}
+
+/**
+ * The missed workout to make up on `date` (owner's rule, 2026-10-27: a missed day is mixed into the next workout,
+ * a few exercises from each day). Found when the last scheduled day before `date` was missed and nothing has been
+ * trained since; only that one day is made up (two missed in a row: the latest). Returns { missed, next } or null.
+ */
+function mergeCandidate(date) {
+  const next = scheduledDay(date);
+  if (!next || state.history.some((s) => s.date === date)) return null;
+  let d = Progress.addDays(date, -1);
+  for (let i = 0; i < 14; i++, d = Progress.addDays(d, -1)) {
+    if (state.history.some((s) => s.date === d)) return null; // trained since: nothing to make up
+    if (!scheduledDay(d)) continue;
+    const m = state.missed.find((x) => x.date === d);
+    return m && m.dayType !== next && dayExercises(m.dayType).length ? { missed: m, next } : null;
+  }
+  return null;
+}
+
+function mergeTitle(c) {
+  return `${c.missed.dayType} + ${c.next}`;
+}
+
+/** The exercises a merged workout starts with: the missed day's picks, then the planned day's. */
+function mergeParts(c) {
+  return [
+    { day: c.missed.dayType, exercises: mergePicks(c.missed.dayType) },
+    { day: c.next, exercises: mergePicks(c.next) },
+  ];
+}
+
+/** The open workout's planned exercises in order (a merged workout: both days' picks). */
+function draftPlanList() {
+  const d = state.draft;
+  if (!d) return [];
+  return d.merge ? d.merge.parts.flatMap((p) => p.exercises) : state.exercises[d.dayType] || [];
+}
+
+/** The day whose plan an exercise follows in the open workout: in a merged workout, the part it came from. */
+function draftDay(name) {
+  const d = state.draft;
+  if (!d) return '';
+  if (!d.merge) return d.dayType;
+  const part = d.merge.parts.find((p) => p.exercises.includes(name));
+  return part ? part.day : d.merge.parts[1].day;
+}
+
+/** Which workout made up a missed day, if any. */
+function madeUpIn(missedId) {
+  return state.history.find((s) => s.merge?.missedId === missedId) || (state.draft?.merge?.missedId === missedId ? state.draft : null);
+}
+
+/**
+ * The tick sheet before a merged workout: the owner chooses which exercises each day contributes (never picked for
+ * them). Ticks are remembered per day. Resolves with { [day]: [names] } or null.
+ */
+function openMergeSheet(c) {
+  const modal = document.getElementById('modal');
+  const n = mergeCount();
+  const days = [c.missed.dayType, c.next];
+  const picked = Object.fromEntries(days.map((day) => [day, new Set(mergePicks(day))]));
+  const count = (day) => `${picked[day].size} of ${n}`;
+  return new Promise((resolve) => {
+    modal.innerHTML = `
+      <div class="sheet mergesheet" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <div class="grab" aria-hidden="true"></div>
+        <h2 id="modal-title">${esc(mergeTitle(c))}</h2>
+        <p>Tick ${n} exercises from each day. Your ticks are remembered (More → Missed-day merge).</p>
+        ${days
+          .map(
+            (day) => `<div class="mergeday">
+            <div class="ghead"><h3>${esc(day)}${day === c.missed.dayType ? ` <span class="muted">missed ${esc(formatDate(c.missed.date, false))}</span>` : ''}</h3><span class="note" data-count="${esc(day)}">${count(day)}</span></div>
+            <div class="card flush">${dayExercises(day)
+              .map(
+                (name) => `<label class="check row"><span><b>${esc(name)}</b>${planText(day, name) ? `<span>Plan ${esc(planText(day, name))}</span>` : ''}</span>
+                <input type="checkbox" data-merge-day="${esc(day)}" data-name="${esc(name)}" ${picked[day].has(name) ? 'checked' : ''} /></label>`,
+              )
+              .join('')}</div>
+          </div>`,
+          )
+          .join('')}
+        <div class="actions">
+          <button type="button" class="btn" data-modal="cancel">Cancel</button>
+          <button type="button" class="btn confirm" data-modal="confirm" ${days.every((day) => picked[day].size) ? '' : 'disabled'}>Start</button>
+        </div>
+      </div>`;
+    modal.hidden = false;
+    const finish = (value) => {
+      modal.hidden = true;
+      modal.innerHTML = '';
+      modal.onclick = null;
+      modal.onchange = null;
+      modal.onkeydown = null;
+      resolve(value);
+    };
+    modal.onchange = (e) => {
+      const box = e.target.closest('input[data-merge-day]');
+      if (!box) return;
+      const day = box.dataset.mergeDay;
+      if (box.checked) picked[day].add(box.dataset.name);
+      else picked[day].delete(box.dataset.name);
+      modal.querySelector(`[data-count="${CSS.escape(day)}"]`).textContent = count(day);
+      modal.querySelector('[data-modal="confirm"]').disabled = !days.every((x) => picked[x].size);
+    };
+    modal.onclick = (e) => {
+      const btn = e.target.closest('[data-modal]');
+      if (btn?.dataset.modal === 'cancel' || e.target === modal) return finish(null);
+      if (btn?.dataset.modal === 'confirm' && !btn.disabled) {
+        finish(Object.fromEntries(days.map((day) => [day, dayExercises(day).filter((x) => picked[day].has(x))])));
+      }
+    };
+    modal.onkeydown = (e) => {
+      if (e.key === 'Escape') finish(null);
+    };
+  });
+}
+
+/** The Today card / Workout row offering the merged workout. */
+function mergeCardHtml(c, date) {
+  const n = mergeCount();
+  const parts = mergeParts(c);
+  const ready = parts.every((p) => p.exercises.length);
+  const lines = parts
+    .map((p) =>
+      p.exercises.length
+        ? p.exercises.map((x) => `<div class="plan-line"><i></i><span>${esc(x)}</span><span class="n">${esc(p.day)}</span></div>`).join('')
+        : `<div class="plan-line"><i></i><span class="muted">Choose ${n} from ${esc(p.day)}</span></div>`,
+    )
+    .join('');
+  return `<div class="card stack merge-card">
+    <div><b class="big-name">${esc(mergeTitle(c))}</b><p class="hint">${esc(c.missed.dayType)} was missed on ${esc(WEEKDAYS[new Date(Date.parse(c.missed.date)).getUTCDay()])} ${esc(formatDate(c.missed.date, false))} · ${n} exercises from each day</p></div>
+    <div class="plan-lines">${lines}</div>
+    <button type="button" class="btn primary" data-action="startMerged" data-date="${esc(date)}">${ready ? `Start ${esc(mergeTitle(c))}` : `Choose the ${n} + ${n} and start`}</button>
+    <div class="row-btns merge-links">
+      <button type="button" class="btn link small" data-action="startMerged" data-date="${esc(date)}" data-choose="1">Change the ${n} + ${n}</button>
+      <button type="button" class="btn link small" data-action="quickStart" data-day="${esc(c.next)}">Just ${esc(c.next)}</button>
+    </div>
+  </div>`;
 }
 
 /* --------------------------------------------------- small workouts → Sheet */
@@ -1454,7 +1618,7 @@ function prSetText(x) {
 function defaultExercise() {
   const d = state.draft;
   if (d.sets.length) return d.sets[d.sets.length - 1].exercise;
-  const list = state.exercises[d.dayType] || [];
+  const list = draftPlanList();
   return list[0] || allKnownExercises()[0] || '';
 }
 
@@ -1755,8 +1919,10 @@ function trainingCard() {
   if (!planned) {
     return `<div class="card stack"><p style="margin:0"><b>Rest day</b> on your schedule.</p><a class="btn secondary" href="#workout">Start a workout anyway</a></div>`;
   }
+  const merge = mergeCandidate(today);
+  if (merge) return mergeCardHtml(merge, today);
   const list = dayExercises(planned);
-  const last = state.history.filter((s) => s.dayType === planned && s.date < today).map((s) => s.date).sort().pop();
+  const last = state.history.filter((s) => sessionHasDay(s, planned) && s.date < today).map((s) => s.date).sort().pop();
   return `<div class="card stack">
     <div><b class="big-name">${esc(planned)}</b><p class="hint">${list.length} exercise${list.length === 1 ? '' : 's'}${last ? ` · last done ${esc(formatDate(last, false))}` : ''}</p></div>
     <div class="plan-lines">${list
@@ -1834,7 +2000,7 @@ function renderWorkoutHome() {
   const ordered = planned && days.includes(planned) ? [planned, ...days.filter((x) => x !== planned)] : days;
   const dayRow = (day) => {
     const n = dayExercises(day).length;
-    const last = state.history.filter((s) => s.dayType === day && s.date < date).map((s) => s.date).sort().pop();
+    const last = state.history.filter((s) => sessionHasDay(s, day) && s.date < date).map((s) => s.date).sort().pop();
     const ago = last ? Progress.daysBetween(last, date) : null;
     return `<button type="button" class="lrow" data-action="quickStart" data-day="${esc(day)}">${appIcon('dumbbell', day === planned ? 'saffron' : 'grey')}
       <span class="tx"><b>${esc(day)}</b><span>${n} exercise${n === 1 ? '' : 's'}${last ? ` · last done ${ago === 0 ? 'today' : ago === 1 ? 'yesterday' : `${ago} days ago`}` : ' · not done yet'}</span></span>
@@ -1849,6 +2015,7 @@ function renderWorkoutHome() {
       d ? 'Start a new workout' : 'Start a workout',
       `<label class="datechip" for="start-date">${icon('calendar')}<span>${esc(isToday ? 'Today' : formatDate(date, false))}</span><input id="start-date" type="date" value="${esc(date)}" data-change="startDate" aria-label="Workout date" /></label>`,
       `<div class="card flush">
+        ${mergeRow(date)}
         ${ordered.map(dayRow).join('')}
         <details class="customday" ${st.dayType === 'Custom' ? 'open' : ''}>
           <summary class="lrow">${appIcon('bolt', 'yellow')}<span class="tx"><b>Custom day</b><span>Your own name, e.g. Arms</span></span>${CHEV}</summary>
@@ -1875,6 +2042,16 @@ function renderWorkoutHome() {
             .join('')}</div>`
         : '<div class="card"><p class="hint" style="margin:0">Your workouts show here.</p></div>',
     )}`;
+}
+
+/** v2.7: the Workout tab's first row when the date's last scheduled day was missed: the merged workout. */
+function mergeRow(date) {
+  const c = mergeCandidate(date);
+  if (!c) return '';
+  const n = mergeCount();
+  return `<button type="button" class="lrow" data-action="startMerged" data-date="${esc(date)}">${appIcon('sync', 'orange')}
+    <span class="tx"><b>${esc(mergeTitle(c))}</b><span>${esc(c.missed.dayType)} missed ${esc(formatDate(c.missed.date, false))} · ${n} exercises from each</span></span>
+    ${tag('Make up', 'warn')}<span class="go">Start</span></button>`;
 }
 
 /* iOS-Settings-style icons: a coloured rounded square with a white glyph. */
@@ -1926,7 +2103,7 @@ const CHEV = '<svg class="chev" width="9" height="15" viewBox="0 0 10 16" aria-h
 
 // Settings sections opened from More: [data-sec name, title, icon, colour, one-line summary].
 const SETTINGS_SECTIONS = {
-  schedule: ['Schedule', 'calendar', 'red'], exercises: ['Exercises & plans', 'dumbbell', 'ink'], progression: ['Progression', 'trend', 'green'], targets: ['Muscle set targets', 'dumbbell', 'saffron'],
+  schedule: ['Schedule', 'calendar', 'red'], merge: ['Missed-day merge', 'sync', 'orange'], exercises: ['Exercises & plans', 'dumbbell', 'ink'], progression: ['Progression', 'trend', 'green'], targets: ['Muscle set targets', 'dumbbell', 'saffron'],
   logging: ['Logging & rest timer', 'timer', 'grey'], questions: ['End-of-workout questions', 'chat', 'indigo'], recovery: ['Lighter weeks', 'leaf', 'green'],
   calories: ['Calories & body fat', 'flame', 'saffron'], recoveryScore: ['Recovery score & Shortcut', 'heart', 'pink'], body: ['Measurements & photos', 'ruler', 'teal'],
   sheet: ['Google Sheet', 'sheet', 'gsheet'], copy: ['Settings copy', 'cloud', 'sky'], backup: ['Backup', 'download', 'blue'],
@@ -1945,6 +2122,7 @@ function renderMore() {
     ${group('Training', '', `<div class="card flush">
       ${sec('schedule', [1, 2, 3, 4, 5, 6, 0].map((i) => sched[i] ? `${WEEKDAYS[i].slice(0, 3)} ${sched[i]}` : '').filter(Boolean).slice(0, 2).join(' · ') + ' …')}
       ${sec('exercises', `${manageDays().length} days · ${allKnownExercises().length} exercises`)}
+      ${sec('merge', `${mergeCount()} + ${mergeCount()} exercises when a day is missed`)}
       ${sec('progression', 'When to add weight, warnings')}
       ${sec('targets', 'Weekly sets per muscle, direct or total')}
       ${sec('logging', `Reps buttons · rest ${s.restSeconds} s · RIR ${s.requireRir ? 'on' : 'off'}`)}
@@ -1979,7 +2157,7 @@ function nextWorkoutHtml(planned) {
   let line;
   if (!planned) line = `${esc(when)}: <strong>rest day</strong> on your schedule.`;
   else {
-    const last = state.history.filter((s) => s.dayType === planned && s.date < st.date).map((s) => s.date).sort().pop();
+    const last = state.history.filter((s) => sessionHasDay(s, planned) && s.date < st.date).map((s) => s.date).sort().pop();
     line = `${esc(when)}: <strong>${esc(planned)}</strong>${last ? ` · last done ${esc(formatDate(last, false))} (${Progress.daysBetween(last, st.date)} days ago)` : ''}`;
   }
   const neglected = today ? neglectedMuscles() : [];
@@ -2200,8 +2378,7 @@ function checkinState() {
 }
 
 function exerciseOptions(f) {
-  const day = state.draft.dayType;
-  const mine = state.exercises[day] || [];
+  const mine = draftPlanList();
   const others = allKnownExercises()
     .filter((n) => !mine.includes(n))
     .sort((a, b) => a.localeCompare(b));
@@ -2218,14 +2395,14 @@ function exerciseOptions(f) {
 /** Exercises shown on the workout screen: the day's plan in order, then anything else logged today. */
 function entryExercises() {
   const d = state.draft;
-  const plan = state.exercises[d.dayType] || [];
+  const plan = draftPlanList();
   const extra = [...new Set(d.sets.map((s) => s.exercise))].filter((n) => !plan.includes(n));
   return [...plan, ...extra];
 }
 
 /** Planned working sets for an exercise ("3 × 8-12" → 3), else the sets logged (at least 1). */
 function plannedSets(name) {
-  const p = Progress.parsePlan(planText(state.draft.dayType, name));
+  const p = Progress.parsePlan(planText(draftDay(name), name));
   const done = state.draft.sets.filter((s) => s.exercise === name && !s.warmup).length;
   // v2.6: an easier day plans one set fewer, a light day about half (at least 1).
   const light = lightDay();
@@ -2268,12 +2445,14 @@ function exerciseCard(name) {
   const a = inDeload(d.date) || lightDay() === 'red' ? null : analyse(name);
   const badge = a && a.status.kind === 'increase' ? `<span class="badge">+${esc(fmtKg(a.status.nextWeight - a.status.weight))} kg</span>` : '';
   const dots = Array.from({ length: total }, (_, i) => `<i class="${i < done ? 'on' : ''}"></i>`).join('');
-  const plan = planText(d.dayType, name);
+  const own = planText(draftDay(name), name);
+  // A merged workout names the day each exercise came from.
+  const plan = [own ? `Plan ${own}` : '', d.merge ? draftDay(name) : ''].filter(Boolean).join(' · ');
   const line = today.length ? `Today: ${today.map((s) => describeSet(s, false)).join(', ')}` : lastTimeHint(name);
   return `<button type="button" class="excard ${done >= total ? 'done' : ''}" data-action="openLog" data-name="${esc(name)}">
     <span class="name">${esc(name)}${badge}</span>
     <span class="sets" aria-label="${done} of ${total} sets">${dots}</span>
-    ${plan ? `<span class="plan">Plan ${esc(plan)}</span>` : ''}
+    ${plan ? `<span class="plan">${esc(plan)}</span>` : ''}
     ${line ? `<span class="last">${esc(line)}</span>` : ''}
   </button>`;
 }
@@ -2286,7 +2465,7 @@ function renderEntry() {
   const inProgress = names.filter((n) => workingSetsDone(n) > 0 && workingSetsDone(n) < plannedSets(n));
   const next = names.filter((n) => workingSetsDone(n) === 0);
   const finished = names.filter((n) => workingSetsDone(n) >= plannedSets(n) && workingSetsDone(n) > 0);
-  const cardio = state.cardio[d.dayType];
+  const cardio = state.cardio[d.merge ? d.merge.parts[1].day : d.dayType];
   const list = (title, items, empty) =>
     group(title, `<span class="note">${items.length}</span>`, `<div class="card flush">${items.length ? items.map(exerciseCard).join('') : `<p class="empty pad">${esc(empty)}</p>`}</div>`);
   return `
@@ -2322,7 +2501,7 @@ function entryElapsed() {
 function renderSetSheet() {
   const d = state.draft;
   const f = form();
-  const target = state.targets[d.dayType]?.[f.exercise];
+  const target = f.exercise ? planText(draftDay(f.exercise), f.exercise) : '';
   const hint = f.exercise ? lastTimeHint(f.exercise) : '';
   const chips = repsChips()
     .map((c) => {
@@ -2463,7 +2642,7 @@ function setCompareHtml() {
       }`,
     });
   }
-  const plan = Progress.parsePlan(planText(state.draft.dayType, f.exercise));
+  const plan = Progress.parsePlan(planText(draftDay(f.exercise), f.exercise));
   const capped = c.stagnant && plan && !plan.timed && c.stagnant.best.reps >= plan.max - state.settings.progression.topTolerance;
   if (capped) {
     // Already at the top of the rep range: no more reps are expected until the weight goes up, so not "stagnant".
@@ -2765,10 +2944,14 @@ function renderHistory() {
     (b.date || '').localeCompare(a.date || ''),
   );
   const day = (iso) => `${WEEKDAYS[new Date(Date.parse(iso)).getUTCDay()]?.slice(0, 3) || ''} ${formatDate(iso, false)}`;
+  const madeUp = (m) => {
+    const s = madeUpIn(m.id);
+    return s ? ` · made up in ${s.dayType} on ${formatDate(s.date, false)}` : '';
+  };
   const row = ({ s, m }) =>
     m
       ? `<button type="button" class="lrow missed" data-action="missedReason" data-id="${esc(m.id)}" data-edit="1">${appIcon('cross', m.reason ? 'grey' : 'red')}
-          <span class="tx"><b>${esc(m.dayType)} · missed</b><span>${esc(day(m.date))} · ${m.reason ? esc(m.reason) : 'tap to add the reason'}${m.note ? ` · ${esc(m.note)}` : ''}</span></span>
+          <span class="tx"><b>${esc(m.dayType)} · missed</b><span>${esc(day(m.date))} · ${m.reason ? esc(m.reason) : 'tap to add the reason'}${m.note ? ` · ${esc(m.note)}` : ''}${esc(madeUp(m))}</span></span>
           ${m.reason ? '' : tag('No reason', 'bad')}</button>`
       : `<button type="button" class="lrow" data-action="openSession" data-id="${esc(s.id)}">${appIcon('dumbbell', 'saffron')}
           <span class="tx"><b>${esc(s.dayType)}</b><span>${esc(
@@ -2814,7 +2997,9 @@ function renderHistoryDetail(id) {
   const how = wellbeingRows(s);
   return `
     ${topbar(s.dayType, { href: 'history', label: 'History' })}
-    <p class="sub">${esc(WEEKDAYS[new Date(Date.parse(s.date)).getUTCDay()] || '')}, ${esc(formatDate(s.date))} · ${s.synced ? tag('✓ In the Sheet', 'ok') : tag('Not synced yet', 'warn')}</p>
+    <p class="sub">${esc(WEEKDAYS[new Date(Date.parse(s.date)).getUTCDay()] || '')}, ${esc(formatDate(s.date))} · ${s.synced ? tag('✓ In the Sheet', 'ok') : tag('Not synced yet', 'warn')}${
+      s.merge ? `<br>Made up ${esc(s.merge.parts[0].day)}, missed on ${esc(formatDate(s.merge.missedDate, false))}` : ''
+    }</p>
     ${group('Summary', '', renderSummary(s))}
     ${how ? group('How it went', '', how) : ''}
     ${group('Progress insight', '', `<section class="card">${renderInsight(s) || '<p class="empty" style="padding:8px">No working sets to compare.</p>'}</section>`)}
@@ -2895,6 +3080,7 @@ function renderSettings() {
     </section>
 
     ${renderScheduleSettings()}
+    ${renderMergeSettings()}
     ${renderProgressionSettings()}
     ${renderTargetSettings()}
     ${renderRecoverySettings()}
@@ -3018,7 +3204,7 @@ function renderScheduleSettings() {
   const options = [...new Set([...manageDays().filter((d) => d !== 'Custom'), ...Object.values(sched).filter(Boolean)])];
   return `
     <section class="secpage" data-sec="schedule">
-      <p class="sub">Today suggests the day's workout. A scheduled day that passes with no workout is marked missed (you don't make it up; the next day's workout follows), asks for a reason, and goes to the Sheet's Missed tab.</p>
+      <p class="sub">Today suggests the day's workout. A scheduled day that passes with no workout is marked missed, asks for a reason, and goes to the Sheet's Missed tab. The next workout makes it up by mixing both days (see Missed-day merge).</p>
       ${group(
         'Week',
         `<span class="note">${days.filter((d) => sched[d]).length} training days</span>`,
@@ -3052,6 +3238,41 @@ function renderScheduleSettings() {
         <p class="hint" style="margin:0">"Other" asks for your own words. Changing the list never changes reasons already given.</p>
       </section>`,
       )}
+    </section>`;
+}
+
+/** v2.7: how a missed day is made up: how many exercises each day contributes, and which ones (the owner's choice). */
+function renderMergeSettings() {
+  const n = mergeCount();
+  const days = manageDays().filter((d) => dayExercises(d).length);
+  return `
+    <section class="secpage" data-sec="merge">
+      <p class="sub">When a scheduled day is missed, the next workout mixes both days: ${n} exercises from the missed day and ${n} from the planned one (missed Push A → Push A + Pull A). Tick which exercises stand for each day; the start sheet lets you change them on the day.</p>
+      ${group(
+        'How many',
+        '',
+        `<div class="card flush">${frow(
+          'merge-count',
+          'Exercises from each day',
+          'Owner’s rule: 4 + 4',
+          `<input id="merge-count" class="input fnum" type="number" inputmode="numeric" min="1" max="12" value="${esc(n)}" data-change="mergeCount" />`,
+        )}</div>`,
+      )}
+      ${days
+        .map((day) => {
+          const picks = mergePicks(day);
+          return group(
+            day,
+            `<span class="note">${picks.length} of ${n}</span>`,
+            `<div class="card flush">${dayExercises(day)
+              .map(
+                (name) => `<label class="check switch"><span><b>${esc(name)}</b>${planText(day, name) ? `<span>Plan ${esc(planText(day, name))}</span>` : ''}</span>
+                <input type="checkbox" data-change="mergePick" data-day="${esc(day)}" data-name="${esc(name)}" ${picks.includes(name) ? 'checked' : ''} /></label>`,
+              )
+              .join('')}</div>`,
+          );
+        })
+        .join('')}
     </section>`;
 }
 
@@ -3509,7 +3730,7 @@ const actions = {
   addExercise() {
     const name = state.ui.newExercise.trim();
     if (!name) return toast('Type the exercise name', 'error');
-    const day = state.draft.dayType;
+    const day = draftDay(name);
     if (!state.exercises[day]) state.exercises[day] = [];
     if (!state.exercises[day].includes(name)) {
       state.exercises[day].push(name);
@@ -3714,6 +3935,45 @@ const actions = {
     state.ui.start = { ...st, dayType: el.dataset.day, custom: '', date: /^\d{4}-\d{2}-\d{2}$/.test(st.date) ? st.date : todayISO() };
     state.ui.startPicked = true;
     return actions.startWorkout();
+  },
+
+  /** v2.7: start the merged workout (missed day + planned day). The tick sheet opens when a day has no picks yet,
+      or on "Change"; otherwise the remembered picks start at once. */
+  async startMerged(el) {
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(el.dataset.date) ? el.dataset.date : todayISO();
+    const c = mergeCandidate(date);
+    if (!c) return toast('Nothing to make up on this date', 'error');
+    if (state.draft) {
+      const ok = await openModal({ title: 'Start a new workout?', message: 'The current workout will be discarded.', confirmText: 'Start new', danger: true });
+      if (!ok) return;
+    }
+    let parts = mergeParts(c);
+    if (el.dataset.choose || parts.some((p) => !p.exercises.length)) {
+      const picks = await openMergeSheet(c);
+      if (!picks) return;
+      for (const [day, names] of Object.entries(picks)) setMergePicks(day, names);
+      parts = mergeParts(c);
+    }
+    state.draft = {
+      id: uuid(),
+      date,
+      dayType: mergeTitle(c),
+      merge: { missedId: c.missed.id, missedDate: c.missed.date, parts },
+      startedAt: nowISO(),
+      finishedAt: null,
+      notes: '',
+      avgHeartRate: null,
+      activeCalories: null,
+      satisfaction: {},
+      score: null,
+      synced: false,
+      sets: [],
+    };
+    state.ui.form = null;
+    state.ui.timer = null;
+    state.ui.sheet = false;
+    saveDraft();
+    go('entry');
   },
 
   startCustomDay() {
@@ -4377,6 +4637,20 @@ const changes = {
   scheduleDay(el) {
     state.settings.schedule = { ...(state.settings.schedule || DEFAULT_SCHEDULE), [el.dataset.dow]: el.value };
     save(KEYS.settings, state.settings);
+    render();
+  },
+  mergeCount(el) {
+    const v = Math.min(12, Math.max(1, Math.round(Number(el.value)) || 4));
+    state.settings.merge = { ...(state.settings.merge || { picks: {} }), count: v };
+    el.value = v;
+    save(KEYS.settings, state.settings);
+    render();
+  },
+  mergePick(el) {
+    const { day, name } = el.dataset;
+    const picks = mergePicks(day).filter((x) => x !== name);
+    if (el.checked) picks.push(name);
+    setMergePicks(day, picks);
     render();
   },
   checkinDay(el) {

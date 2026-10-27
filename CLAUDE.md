@@ -481,3 +481,17 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
     - **Weekly summary**: Recovery row (average score, vs last week, sleep, HRV, RHR) and Records row.
     - **PRs**: a set beating every earlier set of the exercise (heaviest weight, or best Epley 1-rep max; at bodyweight
       most reps) shows "🏆 New PR" on save; the review lists the workout's records; Progress → Personal records.
+33. **v2.7.0: missed-day merge** (owner 2026-10-25/27: "when a planned day is missed, the next workout combines the missed
+    day and the next day, 4 exercises from each"; missed Push A → Push A + Pull A; the owner picks the 4 + 4, never the
+    app). This replaces the v1.5 rule "never made up" for the workout itself; the missed mark, reason and Sheet row stay.
+    - `mergeCandidate(date)`: the last scheduled day before `date` is in `wt.missed` and no workout was logged since
+      (14-day look-back; two missed in a row → only the latest is made up). Today's Training card and the Workout tab's
+      first row then offer "<missed> + <planned>"; "Just <planned>" starts the normal day.
+    - `settings.merge { count: 4, picks: { day: [names] } }`, More → **Missed-day merge** (count + a switch per exercise
+      per day). A day with no picks opens the tick sheet (`openMergeSheet`, `.mergesheet` in `#modal`) before starting;
+      "Change the 4 + 4" opens it anyway; ticks are saved as the picks.
+    - The draft/session gets `merge: { missedId, missedDate, parts: [{ day, exercises }, { day, exercises }] }` and
+      `dayType` "Pull A + Legs A" (the Sheet's Day column; no Code.gs change). `draftPlanList()` / `draftDay(name)` give
+      the workout screen its list and each exercise's own day for plan text, sets and the picker (a new exercise joins the
+      planned day). Cardio note = the planned day's. `sessionHasDay(s, day)` makes "last done" count merged workouts for
+      both days. History: the missed row says "made up in … on …"; the detail page says which day was made up.

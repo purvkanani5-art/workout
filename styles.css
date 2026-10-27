@@ -2199,3 +2199,17 @@ details.automatch[open] > summary .note { color: var(--sel-text); }
 .spin { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; vertical-align: -2px; margin-right: 8px; animation: spin .8s linear infinite; opacity: .7; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 2.4s; } }
+
+/* v2.7: missed-day merge (tick sheet before a merged workout, Today card links) */
+.modal .sheet.mergesheet { max-height: 86vh; overflow: auto; }
+.mergesheet .mergeday { margin-top: 10px; }
+.mergesheet .mergeday .ghead h3 { font-size: 16px; font-weight: 650; margin: 0; }
+.mergesheet .mergeday .ghead h3 .muted { font-weight: 400; font-size: 13px; }
+.mergesheet label.check { padding: 8px 14px; min-height: 52px; position: relative; justify-content: space-between; margin: 0; gap: 12px; }
+.mergesheet label.check + label.check::before { content: ''; position: absolute; top: 0; left: 14px; right: 0; height: 1px; background: var(--border); }
+.mergesheet label.check > span { flex: 1; min-width: 0; }
+.mergesheet label.check > span b { display: block; font-weight: 500; overflow-wrap: anywhere; }
+.mergesheet label.check > span span { display: block; font-size: 13px; color: var(--muted); font-weight: 400; margin-top: 2px; }
+.mergesheet .actions { position: sticky; bottom: 0; background: var(--card); padding-top: 8px; }
+.merge-card .merge-links { grid-template-columns: 1fr 1fr; }
+.merge-card .merge-links .btn.link.small { justify-content: center; }

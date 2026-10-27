@@ -72,6 +72,9 @@ commas. The script never writes over rows that are there. Needs the v2.0 Code.gs
   was (1–10)**, **average heart rate** and **active calories** from the Watch (or tick "The watch did not record
   this workout") before **Submit workout**. *Reopen workout* goes back to logging sets. Rows appear in the Sheet
   within a second or two. With no signal the workout is queued and sent the next time the app opens online.
+- **Missed day (v2.7)**: when a scheduled day passes with no workout, the next workout offers "Pull A + Legs A":
+  4 exercises from the missed day and 4 from the planned one. You tick which (remembered in More → Missed-day
+  merge; "Change the 4 + 4" on the card), or tap "Just Legs A". The Sheet's Day column reads "Pull A + Legs A".
 - **History** lists past workouts. On a new phone, **Sync history from Sheet** rebuilds the list from the
   last 400 days of rows.
 - **Settings → Export** saves a JSON backup (including URL and token); **Import** restores it.

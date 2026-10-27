@@ -259,8 +259,8 @@ function usePicked(name) {
     toast(`${name} added to ${day} · plan ${state.targets[day][name]}`);
     return closePicker();
   }
-  // ctx 'log': the exercise joins today's day and opens in the logging panel.
-  const day = state.draft.dayType;
+  // ctx 'log': the exercise joins today's day (in a merged workout, the planned day) and opens in the logging panel.
+  const day = draftDay(name);
   if (!state.exercises[day]) state.exercises[day] = [];
   if (!state.exercises[day].includes(name)) {
     state.exercises[day].push(name);
