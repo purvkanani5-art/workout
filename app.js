@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '2.7.0';
+const APP_VERSION = '2.8.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -161,7 +161,7 @@ function load(key, fallback) {
 }
 
 // What the Sheet's Settings tab mirrors: any save of these schedules an upload (see backupSettingsSoon).
-const BACKED_UP_KEYS = ['wt.settings', 'wt.exercises', 'wt.targets', 'wt.cardio'];
+const BACKED_UP_KEYS = ['wt.settings', 'wt.exercises', 'wt.targets', 'wt.cardio', 'wt.autoAliases'];
 
 function save(key, value) {
   try {
@@ -264,6 +264,7 @@ const state = {
     historySync: '',
     newExercise: '',
     newQuestion: '',
+    restoring: '', // v2.8: the step "Restore everything from the Sheet" is on, '' when idle
     newReason: '',
     startPicked: false, // the owner chose a day on Home, so it no longer follows the schedule
     summaryWeek: null, // Progress → weekly summary shown (week end date)
@@ -934,7 +935,8 @@ let backupTimer = null;
 /** The settings worth restoring on a new phone. The Sheet URL and token stay out: you need them to get here. */
 function settingsSnapshot() {
   const { scriptUrl, token, ...settings } = state.settings;
-  return { settings, exercises: state.exercises, targets: state.targets, cardio: state.cardio, app: APP_VERSION };
+  // v2.8: the "Matched automatically" list travels too, so a restored phone shows the same matches.
+  return { settings, exercises: state.exercises, targets: state.targets, cardio: state.cardio, autoAliases: state.autoAliases, app: APP_VERSION };
 }
 
 function saveBackupState(patch) {
@@ -988,11 +990,98 @@ function applySettingsSnapshot(data) {
   if (data.exercises && typeof data.exercises === 'object') state.exercises = data.exercises;
   if (data.targets && typeof data.targets === 'object') state.targets = data.targets;
   if (data.cardio && typeof data.cardio === 'object') state.cardio = data.cardio;
+  if (Array.isArray(data.autoAliases)) state.autoAliases = data.autoAliases.filter((x) => x && x.alias && x.name);
   save(KEYS.settings, state.settings);
   save(KEYS.exercises, state.exercises);
   save(KEYS.targets, state.targets);
   save(KEYS.cardio, state.cardio);
+  save(KEYS.autoAliases, state.autoAliases);
   saveBackupState({ dirty: false });
+}
+
+/* ------------------------------------------------ v2.8: the open workout in the Sheet, and restoring everything */
+
+/** The workout in progress goes to the Sheet's Settings tab (row 3) a few seconds after each change and is cleared
+    when it is submitted or discarded, so a phone wiped mid-workout can pick it up again. Quiet on failure. */
+let draftTimer = null;
+function backupDraftSoon() {
+  if (!haveApi() || !state.backup.linked) return;
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(async () => {
+    try {
+      await apiPost({ action: 'draft', draft: state.draft, savedAt: nowISO() });
+      if (state.backup.draftError) saveBackupState({ draftError: '' });
+    } catch (err) {
+      saveBackupState({ draftError: err instanceof ApiError ? err.message : 'offline' });
+    }
+  }, 3000);
+}
+
+/**
+ * Everything the Sheet holds, back onto this phone in one go (a reinstall or a new phone): the settings copy (with
+ * exercises, plans, cardio notes and matched names), the exercise database, every workout, missed days, small
+ * workouts, measurements, recovery, then the open workout if one was left. Workouts already on the phone keep their
+ * local copy. Missed days are counted from where the old phone counted them once its workouts are here.
+ */
+async function restoreEverything(remote) {
+  if (!haveApi()) return toast('Add the script URL and token first', 'error');
+  if (state.ui.restoring) return;
+  const step = (text) => {
+    state.ui.restoring = text;
+    const el = document.getElementById('backup-status');
+    if (el) el.innerHTML = settingsCopyStatus();
+  };
+  step('Starting…');
+  try {
+    if (!remote) remote = await apiGet({ action: 'settings' });
+    const from = remote.data?.settings?.scheduleFrom;
+    step('Settings…');
+    if (remote.data) applySettingsSnapshot(remote.data); // scheduleFrom = today meanwhile, so nothing is marked missed early
+    saveBackupState({ linked: true, dirty: false, remoteAt: null, error: '' });
+    step('Exercise database…');
+    await refreshExercises(true).catch(() => false);
+    step('Workouts, missed days, small workouts…');
+    await syncHistoryFromSheet(true, 4000);
+    step('Measurements…');
+    await syncMeasurementsFromSheet(true);
+    step('Recovery…');
+    await fetchRecovery({ force: true, days: 400 });
+    if (/^\d{4}-\d{2}-\d{2}$/.test(from || '')) {
+      state.settings.scheduleFrom = from;
+      save(KEYS.settings, state.settings);
+      detectMissed(); // the same days as before: ids repeat, so nothing is marked twice
+    }
+    autoAliasUnknown();
+    step('');
+    const n = state.history.length;
+    toast(`Restored ${n} workout${n === 1 ? '' : 's'}, ${state.missed.length} missed day${state.missed.length === 1 ? '' : 's'}, ${state.measurements.length} measurement${state.measurements.length === 1 ? '' : 's'}, ${state.recovery.length} recovery day${state.recovery.length === 1 ? '' : 's'}`);
+    render();
+    if (remote.draft && !state.draft) await offerRemoteDraft(remote.draft, remote.draftAt);
+  } catch (err) {
+    step('');
+    toast(describeError(err), 'error');
+  }
+  render();
+}
+
+/** An unfinished workout found in the Sheet: offer to pick it up again on this phone. */
+async function offerRemoteDraft(draft, at) {
+  if (!draft || typeof draft !== 'object' || !draft.id || !Array.isArray(draft.sets)) return;
+  const ok = await openModal({
+    title: 'Unfinished workout in the Sheet',
+    message: `${draft.dayType || 'Workout'} on ${formatDate(String(draft.date || '').slice(0, 10))}, ${draft.sets.length} set${draft.sets.length === 1 ? '' : 's'} logged${
+      at ? `, saved ${formatDate(String(at).slice(0, 10))}` : ''
+    }. Pick it up again on this phone?`,
+    confirmText: 'Resume it',
+    cancelText: 'Leave it',
+  });
+  if (!ok) return;
+  state.draft = draft;
+  state.ui.form = null;
+  state.ui.timer = null;
+  state.ui.sheet = false;
+  saveDraft();
+  go(draft.finishedAt ? 'review' : 'entry');
 }
 
 /**
@@ -1018,18 +1107,15 @@ async function linkSettingsBackup({ ask = true } = {}) {
   saveBackupState({ remoteAt: remote.savedAt || null, error: '' });
   if (!ask) return;
   const restore = await openModal({
-    title: 'Settings found in the Sheet',
-    message: `Saved ${remote.savedAt ? formatDate(String(remote.savedAt).slice(0, 10)) : 'earlier'}: exercises, plans, schedule, rep buttons, progression and recovery settings. Use them on this phone? (Cancel keeps this phone's settings and replaces the Sheet's copy.)`,
-    confirmText: 'Use the Sheet’s settings',
+    title: 'Your Bhimlekha is in the Sheet',
+    message: `Settings saved ${remote.savedAt ? formatDate(String(remote.savedAt).slice(0, 10)) : 'earlier'}. Restore everything onto this phone: settings, exercises and plans, every workout, missed days, small workouts, measurements, recovery${
+      remote.draft ? ' and the unfinished workout' : ''
+    }? (Cancel keeps this phone's settings and replaces the Sheet's copy.)`,
+    confirmText: 'Restore everything',
   });
-  if (restore) {
-    applySettingsSnapshot(remote.data);
-    await syncMissedFromSheet();
-    await syncSmallFromSheet();
-    toast('Settings restored from the Sheet');
-  }
-  saveBackupState({ linked: true, dirty: !restore, remoteAt: null });
-  if (!restore) await uploadSettings();
+  if (restore) return restoreEverything(remote); // v2.8: links, pulls everything, then offers the open workout
+  saveBackupState({ linked: true, dirty: true, remoteAt: null });
+  await uploadSettings();
   render();
 }
 
@@ -1118,6 +1204,12 @@ const GROUP_OF = {
 function muscleOf(exercise) {
   const e = exerciseEntry(exercise);
   return e && e.main.length ? GROUP_OF[e.main[0]] || '' : manualGroup(exercise);
+}
+
+/** v2.8: the owner's grip / form cue for an exercise (the Exercises tab's Notes column), '' when none. */
+function cueOf(name) {
+  const e = exerciseEntry(name);
+  return e && !e.guessed ? e.notes || '' : '';
 }
 
 /** "main: Upper pecs · helps: Anterior delts, Triceps" for an exercise, from the database. */
@@ -1497,6 +1589,7 @@ function go(name, arg) {
 
 function saveDraft() {
   save(KEYS.draft, state.draft);
+  backupDraftSoon(); // v2.8: the open workout follows to the Sheet (cleared when it is null)
 }
 
 function nextSetNo(exercise) {
@@ -2453,6 +2546,7 @@ function exerciseCard(name) {
     <span class="name">${esc(name)}${badge}</span>
     <span class="sets" aria-label="${done} of ${total} sets">${dots}</span>
     ${plan ? `<span class="plan">${esc(plan)}</span>` : ''}
+    ${cueOf(name) ? `<span class="cue">${esc(cueOf(name))}</span>` : ''}
     ${line ? `<span class="last">${esc(line)}</span>` : ''}
   </button>`;
 }
@@ -2538,6 +2632,7 @@ function renderSetSheet() {
             : ''
         }
         ${target || hint ? `<p class="hint" style="margin:0">${esc([target ? `Plan ${target}` : '', hint].filter(Boolean).join(' · '))}</p>` : ''}
+        ${f.exercise && cueOf(f.exercise) ? `<p class="hint cue" style="margin:0">${esc(cueOf(f.exercise))}</p>` : ''}
         ${f.exercise ? entryStatus(f.exercise) : ''}
         <fieldset>
           <legend>Set number</legend>
@@ -3147,6 +3242,7 @@ function renderSettings() {
                     name,
                     [
                       state.targets[day]?.[name] ? `Plan ${state.targets[day][name]}` : '',
+                      cueOf(name), // v2.8: grip / form, only when set
                       // v2.2.2: the muscles come from the exercise database, the same as the Muscles tab.
                       musclesText(name) || 'muscles not set: tap ✎',
                       state.settings.steps?.[name] ? `step ${fmtKg(state.settings.steps[name])} kg` : '',
@@ -3280,8 +3376,10 @@ function renderMergeSettings() {
 function settingsCopyStatus() {
   const b = state.backup;
   let status;
-  if (!haveApi()) status = 'Add the script URL and token above to keep a copy of these settings in the Sheet.';
-  else if (!b.linked && b.remoteAt) status = `<strong>The Sheet has settings saved ${esc(formatDate(String(b.remoteAt).slice(0, 10)))}.</strong> Use them, or make this phone's settings the copy.`;
+  if (state.ui.restoring) status = `<span class="spin"></span>Restoring from the Sheet: ${esc(state.ui.restoring)}`;
+  else if (!haveApi()) status = 'Add the script URL and token above to keep a copy of these settings in the Sheet.';
+  else if (!b.linked && b.remoteAt) status = `<strong>The Sheet has your Bhimlekha saved ${esc(formatDate(String(b.remoteAt).slice(0, 10)))}.</strong> Restore everything, or make this phone's settings the copy.`;
+  else if (b.draftError && /unknown action/.test(b.draftError)) status = '⚠️ The open workout is not reaching the Sheet: paste the new Code.gs and deploy a new version.';
   else if (b.error && b.error !== 'offline') status = `⚠️ The Sheet said: ${esc(b.error)}${/unknown action/.test(b.error) ? '. Paste the new Code.gs and deploy a new version.' : ''}`;
   else if (b.dirty) status = b.error === 'offline' ? 'Changes waiting: will save when online.' : 'Saving…';
   else status = b.sentAt ? `✓ Saved in the Sheet ${esc(formatDate(b.sentAt.slice(0, 10)))}, ${esc(new Date(b.sentAt).toTimeString().slice(0, 5))}.` : 'Not saved yet.';
@@ -3294,7 +3392,7 @@ function renderSettingsCopy() {
   const status = settingsCopyStatus();
   return `
     <section class="secpage" data-sec="copy">
-      <p class="sub">Exercises, plans, schedule, buttons, questions, progression, recovery and lighter weeks are saved to the Sheet's Settings tab after every change, so a new phone gets them back. The Sheet URL and token are not in it; photos never are.</p>
+      <p class="sub">Every setting (exercises, plans, schedule, buttons, questions, progression, recovery, lighter weeks, targets, matched names) is saved to the Sheet's Settings tab after every change, and the workout in progress after every set. Workouts, missed days, small workouts, measurements and recovery are in their own tabs. So after a reinstall, enter the URL and token, Test connection, and <b>Restore everything</b> brings it all back. Not in the Sheet: the URL and token (type them), and photos (their .bhimvault backup in Files).</p>
       ${group(
         'Status',
         b.linked && !b.dirty && b.sentAt ? tag('Saved', 'ok') : b.dirty ? tag('Waiting', 'warn') : '',
@@ -3302,10 +3400,10 @@ function renderSettingsCopy() {
         <p class="small" style="margin:0" id="backup-status">${status}</p>
         ${
           !b.linked && b.remoteAt
-            ? `<button type="button" class="btn primary" data-action="restoreSettings">Use the Sheet's settings</button>
+            ? `<button type="button" class="btn primary" data-action="restoreSettings" ${state.ui.restoring ? 'disabled' : ''}>Restore everything from the Sheet</button>
                <button type="button" class="btn secondary" data-action="keepPhoneSettings">Keep this phone's settings</button>`
             : `<button type="button" class="btn secondary" data-action="backupSettingsNow" ${haveApi() ? '' : 'disabled'}>Save to Sheet now</button>
-               <button type="button" class="btn secondary" data-action="restoreSettings" ${haveApi() ? '' : 'disabled'}>Restore from the Sheet…</button>`
+               <button type="button" class="btn secondary" data-action="restoreSettings" ${haveApi() && !state.ui.restoring ? '' : 'disabled'}>Restore everything from the Sheet…</button>`
         }
       </section>`,
       )}
@@ -4160,20 +4258,15 @@ const actions = {
     } catch (err) {
       return toast(describeError(err), 'error');
     }
-    if (!remote.data) return toast('No settings saved in the Sheet yet', 'error');
+    if (!remote.data && !remote.draft) return toast('Nothing saved in the Sheet yet', 'error');
     const ok = await openModal({
-      title: 'Replace this phone’s settings?',
-      message: `With the copy saved ${remote.savedAt ? formatDate(String(remote.savedAt).slice(0, 10)) : 'earlier'}: exercises, plans, schedule, buttons, progression and recovery. Workouts, measurements and photos are not touched.`,
-      confirmText: 'Restore',
+      title: 'Restore everything from the Sheet?',
+      message: `Settings saved ${remote.savedAt ? formatDate(String(remote.savedAt).slice(0, 10)) : 'earlier'} replace this phone's; every workout, missed day, small workout, measurement and recovery day in the Sheet is added (what is already here is kept). Photos are not touched.`,
+      confirmText: 'Restore everything',
       danger: true,
     });
     if (!ok) return;
-    applySettingsSnapshot(remote.data);
-    saveBackupState({ linked: true, remoteAt: null });
-    await syncMissedFromSheet();
-    await syncSmallFromSheet();
-    toast('Settings restored from the Sheet');
-    render();
+    await restoreEverything(remote);
   },
 
   async keepPhoneSettings() {
@@ -5141,14 +5234,14 @@ async function syncOutbox({ manual = false } = {}) {
   render();
 }
 
-async function syncHistoryFromSheet(quiet = false) {
+async function syncHistoryFromSheet(quiet = false, days = 400) {
   if (!haveApi()) return toast('Add the script URL and token in More → Google Sheet', 'error');
   if (state.ui.syncing) return;
   state.ui.syncing = true;
   state.ui.historySync = quiet ? '' : 'Fetching from the Sheet…';
   render();
   try {
-    const data = await apiGet({ action: 'history', days: 400 });
+    const data = await apiGet({ action: 'history', days });
     const incoming = Array.isArray(data.sessions) ? data.sessions : [];
     const byId = new Map(state.history.map((s) => [s.id, s]));
     for (const raw of incoming) {
@@ -5167,7 +5260,7 @@ async function syncHistoryFromSheet(quiet = false) {
     await syncMissedFromSheet();
     await syncSmallFromSheet();
     detectMissed();
-    state.ui.historySync = quiet ? '' : `Loaded ${incoming.length} workout${incoming.length === 1 ? '' : 's'} from the last 400 days.`;
+    state.ui.historySync = quiet ? '' : `Loaded ${incoming.length} workout${incoming.length === 1 ? '' : 's'} from the last ${days} days.`;
   } catch (err) {
     state.ui.historySync = quiet ? '' : describeError(err);
   } finally {
@@ -5216,6 +5309,10 @@ function normaliseSession(raw) {
     satisfaction: raw.satisfaction && typeof raw.satisfaction === 'object' ? raw.satisfaction : {},
     score: raw.score ? Number(raw.score) : null,
     synced: true,
+    // v2.8: kept in the Log's last columns, so a restored workout counts the same way it did (light day, made-up day, no watch)
+    ...(raw.light === 'amber' || raw.light === 'red' ? { light: raw.light } : {}),
+    ...(raw.merge && typeof raw.merge === 'object' && Array.isArray(raw.merge.parts) ? { merge: raw.merge } : {}),
+    ...(raw.noWatch === true ? { noWatch: true } : {}),
     sets: raw.sets.map((s, i) => ({
       id: s.id || `${raw.id}-${i}`,
       exercise: String(s.exercise || ''),

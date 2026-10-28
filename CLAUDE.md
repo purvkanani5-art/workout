@@ -495,3 +495,22 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
       the workout screen its list and each exercise's own day for plan text, sets and the picker (a new exercise joins the
       planned day). Cardio note = the planned day's. `sessionHasDay(s, day)` makes "last done" count merged workouts for
       both days. History: the missed row says "made up in … on …"; the detail page says which day was made up.
+34. **v2.8.0: grip / form cue, and everything restorable from the Sheet** (owner 2026-10-28; adding/removing exercises
+    mid-workout was asked and then dropped by the owner the same day).
+    - **Grip / form** = the Exercises tab's existing **Notes** column (`entry.notes` from `buildDb`; `cueOf(name)`). One
+      optional field in the ✎ editor and in Create; empty shows nothing anywhere. When set it shows under the plan on the
+      workout card (`.cue`), in the logging panel and on the Exercises & plans row. The editor's `replace` upsert now
+      sends `notes` (before, a replace blanked anything typed in the Sheet's Notes column). No Code.gs change for this.
+    - **Log columns 19–21** `Light day | Made up (JSON) | No watch` (first row of a session; `ensureHeaders_` adds them
+      to an existing tab) so `history_` gives back `light`, `merge` and `noWatch`; `normaliseSession` keeps them.
+    - **Open workout in the Sheet**: `saveDraft()` → `backupDraftSoon()` (3 s) → POST `draft` → Settings tab row 3
+      (JSON, blank when null). GET `settings` returns `draft` + `draftAt`. An older script answers "unknown action":
+      shown once in Settings copy, nothing else breaks.
+    - **Settings copy** also carries `autoAliases` (`wt.autoAliases` joined BACKED_UP_KEYS).
+    - **Restore everything** (`restoreEverything(remote)`): the dialog after Test connection on an unlinked phone, and the
+      Settings copy buttons, pull in order: settings snapshot → exercise database → history (`days` 4000) with missed and
+      small → measurements → recovery (400 d) → `scheduleFrom` back to the old phone's value + `detectMissed()` (same ids,
+      so nothing doubles; meanwhile it is today so nothing is marked early) → `autoAliasUnknown()` → offer the Sheet's
+      open workout (`offerRemoteDraft`). Progress in `state.ui.restoring`. Local copies of workouts win, as before.
+    - Still outside the Sheet by the owner's rules: photos (.bhimvault to Files; Face ID re-enrols per device) and the
+      script URL + token (typed once; the More → Backup JSON holds them).

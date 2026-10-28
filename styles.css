@@ -2213,3 +2213,6 @@ details.automatch[open] > summary .note { color: var(--sel-text); }
 .mergesheet .actions { position: sticky; bottom: 0; background: var(--card); padding-top: 8px; }
 .merge-card .merge-links { grid-template-columns: 1fr 1fr; }
 .merge-card .merge-links .btn.link.small { justify-content: center; }
+/* v2.8: grip / form cue (the Exercises tab's Notes column), shown only when set */
+.excard .cue { grid-column: 1 / -1; font-size: 13px; color: var(--sel-text); }
+.hint.cue { color: var(--sel-text); }

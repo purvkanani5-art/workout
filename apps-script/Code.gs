@@ -66,6 +66,10 @@ var HEADERS = [
   'RIR',
   'Warm-up',
   'Duration (min)',
+  // v2.8: so a reinstalled phone gets every workout back exactly (first row of a session only).
+  'Light day',
+  'Made up (JSON)',
+  'No watch',
 ];
 var R_SHEET_NAME = 'Recovery';
 // One row per day. The iPhone Shortcut writes sleep, resting HR and HRV each morning; the app adds the Watch sleep
@@ -85,6 +89,7 @@ var E_HEADERS = ['Exercise', 'Equipment', 'Main muscles', 'Helping muscles', 'No
 var COL = {
   timestamp: 1, date: 2, sessionId: 3, day: 4, exercise: 5, setNo: 6, reps: 7, toFailure: 8, weight: 9, volume: 10,
   notes: 11, avgHr: 12, kcal: 13, score: 14, satisfaction: 15, rir: 16, warmup: 17, duration: 18,
+  light: 19, madeUp: 20, noWatch: 21,
 };
 
 /**
@@ -184,6 +189,7 @@ function doPost(e) {
   if (body.action === 'missed') return missed_(body.entry);
   if (body.action === 'small') return small_(body.entry);
   if (body.action === 'settings') return writeSettings_(body.data, body.savedAt);
+  if (body.action === 'draft') return writeDraft_(body.draft, body.savedAt); // v2.8: the open workout, after every set
   // The iPhone Shortcut sends a flat body ({ token, action, sleep, rhr, hrv }); the app sends { entry: {...} }.
   if (body.action === 'recovery') return recovery_(body.entry || body, body.entry ? 'app' : 'shortcut');
   if (body.action === 'exercises') return seedExercises_(body.rows);
@@ -295,6 +301,9 @@ function buildRows_(session) {
       numberOrBlank_(s.toFailure ? 0 : s.rir), // RIR (blank when not logged)
       Boolean(s.warmup), // Warm-up
       i === 0 ? durationMinutes_(session) : '', // Duration (min): first set to the Finish workout tap
+      i === 0 ? String(session.light || '') : '', // Light day: 'amber' (one set fewer) or 'red' (light day, left out of progress)
+      i === 0 && session.merge ? JSON.stringify(session.merge) : '', // Made up: the missed day this workout mixed in
+      i === 0 ? Boolean(session.noWatch) : '', // No watch: heart rate and calories were not recorded
     ]);
   }
   return rows;
@@ -336,6 +345,11 @@ function history_(days) {
     if (r[COL.kcal - 1] !== '' && session.activeCalories === null) session.activeCalories = Number(r[COL.kcal - 1]) || null;
     if (r[COL.score - 1] !== '' && session.score === null) session.score = Number(r[COL.score - 1]) || null;
     if (r[COL.satisfaction - 1] && !Object.keys(session.satisfaction).length) session.satisfaction = parseSatisfaction_(r[COL.satisfaction - 1]);
+    if (r[COL.light - 1] && !session.light) session.light = String(r[COL.light - 1]);
+    if (r[COL.madeUp - 1] && !session.merge) {
+      try { session.merge = JSON.parse(String(r[COL.madeUp - 1])); } catch (ignore) {}
+    }
+    if ((r[COL.noWatch - 1] === true || String(r[COL.noWatch - 1]).toLowerCase() === 'true') && !session.noWatch) session.noWatch = true;
     if (loggedAt && (!session.startedAt || loggedAt < session.startedAt)) session.startedAt = loggedAt;
     if (loggedAt && (!session.finishedAt || loggedAt > session.finishedAt)) session.finishedAt = loggedAt;
     var reps = r[COL.reps - 1];
@@ -917,17 +931,44 @@ function writeSettings_(data, savedAt) {
   }
 }
 
+/**
+ * v2.8: row 3 of the Settings tab holds the workout in progress (JSON), rewritten after every set and blanked when
+ * the workout is submitted or discarded, so a phone wiped mid-workout can pick it up again. `draft` null clears it.
+ */
+function writeDraft_(draft, savedAt) {
+  var text = draft && typeof draft === 'object' ? JSON.stringify(draft) : '';
+  if (text.length > 49000) return json_({ ok: false, error: 'draft too large' });
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var sheet = getSettingsSheet_();
+    if (sheet.getMaxRows() < 3) sheet.insertRowsAfter(sheet.getMaxRows(), 3 - sheet.getMaxRows());
+    sheet.getRange(3, 1, 1, 2).setValues([[text ? String(savedAt || new Date().toISOString()) : '', text]]);
+    return json_({ ok: true });
+  } catch (err) {
+    return json_({ ok: false, error: String((err && err.message) || err) });
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (ignore) {}
+  }
+}
+
+/** The settings copy (row 2) and, v2.8, the open workout (row 3) if any. */
 function readSettings_() {
   var sheet = getSettingsSheet_();
-  if (sheet.getLastRow() < 2) return { ok: true, data: null, savedAt: null };
-  var row = sheet.getRange(2, 1, 1, 2).getValues()[0];
-  var data = null;
-  try {
-    data = JSON.parse(String(row[1] || 'null'));
-  } catch (err) {
-    data = null;
-  }
-  return { ok: true, data: data, savedAt: row[0] instanceof Date ? row[0].toISOString() : String(row[0] || '') };
+  if (sheet.getLastRow() < 2) return { ok: true, data: null, savedAt: null, draft: null, draftAt: null };
+  var rows = sheet.getRange(2, 1, 2, 2).getValues();
+  var parse = function (cell) {
+    try {
+      return JSON.parse(String(cell || 'null'));
+    } catch (err) {
+      return null;
+    }
+  };
+  var when = function (cell) { return cell instanceof Date ? cell.toISOString() : String(cell || ''); };
+  var draft = parse(rows[1][1]);
+  return { ok: true, data: parse(rows[0][1]), savedAt: when(rows[0][0]), draft: draft && typeof draft === 'object' ? draft : null, draftAt: when(rows[1][0]) || null };
 }
 
 function isoDate_(d) {

@@ -146,6 +146,11 @@ function renderCreateForm() {
             }</p>`
           : ''
       }
+      <div>
+        <label for="pick-notes">Grip / form <span class="muted">(optional)</span></label>
+        <input id="pick-notes" class="input" value="${esc(c.notes || '')}" placeholder="e.g. Neutral grip, elbows tucked, pause at the bottom" data-input="pickNotes" autocomplete="off" />
+        <p class="hint" style="margin:4px 0 0">Shown under the exercise while you log, and here. Leave it empty to show nothing. Saved in the Sheet's Exercises tab (Notes).</p>
+      </div>
       <fieldset>
         <legend>Equipment</legend>
         <div class="pills">${Muscles.EQUIPMENT.map((q) => `<button type="button" class="pill-btn ${c.equipment === q ? 'on' : ''}" aria-pressed="${c.equipment === q}" data-action="pickEquip" data-value="${esc(q)}">${esc(q)}</button>`).join('')}</div>
@@ -187,7 +192,7 @@ function openEditor(day, index) {
   }
   state.ui.picker = {
     ctx: 'edit', mode: 'create', query: '', alias: '', day, hash: location.hash, enter: true,
-    create: { name, equipment: real?.equipment || '', marks, plan: state.targets[day]?.[name] || '', step: state.settings.steps?.[name] ?? '', oldName: name, entryName: real?.name || null },
+    create: { name, equipment: real?.equipment || '', marks, plan: state.targets[day]?.[name] || '', step: state.settings.steps?.[name] ?? '', notes: real?.notes || '', oldName: name, entryName: real?.name || null },
   };
   render();
 }
@@ -199,6 +204,7 @@ function saveEdit() {
   const newName = val('pick-name', c.name);
   const plan = val('pick-plan', c.plan);
   const stepRaw = val('pick-step', c.step);
+  const notes = val('pick-notes', c.notes).slice(0, 300);
   if (!newName) return toast('The name cannot be empty', 'error');
   const step = stepRaw === '' ? null : Number(stepRaw);
   if (step !== null && !(step > 0)) return toast('Weight step must be a number above 0', 'error');
@@ -221,7 +227,8 @@ function saveEdit() {
     delete state.settings.muscles[newName];
   }
   save(KEYS.settings, state.settings);
-  const row = { equipment: c.equipment, main: muscleNames(main), helps: muscleNames(helps), minor: muscleNames(minor), replace: true };
+  // notes travels with the row: `replace` rewrites every cell, so leaving it out would blank the grip / form cue.
+  const row = { equipment: c.equipment, main: muscleNames(main), helps: muscleNames(helps), minor: muscleNames(minor), notes, replace: true };
   if (c.entryName) {
     const ops = [{ type: 'upsert', row: { name: c.entryName, ...row } }];
     if (Muscles.norm(newName) !== Muscles.norm(c.entryName)) ops.push({ type: 'alias', name: c.entryName, alias: newName });
@@ -374,7 +381,7 @@ const pickerActions = {
     const name = p.ctx === 'alias' ? p.alias : p.query.trim();
     // Muscles typed in the search ("rear delts") start marked as Main.
     const k = Muscles.muscleKey(p.query);
-    p.create = { name: k ? '' : name, equipment: '', marks: k ? { [k]: 'main' } : {} };
+    p.create = { name: k ? '' : name, equipment: '', marks: k ? { [k]: 'main' } : {}, notes: '' };
     p.mode = 'create';
     render();
   },
@@ -413,7 +420,8 @@ const pickerActions = {
     const { db } = exerciseDb();
     const existing = db.index.get(Muscles.norm(name));
     if (existing && Muscles.norm(existing.name) === Muscles.norm(name)) return toast(`${existing.name} is already in the database`, 'error');
-    queueExerciseOp({ type: 'upsert', row: { name, equipment: c.equipment, main: muscleNames(main), helps: muscleNames(helps), minor: muscleNames(minor), aliases: p.ctx === 'alias' && Muscles.norm(p.alias) !== Muscles.norm(name) ? p.alias : '' } });
+    const notes = (document.getElementById('pick-notes')?.value ?? c.notes ?? '').trim().slice(0, 300);
+    queueExerciseOp({ type: 'upsert', row: { name, equipment: c.equipment, main: muscleNames(main), helps: muscleNames(helps), minor: muscleNames(minor), notes, aliases: p.ctx === 'alias' && Muscles.norm(p.alias) !== Muscles.norm(name) ? p.alias : '' } });
     toast(`${name} added to the exercise database`);
     if (p.ctx === 'alias') return closePicker();
     usePicked(name);
@@ -446,5 +454,8 @@ const pickerInputs = {
   },
   pickStep(el) {
     pickerUi().create.step = el.value;
+  },
+  pickNotes(el) {
+    pickerUi().create.notes = el.value;
   },
 };

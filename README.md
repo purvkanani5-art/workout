@@ -75,8 +75,16 @@ commas. The script never writes over rows that are there. Needs the v2.0 Code.gs
 - **Missed day (v2.7)**: when a scheduled day passes with no workout, the next workout offers "Pull A + Legs A":
   4 exercises from the missed day and 4 from the planned one. You tick which (remembered in More → Missed-day
   merge; "Change the 4 + 4" on the card), or tap "Just Legs A". The Sheet's Day column reads "Pull A + Legs A".
+- **Grip / form (v2.8)**: in More → Exercises & plans, ✎ an exercise and fill "Grip / form" (e.g. "Neutral
+  grip, elbows tucked"). It shows under the exercise while you log. Empty shows nothing. It is the Notes column
+  of the Sheet's Exercises tab, so you can also type it there.
 - **History** lists past workouts. On a new phone, **Sync history from Sheet** rebuilds the list from the
   last 400 days of rows.
+- **New phone or reinstall (v2.8)**: More → Google Sheet, paste the URL and token, **Test connection**, then
+  **Restore everything**. Settings, exercises and plans, every workout, missed days, small workouts,
+  measurements, recovery and even an unfinished workout come back from the Sheet. Photos come back from the
+  .bhimvault file in Files (More → Progress photos → Restore) with your passcode; Face ID is set up again.
+  Needs the v2.8 Code.gs (Log columns "Light day", "Made up (JSON)", "No watch"; draft row in Settings).
 - **Settings → Export** saves a JSON backup (including URL and token); **Import** restores it.
 
 ### Progressive overload (Progress screen)

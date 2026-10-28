@@ -385,7 +385,8 @@ const Muscles = (() => {
       const aliases = [...new Set(String(r.aliases || '').split(/[,;\n]/).map((s) => s.trim()).filter(Boolean))];
       const helps = [...new Set(keys(r.helps))].filter((k) => !main.includes(k));
       const minor = [...new Set(keys(r.minor))].filter((k) => !main.includes(k) && !helps.includes(k));
-      list.push({ name, equipment: String(r.equipment || '').trim(), main, helps, minor, aliases });
+      // notes (v2.8): the owner's grip / form cue for the exercise, the Sheet's Notes column; shown only when set.
+      list.push({ name, equipment: String(r.equipment || '').trim(), main, helps, minor, aliases, notes: String(r.notes || '').trim() });
     }
     const index = new Map(list.map((e) => [norm(e.name), e]));
     // Aliases never take over a real exercise name.
