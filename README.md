@@ -78,6 +78,12 @@ commas. The script never writes over rows that are there. Needs the v2.0 Code.gs
 - **Grip / form (v2.8)**: in More → Exercises & plans, ✎ an exercise and fill "Grip / form" (e.g. "Neutral
   grip, elbows tucked"). It shows under the exercise while you log. Empty shows nothing. It is the Notes column
   of the Sheet's Exercises tab, so you can also type it there.
+- **Time away (v2.9)**: More → Time away. Pick the kind (work travel, personal travel, gym vacation, holiday; add
+  your own), the first and last day and a note. Those days are not marked missed and ask for no reason; like a
+  missed day they pause the exercise clocks and push the lighter week back. Today shows the trip instead of a
+  workout (with "Start a workout anyway"), History lists it, and it travels with the settings copy to the Sheet.
+- **Recovery history (v2.9)**: More → Recovery history lists every morning's own sleep hours, HRV and resting HR
+  in columns with the day's score; the tiles show the latest morning first, then the averages.
 - **History** lists past workouts. On a new phone, **Sync history from Sheet** rebuilds the list from the
   last 400 days of rows.
 - **New phone or reinstall (v2.8)**: More → Google Sheet, paste the URL and token, **Test connection**, then

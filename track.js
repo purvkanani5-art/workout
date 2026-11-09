@@ -172,7 +172,13 @@ function weekSummary(endIso) {
   const inWeek = (d) => d >= start && d <= end;
   const sessions = state.history.filter((s) => inWeek(s.date));
   let planned = 0;
-  for (let d = start; d <= end && d <= today; d = Progress.addDays(d, 1)) if (scheduledDay(d)) planned++;
+  const away = []; // v2.9: scheduled days inside planned time away are not planned workouts (and not missed)
+  for (let d = start; d <= end && d <= today; d = Progress.addDays(d, 1)) {
+    if (!scheduledDay(d)) continue;
+    const x = awayOn(d);
+    if (x) away.push({ date: d, kind: x.kind });
+    else planned++;
+  }
   const missed = state.missed.filter((m) => inWeek(m.date)).sort((a, b) => a.date.localeCompare(b.date));
   const deload = sessions.some((s) => inDeload(s.date));
 
@@ -246,7 +252,7 @@ function weekSummary(endIso) {
 
   return {
     recovery, prs,
-    week, start, end, running: end >= today, planned, done: new Set(sessions.map((s) => s.date)).size, sessions, missed, deload,
+    week, start, end, running: end >= today, planned, done: new Set(sessions.map((s) => s.date)).size, sessions, missed, away, deload,
     counts, low, high, strength, best: changes[0] || null, worst: changes.length > 1 ? changes[changes.length - 1] : null,
     weight: weightNow !== null ? { now: weightNow, delta: weightBefore !== null ? weightNow - weightBefore : null } : null,
     waist: waistNow !== null ? { now: waistNow, delta: waistBefore !== null ? waistNow - waistBefore : null, field: waistField } : null,
@@ -267,6 +273,10 @@ function renderWeekSummary(w) {
         .map((m) => `${esc(m.dayType)} (${esc(WEEKDAYS[new Date(Date.parse(m.date)).getUTCDay()].slice(0, 3))}${m.reason ? `, ${esc(m.reason)}` : ', no reason yet'})`)
         .join('; ')}</li>`,
     );
+  }
+  if (w.away && w.away.length) {
+    const kinds = [...new Set(w.away.map((x) => x.kind))].join(', ');
+    rows.push(`<li><span>Away</span><strong>${w.away.length}</strong> training day${w.away.length === 1 ? '' : 's'} (${esc(kinds)}), not counted as missed</li>`);
   }
   if (w.strength) rows.push(`<li><span>Overall strength</span><strong class="${w.strength.pct >= 0 ? 'up' : 'down'}">${esc(Progress.signed(w.strength.pct))}</strong> over ${w.strength.n} exercise${w.strength.n === 1 ? '' : 's'}, vs their previous 4 weeks</li>`);
   if (w.best) rows.push(`<li><span>Best</span><strong>${esc(w.best.name)}</strong> ${esc(Progress.signed(w.best.pct))}</li>`);
@@ -740,19 +750,20 @@ function renderRecovery() {
     months.get(key).push(e);
   }
   const monthName = (k) => new Date(`${k}-15T00:00:00`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  // v2.9: one row per day with that day's own sleep hours, HRV and resting HR in columns (the owner: "daily, not just an average").
+  const num = (v, digits = 0) => `<span class="num">${Number.isFinite(v) ? esc(digits ? v.toFixed(digits) : String(Math.round(v))) : '<i>–</i>'}</span>`;
+  const colHead = '<div class="rechead" aria-hidden="true"><span>Day</span><span>Sleep h</span><span>HRV ms</span><span>RHR</span><span>Score</span></div>';
   const row = (e) => {
     const score = recoveryDayScore(e.date);
-    const bits = [
-      Number.isFinite(e.sleepHours) ? `${e.sleepHours.toFixed(1)} h` : '',
-      Number.isFinite(e.sleepScore) ? `sleep ${e.sleepScore}` : '',
-      Number.isFinite(e.hrv) ? `HRV ${Math.round(e.hrv)}` : '',
-      Number.isFinite(e.rhr) ? `RHR ${Math.round(e.rhr)}` : '',
-      Number.isFinite(e.soreness) ? `sore ${e.soreness}` : '',
-    ].filter(Boolean);
+    const bits = [Number.isFinite(e.soreness) ? `soreness ${e.soreness}` : '', Number.isFinite(e.sleepScore) ? `sleep score ${e.sleepScore}` : ''].filter(Boolean);
     const when = `${WEEKDAYS[new Date(Date.parse(e.date)).getUTCDay()].slice(0, 3)} ${formatDate(e.date, false)}`;
     if (ui.edit === e.date) return recEditHtml(e, when);
-    return `<button type="button" class="lrow recrow" data-action="recEdit" data-date="${esc(e.date)}"><span class="tx"><b>${esc(when)}</b><span>${esc(bits.join(' · ') || 'no numbers')}</span></span>${score !== null ? bandTag(score) : tag('–')}${CHEV}</button>`;
+    return `<button type="button" class="recrow" data-action="recEdit" data-date="${esc(e.date)}"><span class="tx"><b>${esc(when)}</b><span>${esc(bits.join(' · ') || 'tap to add soreness')}</span></span>${num(e.sleepHours, 1)}${num(e.hrv)}${num(e.rhr)}${score !== null ? bandTag(score) : tag('–')}</button>`;
   };
+  // Today's own numbers (the latest morning when today has none yet).
+  const latest = entries.find((e) => Number.isFinite(e.sleepHours) || Number.isFinite(e.hrv) || Number.isFinite(e.rhr)) || null;
+  const latestWhen = latest ? (latest.date === today ? 'today' : latest.date === Progress.addDays(today, -1) ? 'yesterday' : formatDate(latest.date, false)) : 'today';
+  const own = (k) => (latest && Number.isFinite(latest[k]) ? latest[k] : null);
   let shown = 0;
   const list = [...months.entries()]
     .map(([k, list]) => {
@@ -760,21 +771,26 @@ function renderRecovery() {
       shown += list.length;
       const avg = list.map((e) => recoveryDayScore(e.date)).filter((v) => v !== null);
       const head = `${monthName(k)}${avg.length ? ` · average ${Math.round(avg.reduce((a, b) => a + b, 0) / avg.length)}` : ''}`;
-      return `<details class="recmonth" ${open ? 'open' : ''}><summary class="sublabel">${esc(head)}</summary><div class="card flush">${list.map(row).join('')}</div></details>`;
+      return `<details class="recmonth" ${open ? 'open' : ''}><summary class="sublabel">${esc(head)}</summary>${colHead}<div class="card flush">${list.map(row).join('')}</div></details>`;
     })
     .join('');
   return `
     ${topbar('Recovery', { href: 'more', label: 'More' })}
-    <p class="sub">Every morning's sleep, HRV, resting HR and soreness, and your score over time</p>
+    <p class="sub">Every morning's own sleep, HRV, resting HR and soreness, day by day, and your score over time</p>
     <div class="sgroup">${tiles([
-      [recRound(recoveryDayScore(today)), 'Today'],
-      [recRound(recAverage('score', days(7), today)), '7-day average'],
-      [recRound(avg30), '30-day average'],
+      [`${recRound(own('sleepHours'), 1)} h`, `Sleep, ${latestWhen}`],
+      [`${recRound(own('hrv'))} ms`, `HRV, ${latestWhen}`],
+      [`${recRound(own('rhr'))}`, `Resting HR, ${latestWhen}`],
     ])}
     ${tiles([
-      [`${recRound(recAverage('sleepHours', days(7), today), 1)} h`, 'Sleep, 7 days'],
-      [`${recRound(recAverage('hrv', days(7), today))} ms`, 'HRV, 7 days'],
-      [`${recRound(recAverage('rhr', days(7), today))}`, 'Resting HR, 7 days'],
+      [recRound(recoveryDayScore(today)), 'Score today'],
+      [recRound(recAverage('score', days(7), today)), 'Score, 7-day average'],
+      [recRound(avg30), 'Score, 30-day average'],
+    ])}
+    ${tiles([
+      [`${recRound(recAverage('sleepHours', days(7), today), 1)} h`, 'Sleep, 7-day average'],
+      [`${recRound(recAverage('hrv', days(7), today))} ms`, 'HRV, 7-day average'],
+      [`${recRound(recAverage('rhr', days(7), today))}`, 'Resting HR, 7-day average'],
     ])}
     ${avg30 !== null && prev30 !== null ? `<p class="hint gnote">30-day average ${esc(Progress.signed(avg30 - prev30, 0, ''))} vs the 30 days before (${esc(Math.round(prev30))}).</p>` : ''}</div>
     ${group(
@@ -791,7 +807,7 @@ function renderRecovery() {
       'History',
       `<span class="note">${entries.length} day${entries.length === 1 ? '' : 's'}</span>`,
       `${entries.length ? list : '<div class="card"><p class="empty" style="padding:8px">No mornings recorded yet. Do the morning check on Today.</p></div>'}
-      <p class="hint gnote syncline">${icon('sync')}<span>Pulled from the Sheet's Recovery tab automatically (last ${pulledAgo('recovery')}). Tap a day to change its sleep score or soreness.</span></p>`,
+      <p class="hint gnote syncline">${icon('sync')}<span>Pulled from the Sheet's Recovery tab automatically (last ${pulledAgo('recovery')}). Sleep hours, HRV and resting HR are each morning's own numbers from the Shortcut; a dash means nothing arrived that day. Tap a day to change its sleep score or soreness.</span></p>`,
     )}`;
 }
 

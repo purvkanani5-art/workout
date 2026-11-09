@@ -2103,8 +2103,25 @@ details.customday[open] > summary .chev { transform: rotate(90deg); }
 .recmonth { margin-top: 10px; }
 .recmonth > summary { cursor: pointer; list-style: none; min-height: 36px; display: flex; align-items: center; margin: 0 4px; }
 .recmonth > summary::-webkit-details-marker { display: none; }
-.recrow .tag { flex: none; margin-left: 8px; min-width: 38px; text-align: center; }
-.recedit { padding: 12px 14px; border-top: 1px solid var(--border); }
+/* v2.9: one row per day, numbers in columns (Sleep h · HRV · RHR · Score) */
+.rechead { display: grid; grid-template-columns: 1fr 50px 50px 46px 44px; gap: 6px; padding: 8px 14px 4px; font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; text-align: right; }
+.rechead span:first-child { text-align: left; }
+.recrow { display: grid; grid-template-columns: 1fr 50px 50px 46px 44px; gap: 6px; align-items: center; width: 100%; min-height: 54px; padding: 8px 14px; background: none; border: 0; text-align: left; cursor: pointer; position: relative; color: var(--text); font: inherit; }
+.recrow + .recrow::before, .recrow + .recedit::before, .recedit + .recrow::before { content: ''; position: absolute; top: 0; left: 14px; right: 0; height: 1px; background: var(--border); }
+.recrow .tx { min-width: 0; }
+.recrow .tx b { display: block; font-weight: 500; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recrow .tx span { display: block; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recrow .num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 650; font-size: 16px; }
+.recrow .num i { color: var(--muted); font-style: normal; font-weight: 400; }
+.recrow .tag { justify-self: end; min-width: 40px; text-align: center; justify-content: center; }
+.recedit { position: relative; }
+/* v2.9: Time away */
+.away-card .ahead { display: flex; gap: 12px; align-items: center; }
+.away-card .ahead .tx { min-width: 0; }
+.away-card .ahead .hint { margin: 2px 0 0; }
+.input.ftext { width: auto; max-width: 52%; flex: none; min-height: 40px; border-radius: 10px; background: var(--chip-bg); border-color: transparent; padding: 0 12px; font-weight: 600; }
+.btn.wide { width: 100%; }
+.recedit { padding: 12px 14px; }
 .banner.notice.lightday { margin-top: 12px; }
 .legend .prefill, legend .prefill { font-weight: 400; }
 .insight.prs { border-left: 3px solid var(--ok); }

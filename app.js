@@ -4,7 +4,7 @@
    One `state` object; each screen is re-rendered from it after every change.
    Everything the user does is saved to localStorage at once, so killing Safari loses nothing. */
 
-const APP_VERSION = '2.8.0';
+const APP_VERSION = '2.9.0';
 const HISTORY_LIMIT = 400;
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_REPS = [6, 8, 10, 12, 14]; // even numbers 5–15 (owner's choice); editable in Settings; Other and Failure always follow
@@ -46,6 +46,8 @@ const KEYS = {
 // Weekday (0 = Sunday) → day type; '' = rest. The owner trains Monday to Saturday. Editable in Settings.
 const DEFAULT_SCHEDULE = { 0: '', 1: 'Push A', 2: 'Pull A', 3: 'Legs A', 4: 'Push B', 5: 'Pull B', 6: 'Legs B' };
 const DEFAULT_MISS_REASONS = ['Sick', 'Injury or pain', 'Tired or sore', 'Work', 'Travel', 'Family', 'Planned rest', 'Other'];
+// v2.9: kinds of planned time away (More → Time away); editable there.
+const DEFAULT_AWAY_KINDS = ['Work travel', 'Personal travel', 'Gym vacation', 'Holiday'];
 
 // Muscle group of each exercise in the owner's plan, for the weekly-sets count. Editable per exercise in Settings.
 const DEFAULT_MUSCLES = {
@@ -266,6 +268,8 @@ const state = {
     newQuestion: '',
     restoring: '', // v2.8: the step "Restore everything from the Sheet" is on, '' when idle
     newReason: '',
+    away: { kind: '', from: '', to: '', note: '' }, // v2.9: the Time away form
+    newAwayKind: '',
     startPicked: false, // the owner chose a day on Home, so it no longer follows the schedule
     summaryWeek: null, // Progress → weekly summary shown (week end date)
   },
@@ -345,6 +349,84 @@ function missReasons() {
   return Array.isArray(state.settings.missReasons) && state.settings.missReasons.length ? state.settings.missReasons : DEFAULT_MISS_REASONS;
 }
 
+/* ------------------------------- v2.9: planned time away (work travel, personal travel, gym vacation, holidays) */
+// Lives in settings (`settings.away`), so the Settings copy carries it to the Sheet and back; no Code.gs change.
+
+function awayKinds() {
+  return Array.isArray(state.settings.awayKinds) && state.settings.awayKinds.length ? state.settings.awayKinds : DEFAULT_AWAY_KINDS;
+}
+
+const isIsoDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s));
+
+/** Planned time away, oldest first: [{ id, kind, from, to, note }]. */
+function awayList() {
+  return (Array.isArray(state.settings.away) ? state.settings.away : []).filter((x) => x && isIsoDate(x.from) && isIsoDate(x.to)).sort((x, y) => x.from.localeCompare(y.from));
+}
+
+/** The away period a date falls in, or null. */
+function awayOn(iso) {
+  return awayList().find((x) => x.from <= iso && iso <= x.to) || null;
+}
+
+/** Scheduled training days inside away periods after `from` up to and including `to` (only days that train `exercise` when given). */
+function awayTrainingDays(from, to, exercise = null) {
+  const out = [];
+  for (const x of awayList()) {
+    if (x.to <= from || x.from > to) continue;
+    for (let d = x.from > from ? x.from : Progress.addDays(from, 1); d <= x.to && d <= to; d = Progress.addDays(d, 1)) {
+      const day = scheduledDay(d);
+      if (!day) continue;
+      if (exercise && !dayExercises(day).includes(exercise)) continue;
+      out.push(d);
+    }
+  }
+  return out;
+}
+
+/** Scheduled training days an away period covers. */
+function awayDaysCount(x) {
+  let n = 0;
+  for (let d = x.from; d <= x.to; d = Progress.addDays(d, 1)) if (scheduledDay(d)) n++;
+  return n;
+}
+
+/** "Tue 12 Nov" or "12 Nov – 16 Nov". */
+function awayRangeText(x) {
+  if (x.from === x.to) return `${WEEKDAYS[new Date(Date.parse(x.from)).getUTCDay()].slice(0, 3)} ${formatDate(x.from, false)}`;
+  return `${formatDate(x.from, false)} – ${formatDate(x.to, false)}`;
+}
+
+/** The current away period, else the next one, else null. */
+function awayNext() {
+  const today = todayISO();
+  return awayList().find((x) => x.to >= today) || null;
+}
+
+/** Add a period; returns an error message or ''. Days inside it already marked missed are taken back. */
+function addAway({ kind, from, to, note }) {
+  if (!isIsoDate(from) || !isIsoDate(to)) return 'Pick the first and the last day';
+  if (to < from) return 'The last day is before the first';
+  if (awayList().some((x) => x.from <= to && from <= x.to)) return 'Those days overlap time away already planned';
+  const kinds = awayKinds();
+  const entry = { id: uuid(), kind: kinds.includes(kind) ? kind : kinds[0], from, to, note: String(note || '').trim(), savedAt: nowISO() };
+  state.settings.away = [...awayList(), entry];
+  save(KEYS.settings, state.settings);
+  detectMissed();
+  return '';
+}
+
+function removeAway(id) {
+  state.settings.away = awayList().filter((x) => x.id !== id);
+  save(KEYS.settings, state.settings);
+  detectMissed(); // past days in it are marked missed again
+}
+
+/** One line for More and the Training card: "Work travel · 12 Nov – 16 Nov · 3 training days". */
+function awayLine(x) {
+  const n = awayDaysCount(x);
+  return `${x.kind} · ${awayRangeText(x)}${n ? ` · ${n} training day${n === 1 ? '' : 's'}` : ''}`;
+}
+
 /** Dates with a workout saved (or one in progress), so they are never called missed. */
 function trainedDates() {
   const dates = new Set(state.history.map((s) => s.date));
@@ -369,7 +451,8 @@ function detectMissed() {
   const have = new Map(state.missed.map((m) => [m.date, m]));
   let changed = false;
   for (const m of [...state.missed]) {
-    if (trained.has(m.date)) {
+    if (trained.has(m.date) || awayOn(m.date)) {
+      // trained after all, or the day is inside planned time away (v2.9): not a missed day
       state.missed = state.missed.filter((x) => x.id !== m.id);
       queueMissed({ id: m.id, deleted: true });
       changed = true;
@@ -378,7 +461,7 @@ function detectMissed() {
   const from = state.settings.scheduleFrom > Progress.addDays(today, -60) ? state.settings.scheduleFrom : Progress.addDays(today, -60);
   for (let d = from; d < today; d = Progress.addDays(d, 1)) {
     const dayType = scheduledDay(d);
-    if (!dayType || trained.has(d) || have.has(d)) continue;
+    if (!dayType || trained.has(d) || have.has(d) || awayOn(d)) continue;
     const entry = { id: `missed-${d}`, date: d, dayType, reason: '', note: '', savedAt: nowISO() };
     state.missed.push(entry);
     queueMissed(entry);
@@ -442,7 +525,7 @@ function mergeCandidate(date) {
   let d = Progress.addDays(date, -1);
   for (let i = 0; i < 14; i++, d = Progress.addDays(d, -1)) {
     if (state.history.some((s) => s.date === d)) return null; // trained since: nothing to make up
-    if (!scheduledDay(d)) continue;
+    if (!scheduledDay(d) || awayOn(d)) continue; // rest days and planned time away (v2.9) are looked past
     const m = state.missed.find((x) => x.date === d);
     return m && m.dayType !== next && dayExercises(m.dayType).length ? { missed: m, next } : null;
   }
@@ -889,7 +972,8 @@ function dayExercises(dayType) {
 function missedPause(exercise, from, to) {
   const per = Number(state.settings.progression.missedPauseDays) || 0;
   if (!per) return 0;
-  return state.missed.filter((m) => m.date > from && m.date <= to && dayExercises(m.dayType).includes(exercise)).length * per;
+  const missed = state.missed.filter((m) => m.date > from && m.date <= to && dayExercises(m.dayType).includes(exercise)).length;
+  return (missed + awayTrainingDays(from, to, exercise).length) * per; // v2.9: planned time away pauses like a missed day
 }
 
 /** A muscle's weekly target: { sets, direct } from Settings → Muscle set targets, else the owner's table (muscles.js).
@@ -1284,7 +1368,7 @@ function recoveryState() {
   const firstDate = stats.map((s) => s.date).filter(Boolean).sort()[0] || null;
   const base = lastEnd && (!firstDate || lastEnd > firstDate) ? lastEnd : firstDate;
   // Missed workouts are rest the body got anyway: each pushes the scheduled lighter week back a little.
-  const missedSince = base ? state.missed.filter((m) => m.date > base).length : 0;
+  const missedSince = base ? state.missed.filter((m) => m.date > base).length + awayTrainingDays(base, today).length : 0; // v2.9: + time away
   const pushed = missedSince * (Number(state.settings.progression.missedSchedDays) || 0);
   const next = base ? Progress.addDays(base, r.schedWeeks * 7 + pushed) : null;
   const out = { active: null, reasons: [], due: false, snoozed: false, next, last: lastEnd, base, pushed };
@@ -2008,6 +2092,8 @@ function trainingCard() {
       [`${s.sets.length} sets`, s.score ? `rated ${s.score}/10` : '', s.synced ? 'in the Sheet' : 'waiting to sync'].filter(Boolean).join(' · '),
     )}</p></div></div><a class="btn link small" href="#workout">Start another workout ›</a></div>`;
   }
+  const away = awayOn(today);
+  if (away) return awayCardHtml(away);
   const planned = scheduledDay(today);
   if (!planned) {
     return `<div class="card stack"><p style="margin:0"><b>Rest day</b> on your schedule.</p><a class="btn secondary" href="#workout">Start a workout anyway</a></div>`;
@@ -2026,6 +2112,31 @@ function trainingCard() {
     <button type="button" class="btn primary" data-action="startToday">Start ${esc(planned)}</button>
     <a class="btn link small" href="#workout">Another day ›</a>
   </div>`;
+}
+
+/** v2.9: Today's Training card during planned time away. */
+function awayCardHtml(x) {
+  const today = todayISO();
+  const planned = scheduledDay(today);
+  const back = Progress.addDays(x.to, 1);
+  const n = awayDaysCount(x);
+  return `<div class="card stack away-card">
+    <div class="ahead">${appIcon('suitcase', 'sky')}<div class="tx"><b class="big-name">${esc(x.kind)}</b><p class="hint">${esc(awayRangeText(x))} · back ${esc(WEEKDAYS[new Date(Date.parse(back)).getUTCDay()])} ${esc(formatDate(back, false))}${x.note ? ` · ${esc(x.note)}` : ''}</p></div></div>
+    <p class="small muted" style="margin:0">${planned ? `${esc(planned)} was on the schedule today. ` : ''}${n ? `${n} training day${n === 1 ? '' : 's'} skipped, not counted as missed.` : 'No training days in it.'}</p>
+    <a class="btn secondary" href="#workout">Start a workout anyway</a>
+  </div>`;
+}
+
+/** v2.9: the next planned time away when it starts within 14 days (under Training on Today). */
+function awayAheadHtml() {
+  const today = todayISO();
+  const x = awayNext();
+  if (!x || x.from <= today || Progress.daysBetween(today, x.from) > 14) return '';
+  const left = Progress.daysBetween(today, x.from);
+  const n = awayDaysCount(x);
+  return `<div class="next-deload">${icon('suitcase')}<span><strong>${esc(x.kind)} ${esc(left === 1 ? 'tomorrow' : `in ${left} days`)}</strong> · ${esc(awayRangeText(x))}${
+    n ? ` · ${n} training day${n === 1 ? '' : 's'} not counted as missed` : ''
+  }</span></div>`;
 }
 
 /** Calorie target, weight trend and body fat in one card. */
@@ -2051,7 +2162,7 @@ function renderHome() {
   const morningDone = Number.isFinite(e.soreness) && !state.ui.morning.editing;
   const attention = homeBanners();
   const rc = recoveryCard('home');
-  const rcInfo = rc.includes('class="alert') ? '' : rc;
+  const rcInfo = [awayAheadHtml(), rc.includes('class="alert') ? '' : rc].filter(Boolean).join('');
   const waiting = state.outbox.length;
   if (waiting) {
     attention.unshift(
@@ -2097,7 +2208,7 @@ function renderWorkoutHome() {
     const ago = last ? Progress.daysBetween(last, date) : null;
     return `<button type="button" class="lrow" data-action="quickStart" data-day="${esc(day)}">${appIcon('dumbbell', day === planned ? 'saffron' : 'grey')}
       <span class="tx"><b>${esc(day)}</b><span>${n} exercise${n === 1 ? '' : 's'}${last ? ` · last done ${ago === 0 ? 'today' : ago === 1 ? 'yesterday' : `${ago} days ago`}` : ' · not done yet'}</span></span>
-      ${day === planned ? tag(isToday ? 'Today' : 'Planned', 'accent') : ''}<span class="go">Start</span></button>`;
+      ${day === planned ? (awayOn(date) ? tag('Away') : tag(isToday ? 'Today' : 'Planned', 'accent')) : ''}<span class="go">Start</span></button>`;
   };
   return `
     <h1 class="large">Workout</h1>
@@ -2169,6 +2280,7 @@ const GLYPHS = {
   leaf: '<path d="M5 19c0-8 5-13 14-14-1 9-6 14-14 14z"/><path d="M5 19l7-7"/>',
   body: '<circle cx="12" cy="4.5" r="2.2"/><path d="M6 9l6 1 6-1M12 10v5M9 21l3-6 3 6"/>',
   cross: '<path d="M7 7l10 10M17 7L7 17"/>',
+  suitcase: '<rect x="3.5" y="7.5" width="17" height="12.5" rx="2"/><path d="M9 7.5V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2.5M9 7.5v12.5M15 7.5v12.5"/>',
   search: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   watch: '<rect x="6.5" y="6.5" width="11" height="11" rx="3"/><path d="M9 6.5L9.5 3h5l.5 3.5M9 17.5l.5 3.5h5l.5-3.5M12 9.5V12l1.5 1"/>',
@@ -2196,7 +2308,7 @@ const CHEV = '<svg class="chev" width="9" height="15" viewBox="0 0 10 16" aria-h
 
 // Settings sections opened from More: [data-sec name, title, icon, colour, one-line summary].
 const SETTINGS_SECTIONS = {
-  schedule: ['Schedule', 'calendar', 'red'], merge: ['Missed-day merge', 'sync', 'orange'], exercises: ['Exercises & plans', 'dumbbell', 'ink'], progression: ['Progression', 'trend', 'green'], targets: ['Muscle set targets', 'dumbbell', 'saffron'],
+  schedule: ['Schedule', 'calendar', 'red'], away: ['Time away', 'suitcase', 'sky'], merge: ['Missed-day merge', 'sync', 'orange'], exercises: ['Exercises & plans', 'dumbbell', 'ink'], progression: ['Progression', 'trend', 'green'], targets: ['Muscle set targets', 'dumbbell', 'saffron'],
   logging: ['Logging & rest timer', 'timer', 'grey'], questions: ['End-of-workout questions', 'chat', 'indigo'], recovery: ['Lighter weeks', 'leaf', 'green'],
   calories: ['Calories & body fat', 'flame', 'saffron'], recoveryScore: ['Recovery score & Shortcut', 'heart', 'pink'], body: ['Measurements & photos', 'ruler', 'teal'],
   sheet: ['Google Sheet', 'sheet', 'gsheet'], copy: ['Settings copy', 'cloud', 'sky'], backup: ['Backup', 'download', 'blue'],
@@ -2214,6 +2326,7 @@ function renderMore() {
     <p class="sub">Settings, history and your data</p>
     ${group('Training', '', `<div class="card flush">
       ${sec('schedule', [1, 2, 3, 4, 5, 6, 0].map((i) => sched[i] ? `${WEEKDAYS[i].slice(0, 3)} ${sched[i]}` : '').filter(Boolean).slice(0, 2).join(' · ') + ' …')}
+      ${sec('away', awayNext() ? awayLine(awayNext()) : 'Work travel, personal travel, gym vacation, holidays')}
       ${sec('exercises', `${manageDays().length} days · ${allKnownExercises().length} exercises`)}
       ${sec('merge', `${mergeCount()} + ${mergeCount()} exercises when a day is missed`)}
       ${sec('progression', 'When to add weight, warnings')}
@@ -2248,7 +2361,9 @@ function nextWorkoutHtml(planned) {
   const today = st.date === todayISO();
   const when = `${today ? 'Today' : formatDate(st.date, false)} · ${WEEKDAYS[new Date(Date.parse(st.date)).getUTCDay()]}`;
   let line;
-  if (!planned) line = `${esc(when)}: <strong>rest day</strong> on your schedule.`;
+  const away = awayOn(st.date);
+  if (away) line = `${esc(when)}: <strong>${esc(away.kind)}</strong> ${esc(awayRangeText(away))} · not counted as missed.`;
+  else if (!planned) line = `${esc(when)}: <strong>rest day</strong> on your schedule.`;
   else {
     const last = state.history.filter((s) => sessionHasDay(s, planned) && s.date < st.date).map((s) => s.date).sort().pop();
     line = `${esc(when)}: <strong>${esc(planned)}</strong>${last ? ` · last done ${esc(formatDate(last, false))} (${Progress.daysBetween(last, st.date)} days ago)` : ''}`;
@@ -3035,7 +3150,7 @@ function renderWellbeing(session, locked) {
 
 function renderHistory() {
   // Workouts and missed days in one list, newest first.
-  const rows = [...sortedHistory().map((s) => ({ date: s.date, s })), ...state.missed.map((m) => ({ date: m.date, m }))].sort((a, b) =>
+  const rows = [...sortedHistory().map((s) => ({ date: s.date, s })), ...state.missed.map((m) => ({ date: m.date, m })), ...awayList().map((x) => ({ date: x.from, a: x }))].sort((a, b) =>
     (b.date || '').localeCompare(a.date || ''),
   );
   const day = (iso) => `${WEEKDAYS[new Date(Date.parse(iso)).getUTCDay()]?.slice(0, 3) || ''} ${formatDate(iso, false)}`;
@@ -3043,8 +3158,11 @@ function renderHistory() {
     const s = madeUpIn(m.id);
     return s ? ` · made up in ${s.dayType} on ${formatDate(s.date, false)}` : '';
   };
-  const row = ({ s, m }) =>
-    m
+  const row = ({ s, m, a }) =>
+    a
+      ? `<a class="lrow" href="#settings/away">${appIcon('suitcase', 'sky')}
+          <span class="tx"><b>${esc(a.kind)}</b><span>${esc(awayRangeText(a))}${awayDaysCount(a) ? ` · ${awayDaysCount(a)} training day${awayDaysCount(a) === 1 ? '' : 's'} not counted as missed` : ''}${a.note ? ` · ${esc(a.note)}` : ''}</span></span>${CHEV}</a>`
+      : m
       ? `<button type="button" class="lrow missed" data-action="missedReason" data-id="${esc(m.id)}" data-edit="1">${appIcon('cross', m.reason ? 'grey' : 'red')}
           <span class="tx"><b>${esc(m.dayType)} · missed</b><span>${esc(day(m.date))} · ${m.reason ? esc(m.reason) : 'tap to add the reason'}${m.note ? ` · ${esc(m.note)}` : ''}${esc(madeUp(m))}</span></span>
           ${m.reason ? '' : tag('No reason', 'bad')}</button>`
@@ -3175,6 +3293,7 @@ function renderSettings() {
     </section>
 
     ${renderScheduleSettings()}
+    ${renderAwaySettings()}
     ${renderMergeSettings()}
     ${renderProgressionSettings()}
     ${renderTargetSettings()}
@@ -3290,6 +3409,66 @@ function renderSettings() {
       </section>`,
       )}
       <p class="version">Bhimlekha v${esc(APP_VERSION)} · भीमलेखा</p>
+    </section>`;
+}
+
+/** v2.9: planned time away: work travel, personal travel, a gym vacation or holidays. Not missed, no reason asked. */
+function renderAwaySettings() {
+  const ui = state.ui.away;
+  const today = todayISO();
+  const kinds = awayKinds();
+  const kind = kinds.includes(ui.kind) ? ui.kind : kinds[0];
+  const list = awayList();
+  const upcoming = list.filter((x) => x.to >= today);
+  const past = list.filter((x) => x.to < today).reverse();
+  const row = (x) => {
+    const n = awayDaysCount(x);
+    const now = x.from <= today && today <= x.to;
+    return erow(
+      `${x.kind}${now ? ' · now' : ''}`,
+      `${awayRangeText(x)}${n ? ` · ${n} training day${n === 1 ? '' : 's'}` : ' · no training days'}${x.note ? ` · ${x.note}` : ''}`,
+      ibtn('trash', `data-action="removeAway" data-id="${esc(x.id)}"`, `Remove ${x.kind}, ${awayRangeText(x)}`),
+    );
+  };
+  return `
+    <section class="secpage" data-sec="away">
+      <p class="sub">Days you will not train: work travel, personal travel, a gym break or holidays. Those days are not marked missed and ask for no reason. Like a missed day, each pauses its exercises' clocks and pushes the lighter week back. Saved in the Sheet with your settings copy.</p>
+      ${group(
+        'Add time away',
+        '',
+        `<div class="card flush">
+          ${frow(
+            'away-kind',
+            'Kind',
+            '',
+            `<select id="away-kind" class="select fsel" data-change="awayKind">${kinds.map((k) => `<option value="${esc(k)}" ${k === kind ? 'selected' : ''}>${esc(k)}</option>`).join('')}</select>`,
+          )}
+          ${frow('away-from', 'First day', '', `<input id="away-from" class="input fdate" type="date" value="${esc(ui.from)}" data-change="awayFrom" />`)}
+          ${frow('away-to', 'Last day', 'Same as the first for one day', `<input id="away-to" class="input fdate" type="date" value="${esc(ui.to)}" min="${esc(ui.from || '')}" data-change="awayTo" />`)}
+          ${frow('away-note', 'Note', 'Optional', `<input id="away-note" class="input ftext" value="${esc(ui.note)}" placeholder="e.g. Mumbai" data-input="awayNote" autocomplete="off" />`)}
+          <div class="frow"><button type="button" class="btn primary wide" data-action="addAway">Add ${esc(kind.toLowerCase())}</button></div>
+        </div>`,
+      )}
+      ${group(
+        'Planned',
+        `<span class="note">${upcoming.length}</span>`,
+        upcoming.length ? `<div class="card flush">${upcoming.map(row).join('')}</div>` : '<div class="card"><p class="empty" style="padding:8px">Nothing planned. Add the days above.</p></div>',
+      )}
+      ${past.length ? `<details class="more-rows"><summary>Past · ${past.length}</summary><div class="card flush">${past.map(row).join('')}</div></details>` : ''}
+      ${group(
+        'Kinds',
+        '',
+        `<section class="card stack">
+        <div class="pills">${kinds
+          .map((k, i) => `<span class="pill">${esc(k)}<button type="button" class="pill-x" data-action="removeAwayKind" data-index="${i}" aria-label="Remove ${esc(k)}">×</button></span>`)
+          .join('')}</div>
+        <div class="input-row">
+          <label for="away-kind-new" class="sr-only">New kind</label>
+          <input id="away-kind-new" class="input" value="${esc(state.ui.newAwayKind)}" placeholder="e.g. Exams" data-input="newAwayKind" autocomplete="off" />
+          <button type="button" class="btn" data-action="addAwayKind">Add</button>
+        </div>
+      </section>`,
+      )}
     </section>`;
 }
 
@@ -4456,6 +4635,46 @@ const actions = {
     render();
   },
 
+  // v2.9: planned time away (More → Time away)
+  addAway() {
+    const ui = state.ui.away;
+    const kind = awayKinds().includes(ui.kind) ? ui.kind : awayKinds()[0];
+    const err = addAway({ kind, from: ui.from, to: ui.to, note: ui.note });
+    if (err) return toast(err, 'error');
+    state.ui.away = { kind, from: '', to: '', note: '' };
+    toast(`${kind} added`);
+    render();
+  },
+  async removeAway(el) {
+    const x = awayList().find((y) => y.id === el.dataset.id);
+    if (!x) return;
+    const ok = await openModal({
+      title: `Remove ${x.kind}?`,
+      message: `${awayRangeText(x)}. Scheduled days in it that have already passed are marked missed again.`,
+      confirmText: 'Remove',
+      danger: true,
+    });
+    if (!ok) return;
+    removeAway(x.id);
+    render();
+  },
+  addAwayKind() {
+    const k = state.ui.newAwayKind.trim();
+    if (!k) return toast('Type the kind', 'error');
+    if (awayKinds().some((x) => x.toLowerCase() === k.toLowerCase())) return toast('Already in the list', 'error');
+    state.settings.awayKinds = [...awayKinds(), k];
+    state.ui.newAwayKind = '';
+    save(KEYS.settings, state.settings);
+    render();
+  },
+  removeAwayKind(el) {
+    const list = awayKinds().filter((_, i) => i !== Number(el.dataset.index));
+    if (!list.length) return toast('Keep at least one kind', 'error');
+    state.settings.awayKinds = list;
+    save(KEYS.settings, state.settings);
+    render();
+  },
+
   addQuestion() {
     const q = state.ui.newQuestion.trim();
     if (!q) return toast('Type the question', 'error');
@@ -4732,6 +4951,19 @@ const changes = {
     save(KEYS.settings, state.settings);
     render();
   },
+  // v2.9: the Time away form (kept in state.ui.away until Add)
+  awayKind(el) {
+    state.ui.away.kind = el.value;
+    render();
+  },
+  awayFrom(el) {
+    state.ui.away.from = el.value;
+    if (!state.ui.away.to || state.ui.away.to < el.value) state.ui.away.to = el.value; // one day until a later last day is picked
+    render();
+  },
+  awayTo(el) {
+    state.ui.away.to = el.value;
+  },
   mergeCount(el) {
     const v = Math.min(12, Math.max(1, Math.round(Number(el.value)) || 4));
     state.settings.merge = { ...(state.settings.merge || { picks: {} }), count: v };
@@ -4846,6 +5078,12 @@ const inputs = {
   },
   newReason(el) {
     state.ui.newReason = el.value;
+  },
+  awayNote(el) {
+    state.ui.away.note = el.value;
+  },
+  newAwayKind(el) {
+    state.ui.newAwayKind = el.value;
   },
   newRep(el) {
     state.ui.newRep = el.value;

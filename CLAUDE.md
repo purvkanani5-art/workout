@@ -514,3 +514,23 @@ Local testing on Windows: `npx serve .` (or `python -m http.server 8000`) then o
       open workout (`offerRemoteDraft`). Progress in `state.ui.restoring`. Local copies of workouts win, as before.
     - Still outside the Sheet by the owner's rules: photos (.bhimvault to Files; Face ID re-enrols per device) and the
       script URL + token (typed once; the More → Backup JSON holds them).
+35. **v2.9.0: daily recovery numbers, and planned time away** (owner 2026-11-09: "the recovery tab to show daily rhr, hrv,
+    number of sleep hours, for daily when entered, not just an average"; "mark future workouts as planned work travel,
+    personal travel or gym vacation or holidays").
+    - **Recovery page**: the History list is one row per morning with that day's own numbers in columns (`.rechead` /
+      `.recrow`: Day · Sleep h · HRV ms · RHR · Score; a dash when the Shortcut sent nothing that day); the sub-line
+      keeps soreness and the Watch sleep score; tapping a row still opens the editor. Tiles: the latest morning's own
+      sleep / HRV / resting HR first (labelled "today", "yesterday" or the date), then the score tiles, then the 7-day
+      averages, all labelled as averages. No data change.
+    - **Time away** = `settings.away` [{ id, kind, from, to, note }] + `settings.awayKinds` (default Work travel,
+      Personal travel, Gym vacation, Holiday; editable), so the Settings copy carries it to the Sheet and Restore brings
+      it back; no Code.gs change. More → **Time away** (`#settings/away`): kind, first day, last day, note, Add;
+      Planned list with delete (confirm; past days in it become missed again), Past folded, Kinds pills. Overlapping
+      periods are refused.
+    - Effects (`awayOn`, `awayTrainingDays`): `detectMissed` never marks a day inside a period (and takes back any
+      missed entry already there, deleting its Sheet row); `mergeCandidate` looks past away days like rest days; each
+      scheduled day inside a period pauses its exercises' clocks (`missedPause`) and pushes the lighter week back
+      (`recoveryState`) exactly like a missed day; `weekSummary` counts them as `away`, not planned. Today's Training
+      card shows the kind, dates, return day and "Start a workout anyway"; a period starting within 14 days shows a
+      line under Training; the Workout tab's date line and "Away" tag say so; History lists each period at its first
+      day (tap → the section).
